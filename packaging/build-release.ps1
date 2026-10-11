@@ -81,11 +81,22 @@ try {
   $reqs = @('{"id":1,"cmd":"ping"}', '{"id":2,"cmd":"gpu_info"}', '{"id":3,"cmd":"get_config"}') -join [Environment]::NewLine
   $out = @($reqs | & $sc 2>$null)
   if ($out.Count -lt 3) { throw (' sidecar 只回了 ' + $out.Count + ' 条响应，应该 3 条') }
+  $objs = @()
   foreach ($line in $out) {
     $o = $line | ConvertFrom-Json
     if (-not $o.ok) { throw (' sidecar 命令失败：' + $o.error) }
+    $objs += $o
   }
   Write-Output ('  ping / gpu_info / get_config 都通过（' + $out.Count + ' 条响应）')
+  # 自报版本必须等于本次要发的版本号 —— 这一条是踩过坑才加的：
+  # cargo 按**源码**变化决定重建，只改 Cargo.toml 里的版本号不一定触发 framegen-core 重新编译，
+  # 于是侧车里的 SELF_VERSION 还是上一版；发出去以后程序内更新检查会把新版判成旧版，
+  # 用户装完又被提示更新到同一版（死循环）。实测 1.0.3 的侧车自报 1.0.2。
+  $vc = ($objs | Where-Object { $_.id -eq 3 }).result.version
+  if ($vc -ne $version) {
+    throw (' sidecar 自报版本 ' + $vc + ' != 本次要发的 ' + $version + '。先 cargo clean -p framegen-core，再重新 cargo build --release。')
+  }
+  Write-Output ('  sidecar 自报版本与要发的一致：' + $vc)
 } finally {
   $env:FGM_DATA_DIR = $prevDataDir
   Remove-Item $smoke -Recurse -Force -ErrorAction SilentlyContinue
