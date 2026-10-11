@@ -6,6 +6,9 @@
      .ov     页面内弹层   .gate  显卡闸门提示    .stack 竖排卡片容器（控制间距）  */
 
 :root{
+  /* 声明配色方案：原生控件（下拉框、滚动条、输入框光标）才会按浅色渲染 ——
+     不写的话，Windows 深色模式下 Chromium 会把它们画成深色，和我们这套浅色皮肤打架。 */
+  color-scheme: light;
   --bg1:#eef3fb; --bg2:#e2e9f5;
   --surface:#ffffff; --surface-line:rgba(16,24,40,.07);
   --glass:rgba(255,255,255,.62); --glass-strong:rgba(255,255,255,.78);
@@ -34,24 +37,53 @@
   --ov-blur-out:60ms;
   --ov-r:6px;
   --ov-blur-delay:0ms;
-  /* 模糊用 ease-in-out（两头慢的 S 曲线）：前 100ms 几乎不动，
+  /* 模糊用 ease-in-out（两头慢的 S 曲线）：前 100ms 几乎不动，快结束时才收干净 ——
+     退场走同一条曲线，比线性更"软"。 */
 }
-@media (prefers-color-scheme: dark){
-  :root{
-    --bg1:#0d1117; --bg2:#080b10;
-    --surface:#171d26; --surface-line:rgba(255,255,255,.07);
-    --glass:rgba(23,29,38,.62); --glass-strong:rgba(23,29,38,.80);
-    --glass-line:rgba(255,255,255,.10);
-    --ink:#e8edf5; --muted:#9aa8bb; --line:#28303c; --field:rgba(255,255,255,.06);
-    --sh-1:0 1px 2px rgba(0,0,0,.5), 0 10px 28px rgba(0,0,0,.45);
-    --sh-2:0 8px 20px rgba(0,0,0,.55), 0 28px 60px rgba(0,0,0,.5);
-    --gloss:inset 0 1px 0 rgba(255,255,255,.06);
-    --btn-line:rgba(255,255,255,.18);
-    --btn-bg:linear-gradient(180deg,#242c39,#1b222c);
-    --btn-bg-hover:linear-gradient(180deg,#2c3644,#212936);
-    --chevron:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2 4.5 L6 8.5 L10 4.5' fill='none' stroke='%239aa8bb' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  }
+/* 深色主题。
+   为什么用 [data-theme="dark"] 而不是 @media (prefers-color-scheme: dark)：
+   媒体查询里那一整块 :root 变量在这台机器上**被 CSS 解析器整块丢掉了**（解析后的样式表里
+   只有浅色 :root），结果是深色模式下主色仍是浅色的深字 —— 深底深字，用户反馈"可读性很差"。
+   现在改由主进程读系统主题（nativeTheme）→ 经 URL 参数/事件告诉页面 → 页面挂 data-theme，
+   这条路径可测、可复现（--fgm-dark / --fgm-light 两个开发开关）。 */
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  /* 取法：底几乎纯黑（带一点蓝味）、卡片比底亮一档、描边只用 6~8% 的白 ——
+     靠"层级差 + 细描边"分区，而不是阴影和半透明玻璃。
+     旧版是把浅色的玻璃色直接反色，深色下会糊成一团（用户反馈"深色模式太丑"）。 */
+  --bg1:#0b0e13; --bg2:#07090d;
+  --surface:#12161d; --surface-line:rgba(255,255,255,.06);
+  --glass:rgba(18,22,29,.94); --glass-strong:rgba(21,26,34,.97);
+  --glass-line:rgba(255,255,255,.07);
+  --ink:#e9eef7; --muted:#9aa6b8; --line:#222a35; --field:rgba(255,255,255,.05);
+  --sh-1:0 1px 2px rgba(0,0,0,.55);
+  --sh-2:0 6px 18px rgba(0,0,0,.55);
+  --gloss:inset 0 1px 0 rgba(255,255,255,.04);
+  --btn-line:rgba(255,255,255,.14);
+  --btn-bg:linear-gradient(180deg,#1c222c,#161b23);
+  --btn-bg-hover:linear-gradient(180deg,#232b37,#1a212a);
+  --ok:#7ee0a1; --warn:#ffc46b; --err:#ff8f8f; --info:#8ab4ff;
+  --chevron:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2 4.5 L6 8.5 L10 4.5' fill='none' stroke='%239aa8bb' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
 }
+
+/* 深色下几处写死的颜色（浅色值在深底上不可读） */
+:root[data-theme="dark"] .ctitle{color:var(--ink);color:var(--ink)}
+:root[data-theme="dark"] .panel .ctitle{color:var(--ink)}
+/* 深色背景：浅色下那 4 团彩色极光（绿/蓝/紫/青，16~22% 不透明度）透过半透明面板
+   会把深色界面糊成脏绿脏蓝 —— 用户对照成熟深色工具反馈"太丑"。深色只留两团极淡的做层次。 */
+:root[data-theme="dark"] body{
+  background:
+    radial-gradient(1100px 560px at 10% -8%, rgba(118,185,0,.07), transparent 60%),
+    radial-gradient(980px 520px at 92% 2%, rgba(64,132,255,.06), transparent 60%),
+    linear-gradient(180deg,var(--bg1),var(--bg2));
+  background-attachment:fixed;
+}
+
+:root[data-theme="dark"] .badge.acc{color:#c8f08a;background:rgba(118,185,0,.22);border-color:rgba(118,185,0,.36)}
+:root[data-theme="dark"] .mod span.yes{color:#7ee0a1;background:rgba(27,127,59,.20);border-color:rgba(126,224,161,.34)}
+:root[data-theme="dark"] .mod span.no{color:#ff8f8f;background:rgba(198,40,40,.20);border-color:rgba(255,143,143,.34)}
+:root[data-theme="dark"] .mod span.alt{color:var(--muted);background:rgba(120,134,156,.16);border-color:rgba(120,134,156,.30)}
+
 
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -173,7 +205,8 @@ select.input option{background:var(--surface);color:var(--ink)}
 .ctitle::before{content:"";width:3px;height:13px;border-radius:2px;background:linear-gradient(180deg,#a6e04a,var(--accent));flex:0 0 auto}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .chip{font-size:11.5px;padding:3px 9px;border-radius:999px;background:rgba(118,185,0,.16);color:#3d6100;border:1px solid rgba(118,185,0,.28)}
-@media (prefers-color-scheme: dark){.chip{color:#c8f08a}.count{color:#c8f08a}}
+:root[data-theme="dark"] .chip{color:#c8f08a}
+:root[data-theme="dark"] .count{color:#c8f08a}
 .chip.gray{background:rgba(120,134,156,.16);color:var(--muted);border-color:var(--glass-line)}
 .kv2{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;margin:9px 0;color:var(--muted)}
 .kv2 b{color:var(--ink);font-weight:600;text-align:right}
@@ -225,9 +258,7 @@ select.input option{background:var(--surface);color:var(--ink)}
 /* DLSS5 页的醒目警示（用户要求做成显眼大字） */
 .warnbig{margin:6px 0 14px;padding:12px 16px;border-radius:12px;font-size:15px;font-weight:700;line-height:1.5;
   color:#8a1c1c;background:rgba(198,40,40,.10);border:1px solid rgba(198,40,40,.32)}
-@media (prefers-color-scheme: dark){
-  .warnbig{color:#ffb4b4;background:rgba(198,40,40,.18);border-color:rgba(255,120,120,.38)}
-}
+:root[data-theme="dark"] .warnbig{color:#ffb4b4;background:rgba(198,40,40,.18);border-color:rgba(255,120,120,.38)}
 
 /* 封面右下角的垃圾桶（DLSS5 卡片墙用）：**一直可见**。
    原来是半透明、只有悬停才亮，用户反馈"不够明显" —— 现在红底白图标 + 阴影，
@@ -325,7 +356,7 @@ select.input option{background:var(--surface);color:var(--ink)}
 .gname{font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .badges{display:flex;flex-wrap:wrap;gap:6px}
 .badge{font-size:11.5px;padding:2px 9px;border-radius:999px;border:1px solid var(--glass-line);color:var(--muted);white-space:nowrap;background:rgba(255,255,255,.35)}
-@media (prefers-color-scheme: dark){.badge{background:rgba(255,255,255,.05)}}
+:root[data-theme="dark"] .badge{background:rgba(255,255,255,.05)}
 .badge.ok{color:var(--ok);border-color:rgba(27,127,59,.35)}
 .badge.warn{color:var(--warn);border-color:rgba(178,106,0,.35)}
 .badge.err{color:var(--err);border-color:rgba(198,40,40,.4)}
@@ -552,13 +583,11 @@ body.glass .panel{background:rgba(255,255,255,.46)}
 body.glass .gcard,
 body.glass .tile{background:rgba(255,255,255,.44)}
 body.glass .tabs{background:rgba(255,255,255,.44)}
-@media (prefers-color-scheme: dark){
-  body.glass .topbar{background:rgba(23,29,38,.50)}
-  body.glass .panel{background:rgba(23,29,38,.48)}
-  body.glass .gcard,
-  body.glass .tile{background:rgba(23,29,38,.46)}
-  body.glass .tabs{background:rgba(23,29,38,.46)}
-}
+:root[data-theme="dark"] body.glass .topbar{background:rgba(23,29,38,.50)}
+:root[data-theme="dark"] body.glass .panel{background:rgba(23,29,38,.48)}
+:root[data-theme="dark"] body.glass .gcard,
+:root[data-theme="dark"] body.glass .tile{background:rgba(23,29,38,.46)}
+:root[data-theme="dark"] body.glass .tabs{background:rgba(23,29,38,.46)}
 
 /* 系统里开了「减少动态效果」就全部退化成不加位移的淡入 —— 前庭敏感的用户不该被动画折磨。 */
 @media (prefers-reduced-motion: reduce){

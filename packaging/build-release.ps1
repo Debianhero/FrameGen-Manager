@@ -1,6 +1,6 @@
 ﻿# FrameGen Manager —— 发布打包脚本（Electron 版）
 #
-# 用法：  powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1 [-Node <node.exe>]
+# 用法：  pwsh -ExecutionPolicy Bypass -File packaging\build-release.ps1 [-Node <node.exe>]
 #
 # 产出（全部落在 dist\）：
 #   dist\FrameGen-Manager-v<版本>-setup.exe   中文 NSIS 安装包 —— 这是唯一产物

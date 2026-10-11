@@ -249,6 +249,16 @@ pub fn deploy(
     if !target_dir.is_dir() {
         bail!("游戏目录不存在: {}", target_dir.display());
     }
+    /* 写不进去就别开始，而且把话说清楚。
+       实测：目录没写权限时以前会一路走到写文件才失败，报的是
+       「写入临时文件 …\.version.dll.tmp」—— 用户完全看不懂。原神默认装在
+       C:\Program Files，普通权限就是写不进去，这是最常见的踩坑。 */
+    if !crate::util::is_writable(target_dir) {
+        bail!(
+            "这个目录现在写不进去（{}）。\n\n最常见的原因：游戏装在 C:\\Program Files 这类需要管理员权限的地方。\n解决办法：右键本程序 →「以管理员身份运行」再部署；或者先把游戏完全退出。",
+            target_dir.display()
+        );
+    }
     if !PROXY_ENTRIES.contains(&proxy) {
         bail!("不支持的代理入口: {}", proxy);
     }
@@ -286,6 +296,20 @@ pub fn deploy(
         let dst = target_dir.join(&f.dest_name);
         if !dst.is_file() {
             continue;
+        }
+        /* **先判占用，再判签名**。游戏还在运行时文件常被独占，签名也读不出来 ——
+           于是会误报成「签名者：无签名 → 不是本项目的文件，请换个代理入口」，
+           用户照着去换入口，真实原因却是"游戏没退干净"（还要退启动器和反作弊进程）。 */
+        match crate::util::lock_state(&dst) {
+            crate::util::LockState::InUse => bail!(
+                "{} 正被占用 —— 游戏（或它的启动器、反作弊进程）还在运行。请完全退出游戏后再部署。",
+                f.dest_name
+            ),
+            crate::util::LockState::NoAccess => bail!(
+                "{} 现在读不了也写不了：文件带了只读属性，或者权限不足。请去掉只读属性，或用「以管理员身份运行」打开本程序。",
+                f.dest_name
+            ),
+            crate::util::LockState::Free => {}
         }
         let is_proxy = crate::scan::PROXY_PRIORITY.contains(&f.dest_name.as_str());
         let is_dll = f.dest_name.to_ascii_lowercase().ends_with(".dll");
@@ -472,8 +496,9 @@ pub fn deploy(
     for (name, src, _sha) in &payload {
         let dst = target_dir.join(name);
         let tmp = target_dir.join(format!(".{}.tmp", name));
+        // 报错里用**目标文件名**，不要把 .xxx.tmp 这种内部细节甩给用户
         let step = std::fs::copy(src, &tmp)
-            .with_context(|| format!("写入临时文件 {}", tmp.display()))
+            .with_context(|| format!("写入 {}", name))
             .and_then(|_| util::atomic_replace(&tmp, &dst));
         if let Err(e) = step {
             let _ = std::fs::remove_file(&tmp);
@@ -883,9 +908,12 @@ pub fn cleanup_manual(dir: &Path) -> Result<String> {
     if !failed.is_empty() {
         msg.push_str(&format!("\n· 没删掉的：{}", failed.join("、")));
     }
-    msg.push_str(
-        "\n· 注意：这是「没有备份记录」的清理 —— 那些文件本来就是你手动放进去的，游戏原件恢复不了。",
-    );
+    msg.push_str(&format!(
+        "\n· 注意：这个目录**没有找到部署记录**（记录可能已经被清理过），所以只能删掉本工具的文件，游戏原件无法自动恢复。\n· 原件如果还在，可以到备份目录里找：{}",
+        util::backups_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "（读不到备份目录）".to_owned())
+    ));
     let left = manual_files(dir);
     if left.is_empty() {
         msg.push_str("\n· 复查通过：目录里已经没有本项目的帧生成文件了。");

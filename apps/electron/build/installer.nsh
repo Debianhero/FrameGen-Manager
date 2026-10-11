@@ -110,10 +110,25 @@
   ; 这里**故意不做**：试过 nsExec + cmd 通配（单引号/双引号、for 循环、???? 通配都试了），
   ; 命令手工执行能删、在安装器里始终没生效，与其留一条假装在干活的语句，不如不写。
 
+  ; 清掉第 1) 步为"翻译 /DIR="写进去的 InstallLocation。
+  ; 它的用途只是让 electron-builder 的多用户宏**这一次**认我们指定的目录；留在注册表里
+  ; 会有副作用：以后每次安装（包括程序内自动更新拉起的安装包）都会沿用那个位置 ——
+  ; 实测把安装位置永久钉在了 C:\Program Files，普通用户没权限就装不上 / 更新失败。
+  !ifdef APP_GUID
+    ClearErrors
+    DeleteRegValue HKCU "Software\${APP_GUID}" "InstallLocation"
+    ClearErrors
+    DeleteRegValue HKLM "Software\${APP_GUID}" "InstallLocation"
+    ClearErrors
+  !endif
+
   ${If} ${Silent}
     ; silent update: bring the new version up (otherwise the user ends up
     ; with no window at all after the update)
-    Exec '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
+    ; **必须用 ExecShell，不能用 Exec**：NSIS 的 Exec 会等子进程退出才返回，而这里拉起的是
+    ; 常驻程序 —— 结果是静默安装/更新时安装器永远不退出（用户看到"卡住没动静"，
+    ; 我们脚本里的输出管道也会跟着挂住）。ExecShell 是即发即忘。
+    ExecShell "open" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
   ${EndIf}
 !macroend
 

@@ -9,6 +9,27 @@
   var T = (window.__TAURI__ && window.__TAURI__.core) ? window.__TAURI__.core : null;
   var EV = (window.__TAURI__ && window.__TAURI__.event) ? window.__TAURI__.event : null;
 
+  /* ---------------------------------------------------------------- 主题
+     由主进程读系统主题（nativeTheme）后用 URL 参数传进来，页面把它挂到 <html data-theme>，
+     样式表用 [data-theme="dark"] 选择深色变量。
+     为什么不用 @media (prefers-color-scheme: dark)：那一整块 :root 变量会被 CSS 解析器
+     整块丢掉（实测：解析后的样式表里只剩浅色 :root），结果深色模式下是"深底深字"。
+     属性写法可测可复现，也不依赖浏览器对媒体查询的重算行为。 */
+  function applyTheme(t) {
+    document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : 'light');
+  }
+  (function () {
+    var t = 'light';
+    try { t = new URLSearchParams(location.search).get('theme') || 'light'; } catch (e) { t = 'light'; }
+    applyTheme(t);
+  })();
+  if (EV) {
+    EV.listen('theme', function (e) {
+      var p = (e && e.payload) || {};
+      applyTheme(p.theme || 'light');
+    });
+  }
+
   // ---------------------------------------------------------------- 兜底报错
   function banner(msg) {
     var b = document.getElementById('errbar');
@@ -743,6 +764,21 @@
     });
   }
 
+  /* 备份占用情况：设置页显示「N 项 · X MB」，并提供"清理旧备份"。
+     清理前必须说清代价：备份是游戏原文件，删了就没法还原已部署的模组了。 */
+  function refreshBackups() {
+    return invoke('backups_info').then(function (r) {
+      var n = (r && r.count) || 0;
+      var el = $('bk-info');
+      if (el) el.textContent = n ? (n + ' 项 · ' + fmtSize((r && r.bytes) || 0)) : '没有备份';
+      var btn = $('btn-clean-backups');
+      if (btn) btn.disabled = !n;
+    }).catch(function () {
+      var el = $('bk-info');
+      if (el) el.textContent = '读取失败';
+    });
+  }
+
   function loadLog() {
     return invoke('log_tail', { lines: 300 }).then(function (t) {
       var box = $('log-box');
@@ -1353,7 +1389,8 @@
       invoke('restore', { dir: targetDir }).then(function (r) {
         stateEl.textContent = '未部署';
         stateEl.className = '';
-        toast('已还原\n' + (r || '已恢复到原始状态'), 'ok', 12000);
+        // core 会如实说明这次是"按记录还原"还是"没有记录、只清理了本工具的文件"
+        toast(String(r || '已完成还原'), 'ok', 14000);
         if (ov) ov.close();
         refreshLibrary();
       }).catch(function (e) {
@@ -1539,12 +1576,24 @@
       return invoke('dlss5_detect', { dir: targetDir }).then(function (f) {
         FOUND = f || null;
         var any = !!(f && f.anything);
-        uninstallBtn.disabled = !any;
-        uninstallBtn.title = any
-          ? '永久删除（不进回收站），执行前会再让你确认一次'
-          : '这个目录里没有检测到 ReShade / DLSS5';
-        foundEl.textContent = any ? f.label : '未检测到 ReShade / DLSS5';
-        foundEl.className = any ? (/^本工具/.test(String(f.label)) ? 'ok' : 'warn') : '';
+        var ours = !!(f && f.ours);
+        /* 用户要求：**本工具部署的只给「还原」** —— 「彻底卸载」按钮直接隐藏。
+           理由：那些文件是我们放进去的，「还原」能把原件放回来；而彻底卸载是永久删除，
+           顺手点错就救不回来了。只有「检测到 ReShade/DLSS5 文件、但没有本工具记录」
+           （用户自己装的，或者记录被清理过）才给一个清理出口。 */
+        uninstallBtn.classList.toggle('hidden', ours);
+        uninstallBtn.disabled = !any || ours;
+        uninstallBtn.title = '永久删除（不进回收站），执行前会再让你确认一次';
+        if (ours) {
+          foundEl.textContent = f.label;
+          foundEl.className = 'ok';
+        } else if (any) {
+          foundEl.textContent = f.label + '　（没有本工具的部署记录 —— 无法自动还原原件，只能清理）';
+          foundEl.className = 'warn';
+        } else {
+          foundEl.textContent = '未检测到 ReShade / DLSS5';
+          foundEl.className = '';
+        }
         return f;
       }).catch(function (e) {
         foundEl.textContent = '检测失败：' + errText(e);
@@ -1570,7 +1619,11 @@
         danger: true,
         body: '目录：\n' + targetDir +
           '\n\n将被删除的文件：\n· ' + items.join('\n· ') +
-          (FOUND.ours ? '\n\n（这套是本工具部署的：「还原」能恢复原件。）' : '') +
+          (FOUND.ours
+            ? '\n\n（这套是本工具部署的：「还原」能恢复原件。）'
+            : '\n\n（没有本工具的部署记录：删掉之后没法自动恢复原件。' +
+              '如果你以前用本工具装过、只是记录被清理了，原件可能在：' +
+              (FOUND.backupsDir || '设置页显示的「备份目录」') + '）') +
           '\n\n警告：上述文件将被永久删除！确认后立即执行！'
       }).then(function (yes) {
         if (!yes) return;
@@ -1728,7 +1781,7 @@
         invoke('dlss5_restore', { dir: targetDir }).then(function (r) {
           stateEl.textContent = '未部署';
           stateEl.className = '';
-          toast('已还原\n' + ((r && r.msg) || '已恢复到原始状态'), 'ok', 14000);
+          toast(String((r && r.msg) || '已完成还原'), 'ok', 16000);
           ov.close();
           refreshLibrary();
         }).catch(function (e) {
@@ -1843,7 +1896,9 @@
           if (el) el.classList.toggle('hidden', k !== want);
         }
         // 进设置页顺手刷一次日志：用户点进来基本就是想看它
-        /* 日志已移到主页左栏：进程序实时刷新，切页不再需要读日志 */
+        /* 日志已移到主页左栏：进程序实时刷新，切页不再需要读日志。
+           进设置页则刷一次备份情况（用户点进来基本就是想知道"有没有东西可以清"）。 */
+        if (want === 'settings') refreshBackups().catch(function () { });
       });
     });
   }
@@ -1939,6 +1994,47 @@ if ($('sel-proxy')) {
       if (!url) { toast('还读不到发布页地址。', 'info', 5000); return; }
       invoke('open_url', { url: url }).catch(function (e) { toast('打开失败：' + errText(e), 'err'); });
     });
+    if ($('btn-clean-backups')) $('btn-clean-backups').addEventListener('click', function () {
+      var me = this;
+      invoke('backups_info').then(function (info) {
+        /* 清理前**必须把要删的东西列出来**：备份记录就是「这个游戏是本工具部署的」的唯一凭据，
+           删掉之后游戏会重新显示成「未部署」、DLSS5 也会认不出是本工具装的（用户就踩过这个坑）。
+           所以这里逐条列出种类 + 游戏目录，并把这些后果写在确认框里。 */
+        var all = (info && info.entries) || [];
+        var del = all.filter(function (en) { return en.kind !== 'gpu-name'; });
+        var freed = 0, rows = [];
+        del.forEach(function (en) { freed += en.bytes || 0; });
+        if (!del.length) { toast('没有需要清理的备份（显卡名称的备份会保留）', 'info', 5000); return; }
+        var kindName = { dlss5: 'DLSS5', framegen: '帧生成' };
+        del.slice(0, 8).forEach(function (en) {
+          rows.push([(kindName[en.kind] || en.kind) + ' · ' + fmtSize(en.bytes || 0),
+                     en.target || (en.name.slice(0, 8) + '…'), 'warn']);
+        });
+        if (del.length > 8) rows.push(['……还有 ' + (del.length - 8) + ' 项', '', 'warn']);
+        rows.unshift(['将删除', del.length + ' 份部署记录', 'warn']);
+        rows.push(['可释放', fmtSize(freed)]);
+        uiConfirm({
+          title: '清理旧备份',
+          ok: '删除备份',
+          danger: true,
+          rows: rows,
+          body: '备份记录是「这个游戏由本工具部署过」的唯一凭据，备份文件本身是游戏的原文件。\n\n' +
+            '删除之后会有两个后果：\n' +
+            '· 已经部署的模组**无法再「还原」**成原版；\n' +
+            '· 这些游戏会重新显示为「未部署」，DLSS5 也不再认得是本工具装的（无法自动还原）。\n\n' +
+            '请先把还想恢复原样的游戏逐个「还原」，再来清理。\n\n（显卡名称的备份会保留。）',
+        }).then(function (yes) {
+          if (!yes) return;
+          busy(me, '清理中…', function () {
+            return invoke('clean_backups').then(function (r) {
+              toast('已清理 ' + (r.removed || 0) + ' 份备份，释放 ' + fmtSize(r.freed || 0), 'ok', 8000);
+              return refreshBackups();
+            });
+          });
+        });
+      }).catch(function (e) { toast('读取备份情况失败：' + errText(e), 'err', 8000); });
+    });
+
     if ($('btn-log-copy')) $('btn-log-copy').addEventListener('click', function () {
       var box = $('log-box');
       var t = box ? box.textContent : '';

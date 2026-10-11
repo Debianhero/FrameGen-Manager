@@ -110,10 +110,23 @@ pub fn save_library(c: &LibraryCache) -> anyhow::Result<()> {
 
 /// 指定路径的版本，自测用（不去碰用户真正的游戏库文件）。
 pub fn load_library_from(p: &Path) -> LibraryCache {
-    std::fs::read_to_string(p)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    let Ok(text) = std::fs::read_to_string(p) else {
+        return LibraryCache::default();
+    };
+    match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            /* 解析失败**别当空库**：库里有人工添加的游戏、"已移除"记录，而启动时的自动扫描
+               会立刻把空库写回去 —— 那样旧数据就永久没了。先留一份 .bad 备份 + 写日志。 */
+            let bad = p.with_extension("json.bad");
+            let _ = std::fs::copy(p, &bad);
+            crate::log::line(&format!(
+                "游戏库文件解析失败（{e}）—— 已留底到 {}，本次先按空库处理",
+                bad.display()
+            ));
+            LibraryCache::default()
+        }
+    }
 }
 
 pub fn save_library_from(p: &Path, c: &LibraryCache) -> anyhow::Result<()> {

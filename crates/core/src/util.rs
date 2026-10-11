@@ -114,6 +114,101 @@ pub fn legacy_app_data_dir() -> Option<PathBuf> {
 /// 还原去找 B，结果是「没有找到部署记录」，用户再也还原不回去。
 static BACKUPS_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
+/// 备份目录里的条目数与总字节数（设置页要显示“N 项 · X MB”）。
+pub fn backups_report() -> (usize, u64) {
+    let Ok(dir) = backups_dir() else { return (0, 0) };
+    let Ok(rd) = std::fs::read_dir(&dir) else { return (0, 0) };
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for e in rd.flatten() {
+        if !e.path().is_dir() {
+            continue;
+        }
+        count += 1;
+        bytes += dir_size(&e.path());
+    }
+    (count, bytes)
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => total += dir_size(&e.path()),
+                Ok(_) => total += e.metadata().map(|m| m.len()).unwrap_or(0),
+                Err(_) => {}
+            }
+        }
+    }
+    total
+}
+
+/// 清理旧备份：删掉除「显卡名称备份」以外的所有记录，返回 (删除条目数, 释放字节)。
+///
+/// **删了之后已经部署到游戏里的 mod 就还原不回去了**（备份里是游戏原件）。
+/// 所以界面必须先明确确认，并提示「想把游戏恢复原样请先逐个还原」。
+/// 显卡名称那份留着：它很小，而且是「还原为改动前的名字」唯一的依据。
+pub fn clean_backups() -> anyhow::Result<(usize, u64)> {
+    let dir = backups_dir()?;
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Ok((0, 0));
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name == "gpu-name" || !e.path().is_dir() {
+            continue;
+        }
+        freed += dir_size(&e.path());
+        match std::fs::remove_dir_all(e.path()) {
+            Ok(_) => removed += 1,
+            Err(err) => crate::log::line(&format!("清理备份 {name} 失败：{err}")),
+        }
+    }
+    crate::log::line(&format!("已清理 {removed} 份旧备份，释放 {freed} 字节"));
+    Ok((removed, freed))
+}
+
+/// 备份明细：让界面在"清理"之前能列出**将要删掉哪些东西**。
+/// 返回 (条目名, 种类, 字节数)；种类 = gpu-name / dlss5 / framegen。
+pub fn backups_entries() -> Vec<(String, String, u64, String)> {
+    let Ok(dir) = backups_dir() else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        if !e.path().is_dir() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        let kind = if name == "gpu-name" {
+            "gpu-name"
+        } else if name.ends_with("-dlss5") {
+            "dlss5"
+        } else {
+            "framegen"
+        };
+        // 明细里尽量带上"这是哪个游戏目录"，清理前用户才看得懂要删什么。
+        // 用宽松匹配读记录（不同种类记录里字段名不一样），读不到就留空。
+        let mut target = String::new();
+        if let Ok(t) = std::fs::read_to_string(e.path().join("manifest.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                for key in ["target_dir", "deploy_dir", "dir", "game_dir", "install_dir"] {
+                    if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                        target = s.to_owned();
+                        break;
+                    }
+                }
+            }
+        }
+        out.push((name, kind.to_owned(), dir_size(&e.path()), target));
+    }
+    // 同种类的排一起，方便界面按种类分组显示
+    out.sort_by_key(|e| (e.1.clone(), e.0.clone()));
+    out
+}
+
 pub fn backups_dir() -> Result<PathBuf> {
     let d = BACKUPS_ROOT.get_or_init(default_backups_dir).clone();
     std::fs::create_dir_all(&d).with_context(|| format!("创建备份目录失败: {}", d.display()))?;

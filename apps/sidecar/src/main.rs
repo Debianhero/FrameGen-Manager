@@ -331,6 +331,35 @@ fn backups_dir() -> String {
         .unwrap_or_default()
 }
 
+/// 备份占用情况：条目数 + 总字节（设置页显示「N 项 · X MB」）。
+fn backups_info() -> Value {
+    let (count, bytes) = framegen_core::util::backups_report();
+    let entries = framegen_core::util::backups_entries()
+        .into_iter()
+        .map(|(name, kind, size, target)| {
+            json!({ "name": name, "kind": kind, "bytes": size, "target": target })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "dir": backups_dir(),
+        "count": count,
+        "bytes": bytes,
+        "entries": entries,
+    })
+}
+
+/// 清理旧备份。**删了已经部署到游戏里的 mod 就还原不回去** —— 界面必须先确认。
+fn clean_backups() -> Result<Value, String> {
+    let (removed, freed) = framegen_core::util::clean_backups().map_err(|e| format!("{e:#}"))?;
+    let (count, bytes) = framegen_core::util::backups_report();
+    Ok(json!({
+        "removed": removed,
+        "freed": freed,
+        "count": count,
+        "bytes": bytes,
+    }))
+}
+
 /// 日志尾部（给「复制诊断信息」用）
 fn log_tail(lines: usize) -> String {
     let Some(p) = framegen_core::log::path() else { return String::new() };
@@ -351,7 +380,7 @@ fn open_path(path: String) -> Result<(), String> {
         .arg(target)
         .spawn()
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// 在系统浏览器里打开一个链接（发布页那类）。
@@ -368,7 +397,7 @@ fn open_url(url: String) -> Result<(), String> {
         .args(["url.dll,FileProtocolHandler", &u])
         .spawn()
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// 更换资产目录（自己弹文件框）—— 改完写进配置，core 的缓存立刻失效。
@@ -384,7 +413,7 @@ fn pick_assets_dir() -> Result<Value, String> {
     };
     let mut cfg = framegen_core::util::load_config();
     cfg.asset_dir = Some(dir.clone());
-    framegen_core::util::save_config(&cfg).map_err(|e| e.to_string())?;
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
     Ok(json!({ "canceled": false, "dir": dir.display().to_string() }))
 }
 
@@ -601,13 +630,48 @@ fn scan_library(id: u64) -> Result<Value, String> {
 ///
 /// URI 由 core 决定（gpu::hags_settings_uri），和 egui 版的「去设置」是同一个去处。
 fn open_hags_settings() -> Result<Value, String> {
-    framegen_core::gpu::open_hags_settings().map_err(|e| e.to_string())?;
+    framegen_core::gpu::open_hags_settings().map_err(|e| format!("{e:#}"))?;
     Ok(json!({ "uri": framegen_core::gpu::hags_settings_uri() }))
 }
 
 /// 手动把一个目录加进游戏库（扫不出来的游戏、或者用户自己的目录）。
 ///
 /// 与 egui 版 add_to_library 同一套顺序：manual_entry 建条目 → 找渲染 EXE →
+/// 由主进程弹好文件框、把选中的目录送进来（见 main.js 的说明：sidecar 弹的框没有父窗口，
+/// Windows 会把它放到应用窗口后面，用户以为点了没反应）。
+fn add_game_at(dir: String) -> Result<Value, String> {
+    let d = PathBuf::from(dir);
+    if !d.is_dir() {
+        return Err(format!("这个目录不存在：{}", d.display()));
+    }
+    add_library_dir(&d, None)
+}
+
+/// 同上：主进程选好「启动 exe」，这里取它所在目录入库。
+fn pick_game_exe_at(exe: String) -> Result<Value, String> {
+    let e = PathBuf::from(exe);
+    let Some(dir) = e.parent().map(|p| p.to_path_buf()) else {
+        return Err(format!("这个文件没有所在目录：{}", e.display()));
+    };
+    let mut v = add_library_dir(&dir, Some(e))?;
+    if let Some(o) = v.as_object_mut() {
+        o.insert("fromExe".to_owned(), json!(true));
+    }
+    Ok(v)
+}
+
+/// 同上：主进程选好新的资产目录，这里写进配置（core 的缓存随即失效）。
+fn pick_assets_dir_at(dir: String) -> Result<Value, String> {
+    let d = PathBuf::from(dir);
+    if !d.is_dir() {
+        return Err(format!("这个目录不存在：{}", d.display()));
+    }
+    let mut cfg = framegen_core::util::load_config();
+    cfg.asset_dir = Some(d.clone());
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({ "canceled": false, "dir": d.display().to_string() }))
+}
+
 /// detect_tech 判图形 API / 引擎 / 自带帧生成 → 反作弊扫一遍 → 存进 cache.manual。
 /// **存 manual 而不是 scanned**：重新扫描不会把用户手动加的条目冲掉。
 fn add_game() -> Result<Value, String> {
@@ -688,7 +752,7 @@ fn add_library_dir(dir: &Path, exe: Option<PathBuf>) -> Result<Value, String> {
         row.streamline = streamline;
         row.tech_scanned = true;
         row.ac = rep.verdict();
-        framegen_core::scan::save_library(&cache).map_err(|e| e.to_string())?;
+        framegen_core::scan::save_library(&cache).map_err(|e| format!("{e:#}"))?;
         framegen_core::log::line(&format!("更新游戏库条目：{}", dir.display()));
         return Ok(json!({
             "canceled": false,
@@ -711,7 +775,7 @@ fn add_library_dir(dir: &Path, exe: Option<PathBuf>) -> Result<Value, String> {
         streamline,
         tech_scanned: true,
     });
-    framegen_core::scan::save_library(&cache).map_err(|e| e.to_string())?;
+    framegen_core::scan::save_library(&cache).map_err(|e| format!("{e:#}"))?;
     framegen_core::log::line(&format!("存进游戏库（手动）：{}", dir.display()));
     Ok(json!({
         "canceled": false,
@@ -768,10 +832,10 @@ fn fetch_covers(id: u64, args: &Value) -> Result<Value, String> {
     if ids.is_empty() {
         return Ok(json!({ "fetched": 0, "skipped": 0, "failed": 0 }));
     }
-    let client = framegen_core::update::client().map_err(|e| e.to_string())?;
+    let client = framegen_core::update::client().map_err(|e| format!("{e:#}"))?;
     let (fetched, skipped, failed) =
         framegen_core::update::fetch_steam_covers(&client, &ids, |msg, f| progress(id, &msg, f))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{e:#}"))?;
     Ok(json!({ "fetched": fetched, "skipped": skipped, "failed": failed }))
 }
 
@@ -811,6 +875,14 @@ fn dlss5_choices() -> Value {
 fn dlss5_state(dir: String) -> Result<Value, String> {
     let p = PathBuf::from(&dir);
     let label = framegen_core::dlss5::state_label(&p);
+    /* 目录里到底有什么 —— 界面靠它决定该给「还原」还是「清理」：
+       有记录（本工具部署的）→ 只给还原；没记录但有 ReShade/DLSS5 文件 → 给清理。 */
+    let f = framegen_core::dlss5::detect(&p);
+    let mut found = serde_json::to_value(&f).map_err(|e| format!("{e:#}"))?;
+    if let Some(o) = found.as_object_mut() {
+        o.insert("label".to_owned(), json!(f.label()));
+        o.insert("anything".to_owned(), json!(f.anything()));
+    }
     match framegen_core::dlss5::state_of(&p) {
         framegen_core::dlss5::State::Deployed(m) => Ok(json!({
             "label": label,
@@ -826,11 +898,22 @@ fn dlss5_state(dir: String) -> Result<Value, String> {
                 "role": e.role,
                 "existedBefore": e.existed_before,
             })).collect::<Vec<_>>(),
+            "found": found,
+            "backupsDir": backups_dir(),
         })),
-        framegen_core::dlss5::State::NotDeployed => Ok(json!({ "label": label, "deployed": false })),
-        framegen_core::dlss5::State::Broken(e) => {
-            Ok(json!({ "label": label, "deployed": false, "broken": e }))
-        }
+        framegen_core::dlss5::State::NotDeployed => Ok(json!({
+            "label": label,
+            "deployed": false,
+            "found": found,
+            "backupsDir": backups_dir(),
+        })),
+        framegen_core::dlss5::State::Broken(e) => Ok(json!({
+            "label": label,
+            "deployed": false,
+            "broken": e,
+            "found": found,
+            "backupsDir": backups_dir(),
+        })),
     }
 }
 
@@ -855,7 +938,7 @@ fn dlss5_deploy(id: u64, args: &Value) -> Result<Value, String> {
         &backend,
         &mut |m: String, f: f32| progress(id, &m, f),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{e:#}"))?;
     Ok(json!({ "msg": msg, "notes": notes }))
 }
 
@@ -867,10 +950,12 @@ fn dlss5_detect(dir: String) -> Result<Value, String> {
         return Err(format!("目录不存在：{dir}"));
     }
     let f = framegen_core::dlss5::detect(&p);
-    let mut v = serde_json::to_value(&f).map_err(|e| e.to_string())?;
+    let mut v = serde_json::to_value(&f).map_err(|e| format!("{e:#}"))?;
     if let Some(o) = v.as_object_mut() {
         o.insert("label".to_owned(), json!(f.label()));
         o.insert("anything".to_owned(), json!(f.anything()));
+        // 记录丢了的时候，界面要告诉用户"原件可能在哪儿"
+        o.insert("backupsDir".to_owned(), json!(backups_dir()));
     }
     Ok(v)
 }
@@ -889,13 +974,13 @@ fn dlss5_uninstall(id: u64, args: &Value) -> Result<Value, String> {
     let msg = framegen_core::dlss5::uninstall(&dir_p, exe_p.as_deref(), &mut |m: String, f: f32| {
         progress(id, &m, f)
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{e:#}"))?;
     Ok(json!({ "msg": msg }))
 }
 
 /// 还原 DLSS5（只动本工具部署的那些文件；ReShade 本体按备份恢复/删除）。
 fn dlss5_restore(dir: String) -> Result<Value, String> {
-    let msg = framegen_core::dlss5::restore(Path::new(&dir)).map_err(|e| e.to_string())?;
+    let msg = framegen_core::dlss5::restore(Path::new(&dir)).map_err(|e| format!("{e:#}"))?;
     Ok(json!({ "msg": msg }))
 }
 
@@ -934,7 +1019,7 @@ fn remove_game(dir: String) -> Result<Value, String> {
     if !cache.ignored.iter().any(|s| s == &key) {
         cache.ignored.push(key);
     }
-    framegen_core::scan::save_library(&cache).map_err(|e| e.to_string())?;
+    framegen_core::scan::save_library(&cache).map_err(|e| format!("{e:#}"))?;
     framegen_core::log::line(&format!("从游戏库移除：{}", p.display()));
     Ok(json!({ "ok": true }))
 }
@@ -943,7 +1028,7 @@ fn remove_game(dir: String) -> Result<Value, String> {
 fn restore_removed(key: String) -> Result<Value, String> {
     let mut cache = framegen_core::scan::load_library();
     cache.ignored.retain(|s| s != &key);
-    framegen_core::scan::save_library(&cache).map_err(|e| e.to_string())?;
+    framegen_core::scan::save_library(&cache).map_err(|e| format!("{e:#}"))?;
     framegen_core::log::line(&format!("恢复被移除的条目：{key}"));
     Ok(json!({ "ok": true }))
 }
@@ -1000,12 +1085,15 @@ fn deploy_impl(dir: &str, proxy: &str, optimized: u8, frames: u8) -> Result<(Str
         return Err(format!("优化等级只能是 0~3（收到 {optimized}）"));
     }
     if frames != framegen_core::update::DEFAULT_MAX_FRAMES && frames != 5 {
-        return Err(format!("倍率上限只能是 4X 或 6X（收到 {frames}）"));
+        return Err(format!(
+            "倍率上限参数只能是 {}（=4X）或 5（=6X）（收到 {frames}）",
+            framegen_core::update::DEFAULT_MAX_FRAMES
+        ));
     }
     framegen_core::log::line(&format!(
         "部署档位：优化等级 {optimized}、倍率上限 {frames} ｜ {dir} ｜ 入口 {proxy}"
     ));
-    framegen_core::deploy::deploy_game(Path::new(dir), proxy, optimized, frames).map_err(|e| e.to_string())
+    framegen_core::deploy::deploy_game(Path::new(dir), proxy, optimized, frames).map_err(|e| format!("{e:#}"))
 }
 
 fn deploy_game(dir: String, proxy: String, optimized: u8, frames: u8) -> Result<Value, String> {
@@ -1109,7 +1197,7 @@ fn set_config(optimized: u8, frames: u8) -> Result<Value, String> {
     let mut cfg = framegen_core::util::load_config();
     cfg.fg_optimized = optimized;
     cfg.fg_frames = frames;
-    framegen_core::util::save_config(&cfg).map_err(|e| e.to_string())?;
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
     framegen_core::log::line(&format!(
         "部署档位改为：优化等级 {optimized}（{}）、倍率上限 {}",
         optimized_label(optimized),
@@ -1122,7 +1210,7 @@ fn set_config(optimized: u8, frames: u8) -> Result<Value, String> {
 /// 真正换 exe 的那一步（stage_self_update + swap_in_place）还没接 —— 宁可不做，
 /// 也不做一个会把自己换坏的半成品。
 fn check_self_update() -> Result<Value, String> {
-    let client = framegen_core::update::client().map_err(|e| e.to_string())?;
+    let client = framegen_core::update::client().map_err(|e| format!("{e:#}"))?;
     let current = framegen_core::update::SELF_VERSION.to_string();
     let latest = framegen_core::update::fetch_latest_self_version(&client);
     let has_update = latest
@@ -1144,7 +1232,7 @@ fn check_self_update() -> Result<Value, String> {
 /// （哈希取自发布时的 SHA256SUMS.txt，且清单只走官方源，不走镜像）。
 fn self_update_download(id: u64, args: &Value) -> Result<Value, String> {
     let version = arg_str(args, "version")?;
-    let client = framegen_core::update::client().map_err(|e| e.to_string())?;
+    let client = framegen_core::update::client().map_err(|e| format!("{e:#}"))?;
     // 用**共享**的取消标志（cancel_self_update 命令置位的就是它），每次开始前复位。
     let cancel = selfupdate_cancel();
     cancel.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1260,6 +1348,8 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             Ok(json!({ "ok": ok, "total": total }))
         }
         "backups_dir" => Ok(Value::String(backups_dir())),
+        "backups_info" => Ok(backups_info()),
+        "clean_backups" => clean_backups(),
         "log_tail" => Ok(Value::String(log_tail(arg_usize(args, "lines")?))),
         "open_path" => {
             open_path(arg_str(args, "path")?)?;
@@ -1275,6 +1365,10 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         "scan_library" => scan_library(id),
         "add_game" => add_game(),
         "pick_game_exe" => pick_game_exe(),
+        // 界面走的这三条：主进程弹的框（带父窗口，不会被窗口盖住）
+        "add_game_at" => add_game_at(arg_str(args, "dir")?),
+        "pick_game_exe_at" => pick_game_exe_at(arg_str(args, "exe")?),
+        "pick_assets_dir_at" => pick_assets_dir_at(arg_str(args, "dir")?),
         "game_icons" => game_icons(),
         "open_hags_settings" => open_hags_settings(),
         "remove_game" => remove_game(arg_str(args, "dir")?),
@@ -1452,7 +1546,7 @@ fn exec_gpu_op(op: &framegen_core::gpu::Op) -> Result<String, String> {
         framegen_core::gpu::Op::Apply(name) => framegen_core::gpu::apply(a, name),
         framegen_core::gpu::Op::Restore(to) => framegen_core::gpu::restore(a, *to),
     }
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("{e:#}"))
 }
 
 /// 跑一次显卡名操作：**先直接做**（用户可能就是管理员启动的，那就不弹 UAC），
@@ -1465,8 +1559,15 @@ fn run_gpu_op(op: &framegen_core::gpu::Op) -> Result<String, String> {
         Err(e) => {
             framegen_core::log::line(&format!("[gpuspoof] 直接写入失败（{e}），改用提权子进程"));
             let me = std::env::current_exe().map_err(|x| format!("取不到自己的路径：{x}"))?;
-            framegen_core::gpu::run_elevated(&me, op)
-                .map_err(|e2| format!("{e}；提权重试也没成功：{e2}"))
+            framegen_core::gpu::run_elevated(&me, op).map_err(|e2| {
+                // 提权后还是同一个原因（例如型号不在允许名单里）就别说两遍
+                let (a, b) = (format!("{e:#}"), format!("{e2:#}"));
+                if a == b {
+                    a
+                } else {
+                    format!("{a}；提权重试也没成功：{b}")
+                }
+            })
         }
     }
 }
@@ -1528,12 +1629,12 @@ fn selftest(argv: &[String]) -> bool {
     // --downloadtest：把资产下全（代理入口 + INI + 两个 DLSS 运行库）。
     if argv.iter().any(|a| a == "--downloadtest") {
         let work = (|| -> Result<String, String> {
-            let client = framegen_core::update::client().map_err(|e| e.to_string())?;
+            let client = framegen_core::update::client().map_err(|e| format!("{e:#}"))?;
             let state = framegen_core::update::load_state();
             let plan = framegen_core::update::plan_download(&client, "version.dll", &state, |msg| {
                 framegen_core::log::line(&format!("[downloadtest] {msg}"));
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{e:#}"))?;
             let runtime = framegen_core::update::dlss_runtime_plan(&client);
             let total = plan.total + runtime.iter().map(|s| s.size).sum::<u64>();
             let cancel = std::sync::atomic::AtomicBool::new(false);
@@ -1547,7 +1648,7 @@ fn selftest(argv: &[String]) -> bool {
                     framegen_core::log::line(&format!("[downloadtest] {:>3.0}% {msg}", f * 100.0));
                 },
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{e:#}"))?;
             let ctx = framegen_core::update::ProgressCtx {
                 base_bytes: plan.total,
                 total_bytes: if total > 0 { total } else { 1 },
@@ -1557,7 +1658,7 @@ fn selftest(argv: &[String]) -> bool {
             let paths = framegen_core::update::ensure_dlss_runtime(&client, &cancel, &runtime, ctx, |msg, f| {
                 framegen_core::log::line(&format!("[downloadtest] {:>3.0}% {msg}", f * 100.0));
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{e:#}"))?;
             let names: Vec<String> = paths
                 .iter()
                 .map(|p| {

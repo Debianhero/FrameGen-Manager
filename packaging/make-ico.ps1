@@ -6,7 +6,7 @@
 # Why not a Rust crate: the project must stay dependency-free, so the icon is
 # baked offline here and committed as a binary. Re-run if the art changes:
 #
-#   powershell -ExecutionPolicy Bypass -File packaging\make-ico.ps1 -Src <png>
+#   pwsh -ExecutionPolicy Bypass -File packaging\make-ico.ps1 -Src <png>
 param(
   [string]$Src = (Join-Path $PSScriptRoot 'app-icon.png'),
   [string]$Out = (Join-Path $PSScriptRoot 'app.ico'),

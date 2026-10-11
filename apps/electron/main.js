@@ -9,13 +9,21 @@
    渲染默认走 GPU（Electron 的常规路径），`--fgm-no-gpu` 是给异常机器的退路：
    Tauri/WebView2 时代曾因 GPU 合成把客户区画黑而强制软件渲染，Electron 的合成器没有那个问题。
    玻璃观感见 style.css 末尾的 body.glass 一节。 */
-const { app, BrowserWindow, Menu, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, shell, dialog, nativeTheme } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const readline = require('node:readline');
 
 const PRODUCT = 'FrameGen Manager';
+
+/* 开发/验证开关的总闸门。
+   **发货版里必须关掉**：其中 --fgm-update-from 能跳过版本检查与哈希校验、直接启动任意
+   安装包（配合 --fgm-update-yes 还是静默的）—— 等于一个"免校验安装任意程序"的后门，
+   只要有人诱导用户用特殊参数启动就能装东西。开发模式（未打包）或显式设了 FGM_DEV=1 才认。
+   两个例外保留给用户自救/验收：--fgm-no-gpu（驱动有问题时退回软件渲染）、
+   --fgm-dark / --fgm-light（强制主题，用于排查深色模式问题）。 */
+const DEV = !app.isPackaged || process.env.FGM_DEV === '1';
 // 默认走 GPU 渲染（Electron 的常规路径）：合成本身更省（同机实测 43.4% vs 软件 46.6%），
 // 而且只有 GPU 合成时才会开真玻璃。机器/驱动有问题的用户可以用 --fgm-no-gpu
 //（或 FGM_NO_GPU=1）退回软件渲染 —— 那时玻璃自动关掉，外观退化成近似玻璃但不会坏。
@@ -88,41 +96,114 @@ function migrateDataIfNeeded() {
 
 const SIDECAR = path.join(exeDir, 'framegen-sidecar.exe');
 
+/* ---------------------------------------------------------------- 诊断日志
+   侧车（后台进程）出问题时，以前只有 console.error —— 用户看不到，我们也没法查
+   （"后台进程没有起来"那条反馈就是这么卡住的）。现在把关键事件写进
+   <数据目录>\logs\shell.log：启动、退出码、stderr 尾巴、重启、自更新动作。 */
+const SHELL_LOG_MAX = 512 * 1024;
+function shellLog(msg) {
+  try {
+    const dir = path.join(dataDir, 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'shell.log');
+    try {
+      if (fs.statSync(file).size > SHELL_LOG_MAX) fs.renameSync(file, path.join(dir, 'shell.prev.log'));
+    } catch (e) { /* 文件不存在或换不动，继续往下写 */ }
+    const t = new Date().toTimeString().slice(0, 8);
+    fs.appendFileSync(file, '[' + t + '] ' + msg + '\n');
+  } catch (e) { /* 日志写不进去不能让程序崩 */ }
+}
+
 let sidecar = null;
 let sidecarDead = false;
+let sidecarStarting = null;   // 正在拉起时的 Promise（并发调用共用同一次）
 let nextId = 1;
-const pending = new Map();      // id -> { resolve, reject, timer }
+const pending = new Map();      // id -> { resolve, reject, timer, retry }
 let selfUpdateBusy = false;     // 自更新下载进行中（决定 progress 事件往哪条通道走）
 let mainWin = null;
+let quitting = false;           // 主动退出中：不再重启侧车
 
 function startSidecar() {
+  // 已经活着就别再拉一个（启动时的调用与早期命令的 ensureSidecar 可能撞车）
+  if (sidecar && !sidecarDead) return sidecar;
   if (!fs.existsSync(SIDECAR)) {
     sidecarDead = true;
-    const msg = '找不到后台进程：' + SIDECAR + '\n\n开发时请先把 framegen-sidecar.exe 编译并复制到该目录。';
-    dialog.showErrorBox(PRODUCT, msg);
-    return;
+    shellLog('找不到后台进程：' + SIDECAR);
+    dialog.showErrorBox(PRODUCT, '找不到后台进程：' + SIDECAR +
+      '\n\n安装包不完整或被安全软件删掉了，请重新安装本程序。');
+    return null;
   }
-  sidecar = spawn(SIDECAR, [], {
+  sidecarDead = false;
+  const p = spawn(SIDECAR, [], {
     // cwd 给安装目录（sidecar 自己在那儿）；数据目录用环境变量显式告诉它
     cwd: exeDir,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
     env: Object.assign({}, process.env, { FGM_DATA_DIR: dataDir }),
   });
+  shellLog('启动后台进程：' + SIDECAR);
 
-  const rl = readline.createInterface({ input: sidecar.stdout });
+  const rl = readline.createInterface({ input: p.stdout });
   rl.on('line', onSidecarLine);
-  sidecar.stderr.on('data', function (d) {
-    console.error('[sidecar]', String(d).replace(/\s+$/, ''));
+  p.stderr.on('data', function (d) {
+    const text = String(d).replace(/\s+$/, '');
+    console.error('[sidecar]', text);
+    shellLog('[stderr] ' + text);
   });
-  sidecar.on('exit', function (code) {
+  // spawn 失败是**异步**报的（路径不存在、被安全软件拦住……）。以前没接这个事件，
+  // 结果是主进程抛未捕获异常、或者命令一直挂到 30 分钟超时。
+  p.on('error', function (e) {
     sidecarDead = true;
-    for (const [, p] of pending) {
-      clearTimeout(p.timer);
-      p.reject(new Error('后台进程已退出（code ' + code + '）'));
-    }
+    shellLog('后台进程启动失败：' + e.message);
+    for (const [, q] of pending) { clearTimeout(q.timer); q.reject(new Error('后台进程启动失败：' + e.message)); }
     pending.clear();
   });
+  p.on('exit', function (code, signal) {
+    sidecarDead = true;
+    shellLog('后台进程退出：code=' + code + ' signal=' + (signal || '-') +
+      (quitting ? '（程序正在退出，正常）' : ''));
+    if (quitting) {
+      for (const [, q] of pending) { clearTimeout(q.timer); q.reject(new Error('程序正在退出')); }
+      pending.clear();
+      return;
+    }
+    /* 还挂着的命令：先试着把侧车拉起来、把命令重发一次 —— 用户不该因为后台崩一下就
+       看到满屏「读取失败」。重发也失败才报错。 */
+    const waiting = Array.from(pending.values());
+    pending.clear();
+    if (!waiting.length) return;
+    ensureSidecar().then(function () {
+      waiting.forEach(function (q) { if (q.retry) q.retry(); else q.reject(new Error('后台进程已退出（code ' + code + '）')); });
+    }, function (e) {
+      waiting.forEach(function (q) { clearTimeout(q.timer); q.reject(new Error('后台进程已退出（code ' + code + '）：' + e.message)); });
+    });
+  });
+  return p;
+}
+
+/** 保证侧车可用：死了就重新拉起，并用一次 ping 确认它真的能应答。 */
+function ensureSidecar() {
+  if (sidecar && !sidecarDead) return Promise.resolve();
+  if (sidecarStarting) return sidecarStarting;
+  sidecarStarting = new Promise(function (resolve, reject) {
+    sidecar = startSidecar();
+    if (!sidecar) { reject(new Error('找不到后台进程：' + SIDECAR)); return; }
+    // ping 确认（5 秒）
+    const id = nextId++;
+    const timer = setTimeout(function () {
+      pending.delete(id);
+      reject(new Error('后台进程拉起后没有应答（5 秒超时）'));
+    }, 5000);
+    pending.set(id, { resolve: function () { resolve(); }, reject: function (e) { reject(e); }, timer: timer });
+    try {
+      sidecar.stdin.write(JSON.stringify({ id: id, cmd: 'ping', args: {} }) + '\n');
+    } catch (e) {
+      pending.delete(id);
+      clearTimeout(timer);
+      reject(e);
+    }
+  }).then(function (v) { sidecarStarting = null; return v; }, function (e) { sidecarStarting = null; throw e; });
+  return sidecarStarting;
 }
 
 function onSidecarLine(line) {
@@ -147,10 +228,15 @@ function onSidecarLine(line) {
 // 下载/扫描这类命令可能要跑很久，超时给得宽松些（30 分钟）
 const CALL_TIMEOUT_MS = 30 * 60 * 1000;
 
-function callSidecar(cmd, args) {
+function callSidecar(cmd, args, isRetry) {
   return new Promise(function (resolve, reject) {
     if (!sidecar || sidecarDead) {
-      reject(new Error('后台进程没有起来（' + SIDECAR + '）'));
+      // 就地重启一次再发（用户无感）。重启失败才把原因报出去。
+      ensureSidecar().then(function () {
+        callSidecar(cmd, args, true).then(resolve, reject);
+      }, function (e) {
+        reject(e);
+      });
       return;
     }
     const id = nextId++;
@@ -158,10 +244,28 @@ function callSidecar(cmd, args) {
       pending.delete(id);
       reject(new Error('命令超时：' + cmd));
     }, CALL_TIMEOUT_MS);
-    pending.set(id, { resolve: resolve, reject: reject, timer: timer });
-    sidecar.stdin.write(JSON.stringify({ id: id, cmd: cmd, args: args || {} }) + '\n');
+    pending.set(id, {
+      resolve: resolve,
+      reject: reject,
+      timer: timer,
+      // 侧车中途死掉时用它重发一次（见 exit 处理）
+      retry: function () { callSidecar(cmd, args, true).then(resolve, reject); },
+    });
+    try {
+      sidecar.stdin.write(JSON.stringify({ id: id, cmd: cmd, args: args || {} }) + '\n');
+    } catch (e) {
+      pending.delete(id);
+      clearTimeout(timer);
+      if (!isRetry) {
+        callSidecar(cmd, args, true).then(resolve, reject);
+      } else {
+        shellLog('写入后台进程失败（' + cmd + '）：' + e.message);
+        reject(new Error('后台进程写入失败：' + e.message));
+      }
+    }
   });
 }
+
 
 /* ---------------------------------------------------------------- 进程优先级
    把这个软件的进程优先级压到「低」（任务管理器里就显示"低"）：它是后台辅助工具，
@@ -281,17 +385,33 @@ function ensureBundledAssets() {
 //   --fgm-update-from <安装包路径>  跳过"检查+下载"，直接拿这个安装包走安装流程
 //   --fgm-update-yes                跳过确认框（自动化验证用）
 const UPDATE_FROM = (function () {
+  if (!DEV) return null;                       // 发货版一律忽略（见上面 DEV 的说明）
   const i = process.argv.indexOf('--fgm-update-from');
   if (i < 0 || !process.argv[i + 1]) return null;
   // 命令行里带空格的路径常常连引号一起传进来，去掉两头引号再用
   return process.argv[i + 1].replace(/^"|"$/g, '');
 })();
-const UPDATE_YES = process.argv.includes('--fgm-update-yes');
+const UPDATE_YES = DEV && process.argv.includes('--fgm-update-yes');
 // 模拟一次更新（验证界面用；不联网、不下载）：--fgm-simulate-update
-const SIMULATE_UPDATE = process.argv.includes('--fgm-simulate-update');
+const SIMULATE_UPDATE = DEV && process.argv.includes('--fgm-simulate-update');
+/* 强制主题，用来验证深色模式：--fgm-dark / --fgm-light（不写就跟随系统）。
+   为什么要这个开关：Windows 深色模式下才会暴露的问题（原生控件跟着系统走、个别颜色
+   写死成深色）平时在浅色桌面上根本复现不出来，靠改系统主题来测太笨重。 */
+const THEME = (function () {
+  if (process.argv.includes('--fgm-dark')) return 'dark';
+  if (process.argv.includes('--fgm-light')) return 'light';
+  return null;
+})();
+if (THEME) nativeTheme.themeSource = THEME;
+// 当前到底该用哪套皮肤：命令行强制 > 系统主题
+function currentTheme() {
+  return THEME || (nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
+}
+
 // 验证「启动时的显卡警告」用：--fgm-fake-gpu "Intel(R) UHD Graphics 630"
 // 只把型号字符串透给页面（走 core 真实的分类逻辑），不碰任何真实检测。
 const FAKE_GPU = (function () {
+  if (!DEV) return '';                         // 只在开发模式下生效
   const i = process.argv.indexOf('--fgm-fake-gpu');
   if (i < 0 || !process.argv[i + 1]) return '';
   return process.argv[i + 1].replace(/^"|"$/g, '');
@@ -313,6 +433,7 @@ function runInstaller(installer) {
   });
   child.unref();
   console.log('[self-update] 已启动安装程序：' + installer);
+  shellLog('自更新：启动安装程序 ' + installer);
   // 安装程序会尝试关闭我们（electron-builder 的 CHECK_APP_RUNNING），我们主动退出更干净
   setTimeout(function () { app.quit(); }, 1500);
 }
@@ -377,6 +498,42 @@ async function offerSelfUpdate(info) {
   runInstaller(installer);
 }
 
+/* ---------------------------------------------------------------- 文件选择框
+   为什么不让 sidecar 自己弹（rfd）：sidecar 是**独立进程**、没有窗口，它弹出来的框
+   没有 owner 窗口 —— Windows 会把这个框放到应用窗口**后面**，用户点了「手动添加游戏」
+   只看到窗口没变化，以为点了没反应。
+   主进程的 dialog.showOpenDialog(mainWin, …) 带父窗口：一定是模态、一定压在最上层。
+   选完把路径交给 sidecar 里对应的 *_at 命令（业务逻辑仍在 core，界面调用名不变）。 */
+const PICKERS = {
+  add_game: {
+    title: '选择游戏目录（渲染 EXE 所在的那一层，或它的上层）',
+    properties: ['openDirectory'],
+    next: 'add_game_at', key: 'dir',
+  },
+  pick_game_exe: {
+    title: '选择游戏的启动 exe（渲染 EXE 本体）',
+    properties: ['openFile'],
+    filters: [{ name: '可执行文件', extensions: ['exe'] }],
+    next: 'pick_game_exe_at', key: 'exe',
+  },
+  pick_assets_dir: {
+    title: '选择资产目录（存放代理 DLL 与配置）',
+    properties: ['openDirectory'],
+    next: 'pick_assets_dir_at', key: 'dir',
+  },
+};
+
+async function pickFileThenCall(spec) {
+  const opt = { title: spec.title, properties: spec.properties };
+  if (spec.filters) opt.filters = spec.filters;
+  if (mainWin && !mainWin.isDestroyed()) opt.defaultPath = app.getPath('home');
+  const r = await dialog.showOpenDialog(mainWin, opt);
+  if (!r || r.canceled || !r.filePaths || !r.filePaths.length) return { canceled: true };
+  const payload = {};
+  payload[spec.key] = r.filePaths[0];
+  return callSidecar(spec.next, payload);
+}
+
 /* ---------------------------------------------------------------- 窗口 */
 
 function createWindow() {
@@ -419,7 +576,10 @@ function createWindow() {
       mainWin.webContents.executeJavaScript("document.body.classList.add('glass')").catch(function () {});
     }
   });
-  mainWin.loadFile(path.join(__dirname, 'ui', 'index.html'), FAKE_GPU ? { query: { fakeGpu: FAKE_GPU } } : undefined);
+  // 主题跟着系统走：页面拿到参数后挂 <html data-theme>（样式表按属性选择深色变量）
+  const loadQuery = { theme: currentTheme() };
+  if (FAKE_GPU) loadQuery.fakeGpu = FAKE_GPU;
+  mainWin.loadFile(path.join(__dirname, 'ui', 'index.html'), { query: loadQuery });
 
   // 页面里的外链一律交给系统浏览器
   mainWin.webContents.setWindowOpenHandler(function (info) {
@@ -446,6 +606,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(function () {
     ipcMain.handle('fgm:invoke', function (_e, cmd, args) {
+      // 文件选择框交给主进程弹（见 PICKERS 的说明）
+      if (PICKERS[cmd]) return pickFileThenCall(PICKERS[cmd]);
       return callSidecar(cmd, args).then(function (result) {
         // 自更新的「安装」这一半必须由外壳做（下载+校验在 sidecar 里，走 core）。
         // 界面保持不变：用原生确认框问一句，而不是在网页里加按钮。
@@ -456,7 +618,8 @@ if (!app.requestSingleInstanceLock()) {
       });
     });
     migrateDataIfNeeded();
-    startSidecar();
+    // 幂等：万一前面已经因为别的调用拉起过，这里不会再开第二个
+    ensureSidecar().catch(function (e) { shellLog('启动后台进程失败：' + e.message); });
     // 先把内置资产铺好再开窗口：首启要拷 ~92MB（1~2 秒），之后每个版本只做一次
     dropLegacyDocs();
 ensureBundledAssets().then(function () {
@@ -480,8 +643,16 @@ ensureBundledAssets().then(function () {
     }
   });
 
+  // 用户在系统设置里切浅色/深色（或到点自动切换）时，实时告诉页面换皮肤
+  nativeTheme.on('updated', function () {
+    if (mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('fgm:event:theme', { theme: currentTheme() });
+    }
+  });
+
   app.on('window-all-closed', function () { app.quit(); });
   app.on('before-quit', function () {
+    quitting = true;                 // 主动退出：侧车退出不再触发"重启 + 重发"
     if (sidecar && !sidecarDead) {
       try { sidecar.stdin.end(); } catch (e) { /* 忽略 */ }
       try { sidecar.kill(); } catch (e) { /* 忽略 */ }

@@ -24,6 +24,10 @@
 
 ## 构建 / 测试 / 打包
 
+> 本文档里的命令示例统一用 **PowerShell 7（`pwsh`）** 写。它们在 Windows PowerShell 5.1 下也能跑
+> （两个引擎并存，命令名不同：`pwsh` = 7、`powershell` = 5.1），但 7 更省事：UTF-8 不用 BOM、
+> `Invoke-RestMethod` 发 JSON 不会退化成 ANSI。仓库里带中文的 `.ps1` 仍然保留 BOM —— 那样两边都安全。
+
     # 1) 业务核心：测试 + 静态检查（工作区根只有 crates/core）
     cargo test
     cargo clippy --all-targets -- -D warnings
@@ -36,7 +40,7 @@
     <node.exe> apps\electron\node_modules\electron\dist\electron.exe apps\electron
 
     # 4) 出安装包（版本校验 → sidecar 冒烟 → electron-builder NSIS → SHA256）
-    powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1 [-Node <node.exe>]
+    pwsh -ExecutionPolicy Bypass -File packaging\build-release.ps1 [-Node <node.exe>]
 
 版本号只有一个真源：`crates/core/Cargo.toml`（core 的 `SELF_VERSION` 取自它）；
 打包脚本会校验它与 `apps/electron/package.json` 一致，对不上就拒绝出包。
@@ -89,7 +93,7 @@
 
 ## 打包
 
-    powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1
+    pwsh -ExecutionPolicy Bypass -File packaging\build-release.ps1
 
 会自动从 Cargo.toml 读版本号，产出 **dist\FrameGen-Manager-v<版本>-setup.exe** 和 SHA256SUMS.txt。
 装了 Inno Setup 6 的话还会顺带出安装包。
@@ -103,8 +107,8 @@
 
 内存单独量（会开一个窗口，所以没并进打包流程）：
 
-    powershell -ExecutionPolicy Bypass -File packaging\check-memory.ps1
-    powershell -ExecutionPolicy Bypass -File packaging\check-memory.ps1 -BudgetMB 60
+    pwsh -ExecutionPolicy Bypass -File packaging\check-memory.ps1
+    pwsh -ExecutionPolicy Bypass -File packaging\check-memory.ps1 -BudgetMB 60
 
 它启动 release 版、读「私有工作集」（任务管理器「内存」列那个口径），超预算返回 1。
 
@@ -824,7 +828,7 @@ assets / backups / 配置文件 / **下载记录**（`assets\update_state.json`�
 ## 图标
 
 * `packaging/app-icon.png` —— 1024×1024 母版（美术原图另存一份留档）。改图后重跑：
-  `powershell -ExecutionPolicy Bypass -File packaging\make-ico.ps1`
+  `pwsh -ExecutionPolicy Bypass -File packaging\make-ico.ps1`
 * `packaging/make-ico.ps1` —— 从母版生成并**提交** `packaging/app.ico`
   （16/20/24/32/40/48/64/96/128/256；≤64 存 DIB、≥96 存 PNG）。Cargo 因此**不需要任何
   图片 / 图标 crate**。脚本顺带把每一档**用 Win32 LoadImage 读回来**验证并出一张预览图。
