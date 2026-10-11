@@ -546,6 +546,24 @@ fn selftest() -> usize {
         // 认不出来的（比如以后的新型号）仍然是 Unknown：**不能**当成旧卡去拦，
         // 否则每出一代新卡用户都会被自己的工具挡住。
         ("NVIDIA GeForce RTX 9090", framegen_core::scan::GpuRoute::Unknown),
+        // 专业卡（用户实测反馈）：Quadro RTX 5000 是图灵 TU104，和 RTX 2080 同一颗核心、有 Tensor Core，
+        // 名字里含 "RTX 50" 曾经被当成 40/50 系直接拦住 —— 必须走 20 系那条 SM75 路。
+        ("Quadro RTX 5000 with Max-Q Design", framegen_core::scan::GpuRoute::Sm75),
+        ("NVIDIA Quadro RTX 5000", framegen_core::scan::GpuRoute::Sm75),
+        ("NVIDIA Quadro RTX 4000", framegen_core::scan::GpuRoute::Sm75),
+        ("NVIDIA Quadro RTX 8000", framegen_core::scan::GpuRoute::Sm75),
+        // 带 Ada 的专业卡才是 40 系一代（原生支持，不需要本 Mod）
+        ("NVIDIA RTX 5000 Ada Generation", framegen_core::scan::GpuRoute::NotNeeded),
+        ("NVIDIA RTX 4000 Ada Generation", framegen_core::scan::GpuRoute::NotNeeded),
+        // RTX A#### 是安培（和 30 系同路）
+        ("NVIDIA RTX A4000", framegen_core::scan::GpuRoute::Sm86),
+        ("NVIDIA RTX A5000", framegen_core::scan::GpuRoute::Sm86),
+        // 消费级 40/50 系不能被上面的改动漏掉
+        ("NVIDIA GeForce RTX 4060", framegen_core::scan::GpuRoute::NotNeeded),
+        ("NVIDIA GeForce RTX 4090", framegen_core::scan::GpuRoute::NotNeeded),
+        ("NVIDIA GeForce RTX 4050 Laptop GPU", framegen_core::scan::GpuRoute::NotNeeded),
+        ("NVIDIA GeForce RTX 5060 Ti", framegen_core::scan::GpuRoute::NotNeeded),
+        ("NVIDIA GeForce RTX 5090", framegen_core::scan::GpuRoute::NotNeeded),
     ] {
         ck(
             &mut fails,

@@ -2251,14 +2251,50 @@ pub fn detect_gpu() -> Option<String> {
     pick_gpu_name(&crate::gpu::enumerate(), crate::gpu::nvidia_smi_gpu_name())
 }
 
+/// 是不是**消费级**的 RTX 40 / 50 系型号（4060~4090、5050~5090）。
+///
+/// 不能用 `contains("RTX 40")` / `contains("RTX 50")`：专业卡的名字会撞进来 ——
+/// 「Quadro RTX 5000」（图灵 TU104，和 RTX 2080 同一颗核心、有 Tensor Core）里就含 `RTX 50`，
+/// 于是被判成「40/50 系、不需要本 Mod」，用户直接没法部署。
+/// 消费级的数字都是 `[5-9]0`（4060/4070/…/4090、5050/…/5090），
+/// 而专业卡是 4000/5000/6000（后两位 00）—— 这样就能分开。
+fn is_consumer_rtx_40_50(n: &str) -> bool {
+    for prefix in ["RTX 40", "RTX 50"] {
+        let mut rest = n;
+        while let Some(i) = rest.find(prefix) {
+            let after = &rest.as_bytes()[i + prefix.len()..];
+            if after.len() >= 2 && (b'5'..=b'9').contains(&after[0]) && after[1] == b'0' {
+                return true;
+            }
+            rest = &rest[i + prefix.len()..];
+        }
+    }
+    false
+}
+
 /// 按型号名判断该走哪条路由。名字判断是有依据的：这些字符串是驱动自己写进注册表的。
 pub fn classify_gpu(name: &str) -> GpuRoute {
     let n = name.to_ascii_uppercase();
-    if n.contains("RTX 50") || n.contains("RTX 40") {
+    // 40/50 系（消费级）原生支持帧生成 → 不需要本 Mod。**只匹配具体型号**，理由见上面的辅助函数。
+    if is_consumer_rtx_40_50(&n) {
         return GpuRoute::NotNeeded;
     }
     if n.contains("AMD") || n.contains("RADEON") || n.contains("INTEL") || n.contains("ARC A") {
         return GpuRoute::Unsupported;
+    }
+    /* 专业卡：命名和消费级撞车，必须在通用规则**之前**判，而且要分代次。
+       Quadro RTX 5000 = 图灵 TU104（和 RTX 2080 同核心、有 Tensor Core）→ 走 20 系那条路；
+       而 RTX 4000/5000/6000 Ada Generation 才是 40 系一代 → 不需要本 Mod。 */
+    if n.contains(" ADA") {
+        return GpuRoute::NotNeeded;
+    }
+    if n.contains("QUADRO RTX") {
+        return GpuRoute::Sm75;
+    }
+    // RTX A####（A2000~A6000）是安培 GA10x，和 RTX 30 系同一条路。
+    // 以前它们落到 Unknown：闸门虽然放行，但界面不会告诉用户该用 SM86 那份 ini。
+    if n.contains("RTX A") {
+        return GpuRoute::Sm86;
     }
     if n.contains("RTX 30") {
         return GpuRoute::Sm86;
