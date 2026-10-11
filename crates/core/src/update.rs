@@ -1478,6 +1478,85 @@ pub fn parse_sha256sums(text: &str, name: &str) -> Option<String> {
     None
 }
 
+/// 官方源的 SHA256SUMS.txt（首选路径）。
+fn fetch_sums_official(
+    client: &reqwest::blocking::Client,
+    tag: &str,
+    setup: &str,
+    sums_path: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<String> {
+    download_with_mirror(
+        client,
+        &self_release_url(tag, "SHA256SUMS.txt"),
+        sums_path,
+        cancel,
+        progress,
+        true,
+        None,
+    )
+    .context("下载 SHA256SUMS.txt 失败（校验和必须来自官方源，不能走镜像；网络不通时请到发布页手动下载）")?;
+    let sums = std::fs::read_to_string(sums_path).context("读 SHA256SUMS.txt 失败")?;
+    parse_sha256sums(&sums, setup).with_context(|| {
+        format!("这次发布的 SHA256SUMS.txt 里没有 {setup}（老版本没带这个文件），只能手动下载安装包")
+    })
+}
+
+/// 官方源不通时的退路：**多个镜像各取一份，两个以上镜像报同一个哈希才采信。**
+///
+/// 为什么是「两台一致」而不是「第一台成功就用」：单个镜像被控时，它可以同时换掉
+/// 清单里的哈希和安装包，那样校验等于没做 —— 而下一步是直接运行安装包。
+/// 两台互相独立的镜像同时被换、还换成一模一样的哈希，代价远高于收益。
+/// 官方源一旦能通，永远优先官方（见 fetch_sums_official）。
+fn fetch_sums_consensus(
+    client: &reqwest::blocking::Client,
+    tag: &str,
+    setup: &str,
+    sums_path: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<String> {
+    let official = self_release_url(tag, "SHA256SUMS.txt");
+    let mut heard: Vec<(String, String)> = Vec::new();
+    for (i, m) in mirrors("").into_iter().enumerate() {
+        let url = format!("{m}{official}");
+        let tmp = sums_path.with_file_name(format!("SHA256SUMS.mirror{i}.txt"));
+        progress(0, 0, "SHA256SUMS.txt（镜像）");
+        let got = download(
+            client,
+            "SHA256SUMS.txt",
+            Sink {
+                dest: &tmp,
+                cancel,
+                progress: &mut *progress,
+            },
+            &url,
+            None,
+            "镜像",
+        );
+        if got.is_ok() {
+            if let Ok(t) = std::fs::read_to_string(&tmp) {
+                if let Some(h) = parse_sha256sums(&t, setup) {
+                    crate::log::line(&format!("自更新：镜像 {m} 给出的校验和 {h}"));
+                    heard.push((m, h));
+                }
+            }
+        }
+    }
+    for (m, h) in &heard {
+        let agree = heard.iter().filter(|(_, x)| x.eq_ignore_ascii_case(h)).count();
+        if agree >= 2 {
+            crate::log::line(&format!("自更新：采用镜像一致的校验和（{m} 等 {agree} 个源）"));
+            return Ok(h.clone());
+        }
+    }
+    bail!(
+        "校验和拿不到：官方源不通，{} 个镜像里也没有两个给出一致的结果。请到发布页手动下载安装包（发布页里也写了官方 SHA256，可以自己核对）。",
+        heard.len()
+    )
+}
+
 /// 自更新的暂存结果。
 pub struct StagedUpdate {
     /// 已经下载并校验好的安装程序（在临时目录里）
@@ -1513,25 +1592,22 @@ pub fn stage_self_update(
     let sums_path = work.join("SHA256SUMS.txt");
     let dest = work.join(&setup);
 
-    // 1) 发布时给出的 SHA256 清单。**只走官方源，不走镜像。**
+    // 1) 发布时给出的 SHA256 清单。**优先官方源**；官方源不通时退到「多镜像一致」。
     //    以前这里和安装包一样走镜像：于是「哈希」和「被哈希的文件」来自同一台
     //    第三方镜像，那份校验等于自己给自己发证 —— 镜像换掉两个文件就能通过，
-    //    而下一步是静默执行安装包。清单只有几百字节，走官方源不慢。
+    //    而下一步是静默执行安装包。清单只有几百字节，官方源不慢，所以首选官方。
+    //    但**只走官方**会把连不上 github.com 的用户彻底挡在更新之外（实测：他们的
+    //    版本号靠镜像投票拿得到、于是看得到更新提示，却必然卡在这一步），所以要有退路。
     progress(0, 0, "SHA256SUMS.txt");
-    download_with_mirror(
-        client,
-        &self_release_url(&tag, "SHA256SUMS.txt"),
-        &sums_path,
-        cancel,
-        progress,
-        true,
-        None,
-    )
-    .context("下载 SHA256SUMS.txt 失败（校验和必须来自官方源，不能走镜像；网络不通时请到发布页手动下载）")?;
-    let sums = std::fs::read_to_string(&sums_path).context("读 SHA256SUMS.txt 失败")?;
-    let want = parse_sha256sums(&sums, &setup).with_context(|| {
-        format!("这次发布的 SHA256SUMS.txt 里没有 {setup}（老版本没带这个文件），只能手动下载安装包")
-    })?;
+    let want = match fetch_sums_official(client, &tag, &setup, &sums_path, cancel, progress) {
+        Ok(w) => w,
+        Err(e) => {
+            crate::log::line(&format!(
+                "自更新：官方源校验和拿不到（{e:#}），改用多镜像一致的结果"
+            ));
+            fetch_sums_consensus(client, &tag, &setup, &sums_path, cancel, progress)?
+        }
+    };
 
     // 2) 拿安装程序：只走发布资产 + 镜像，不走 jsDelivr。
     //    jsDelivr 对 .exe / .dll 一律返回 403（文本文件不受影响），那条路必然失败，
