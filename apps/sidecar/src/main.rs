@@ -372,6 +372,28 @@ fn sm_info(args: &Value) -> Result<Value, String> {
     }))
 }
 
+
+/// 开启/关闭某个游戏的 Smooth Motion（只写我们自己的单游戏 profile，绝不写全局）。
+fn sm_set_game(args: &Value) -> Result<Value, String> {
+    let name = arg_str(args, "name")?;
+    let exe = arg_str(args, "exe")?;
+    let on = args.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
+    let r = framegen_core::sm::set_game_sm(&name, std::path::Path::new(&exe), on)?;
+    framegen_core::log::line(&format!(
+        "[sm] set_game_sm name={name} on={on} ok={} rc_set={} readback={:?}",
+        r.ok, r.rc_set, r.readback
+    ));
+    Ok(json!({ "ok": r.ok, "readback": r.readback, "rcSet": r.rc_set, "message": r.message }))
+}
+
+/// 删掉我们为某个游戏建的 profile（还原）。
+fn sm_remove_game(args: &Value) -> Result<Value, String> {
+    let name = arg_str(args, "name")?;
+    let removed = framegen_core::sm::remove_game_sm(&name)?;
+    framegen_core::log::line(&format!("[sm] remove_game_sm name={name} removed={removed}"));
+    Ok(json!({ "removed": removed }))
+}
+
 /// 备份目录（界面上显示）
 fn backups_dir() -> String {
     framegen_core::util::backups_dir()
@@ -1396,6 +1418,8 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             Ok(json!({ "ok": ok, "total": total }))
         }
         "sm_info" => sm_info(args),
+        "sm_set_game" => sm_set_game(args),
+        "sm_remove_game" => sm_remove_game(args),
         "backups_dir" => Ok(Value::String(backups_dir())),
         "backups_info" => Ok(backups_info()),
         "clean_backups" => clean_backups(),
