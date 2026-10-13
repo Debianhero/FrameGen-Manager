@@ -805,6 +805,17 @@
             ? ('有新版本 ' + r.latest + '（当前 v' + r.current + '）—— 会弹窗问你是否现在下载安装；也可以点「打开发布页」自己去下。')
             : ('已是最新（当前 v' + r.current + '）。');
         }
+        // 有新版本时，把「本次更新内容」显示在卡片里（可滚动；长文由 core 截断）
+        var old = $('self-notes');
+        if (old) old.parentNode.removeChild(old);
+        if (r && r.hasUpdate && r.notes && $('self-note') && $('self-note').parentNode) {
+          var pre = document.createElement('pre');
+          pre.className = 'log logslim';
+          pre.id = 'self-notes';
+          pre.style.maxHeight = '220px';
+          pre.textContent = r.notes;
+          $('self-note').parentNode.appendChild(pre);
+        }
         toast(r.hasUpdate ? ('发现新版本：' + r.latest) : ('已是最新：v' + r.current), r.hasUpdate ? 'info' : 'ok', 9000);
       });
     });

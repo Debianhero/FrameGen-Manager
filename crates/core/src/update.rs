@@ -2421,3 +2421,46 @@ pub fn plan_download(
     let total: u64 = items.iter().map(|i| i.size).sum();
     Ok(DownloadPlan { items, skipped, total })
 }
+
+/// 更新日志在仓库里的路径（走 raw 取，和版本号同一套路：不占 API 配额、镜像也拿得到）。
+pub const RELEASE_NOTES_PATH: &str = "docs/release-notes.md";
+
+/// 取「本次更新内容」的正文（给更新界面显示用）。
+///
+/// 与 fetch_latest_self_version 的区别：这里只是给人看的文本，
+/// **不参与「要不要更新」的判断**，所以不需要「两个镜像报同一份」那套防投毒逻辑，
+/// 官方源优先、拿不到就用第一个成功的镜像即可。
+pub fn fetch_release_notes(client: &reqwest::blocking::Client) -> Option<String> {
+    let official = format!("https://raw.githubusercontent.com/{SELF_REPO}/main/{RELEASE_NOTES_PATH}");
+    if let Some(t) = fetch_text_one(client, &official) {
+        return Some(clip_notes(t));
+    }
+    for m in mirrors("") {
+        if let Some(t) = fetch_text_one(client, &format!("{m}{official}")) {
+            return Some(clip_notes(t));
+        }
+    }
+    None
+}
+
+fn fetch_text_one(client: &reqwest::blocking::Client, url: &str) -> Option<String> {
+    let resp = client.get(url).timeout(Duration::from_secs(8)).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let t = resp.text().ok()?;
+    if t.trim().is_empty() { None } else { Some(t) }
+}
+
+/// 太长就只留开头一段（界面上还要能看，不要糊满整屏）。
+fn clip_notes(t: String) -> String {
+    const MAX: usize = 4000;
+    if t.len() <= MAX {
+        return t;
+    }
+    let mut cut = MAX;
+    while cut > 0 && !t.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n…（完整内容见发布页面）", &t[..cut])
+}

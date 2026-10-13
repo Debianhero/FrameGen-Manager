@@ -1319,6 +1319,8 @@ fn check_self_update() -> Result<Value, String> {
         .unwrap_or(false);
     Ok(json!({
         "current": current,
+        // 有新版本时顺便把更新日志取回来（raw 小文本：不占 API 配额、镜像也拿得到）
+        "notes": if has_update { framegen_core::update::fetch_release_notes(&client) } else { None },
         "latest": latest,
         "hasUpdate": has_update,
         "releasesUrl": framegen_core::update::RELEASES_URL,
