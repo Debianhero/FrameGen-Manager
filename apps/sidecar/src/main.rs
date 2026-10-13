@@ -326,7 +326,7 @@ fn assets_status() -> Value {
 
 /// Smooth Motion 适用性（**只读**）：显卡/驱动门槛 + 本机 NvPresent 构建。
 /// 门槛按产品规定：驱动 >= 616.64 才允许部署。**全部只读**，不写任何驱动配置。
-fn sm_info() -> Value {
+fn sm_info(args: &Value) -> Result<Value, String> {
     let gate = framegen_core::sm::gate();
     // NvPresent 只作为内部诊断写日志，**不上界面**（用户要求不出现"未被验证"之类的字样）。
     let nvp_all = framegen_core::sm::nvpresent_all();
@@ -342,7 +342,22 @@ fn sm_info() -> Value {
         .collect();
     // 驱动【基础/全局 profile】里 SM 开关的现状（只读；本工具绝不写这一层）
     let base = framegen_core::sm::base_sm_state();
-    json!({
+    // 可选：给一个游戏 EXE，就读它在驱动里对应 profile 的 SM 值（只读）
+    let exe = arg_opt_str(args, "exe")?;
+    let exe_state = exe.map(|p| {
+        let st = framegen_core::sm::exe_sm_state(std::path::Path::new(&p));
+        json!({
+            "exe": p,
+            "found": st.found,
+            "state": st.state.state,
+            "value": st.state.value,
+            "matched": st.matched,
+            "profileCount": st.profile_count,
+            "sampleApps": st.sample_apps,
+            "diag": st.diag,
+        })
+    });
+    Ok(json!({
         "minDriver": framegen_core::sm::MIN_SM_DRIVER_TEXT,
         "isSm86": gate.is_sm86,
         "gpu": gate.gpu_name,
@@ -353,7 +368,8 @@ fn sm_info() -> Value {
         "reason": gate.reason,
         "nvpresent": nvp,
         "profileBase": { "state": base.state, "value": base.value },
-    })
+        "profileExe": exe_state,
+    }))
 }
 
 /// 备份目录（界面上显示）
@@ -1379,7 +1395,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             let (ok, total) = set_efficiency(&pids);
             Ok(json!({ "ok": ok, "total": total }))
         }
-        "sm_info" => Ok(sm_info()),
+        "sm_info" => sm_info(args),
         "backups_dir" => Ok(Value::String(backups_dir())),
         "backups_info" => Ok(backups_info()),
         "clean_backups" => clean_backups(),

@@ -156,13 +156,105 @@ pub const SM_SETTING_ID: u32 = 0xB0D3_84C0;
 
 /// 读**基础/全局 profile**里的 SM 开关（只读；本工具**绝不写**这一层）。
 pub fn base_sm_state() -> SettingState {
-    match nv::read_base_setting(SM_SETTING_ID) {
+    let sess = match nv::Session::open() {
+        Ok(s) => s,
+        Err(e) => return SettingState { state: "读取失败", value: None, detail: e },
+    };
+    let prof = match sess.base() {
+        Ok(p) => p,
+        Err(e) => return SettingState { state: "读取失败", value: None, detail: e },
+    };
+    state_from_read(sess.read(prof, SM_SETTING_ID))
+}
+
+fn state_from_read(r: Result<u32, String>) -> SettingState {
+    match r {
         Ok(1) => SettingState { state: "已开启", value: Some(1), detail: String::new() },
         Ok(0) => SettingState { state: "已关闭", value: Some(0), detail: String::new() },
         Ok(v) => SettingState { state: "未设置", value: Some(v), detail: String::new() },
         Err(e) if e.starts_with("rc=-160") => SettingState { state: "未设置", value: None, detail: e },
         Err(e) => SettingState { state: "读取失败", value: None, detail: e },
     }
+}
+
+/// 某个游戏 EXE 在驱动里对应的 SM 状态（只读）。
+#[derive(Debug, Clone)]
+pub struct ExeProfileState {
+    /// 驱动里有没有挂这个 EXE 的 profile
+    pub found: bool,
+    /// 命中的 profile 里登记的应用名（诊断用）
+    pub matched: Vec<String>,
+    pub state: SettingState,
+    pub detail: String,
+    /// 诊断：枚举到多少个 profile、第一个 profile 的应用名样例、各步返回码
+    pub profile_count: usize,
+    pub sample_apps: Vec<String>,
+    pub diag: Vec<String>,
+}
+
+/// 按 EXE 读 SM 开关。匹配规则：profile 登记的应用名与 EXE 的**文件名**一致
+/// （忽略大小写）—— NVIDIA 的 profile 里有的存完整路径、有的只存文件名。
+pub fn exe_sm_state(exe: &std::path::Path) -> ExeProfileState {
+    let want = exe
+        .file_name()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut out = ExeProfileState {
+        found: false,
+        matched: Vec::new(),
+        state: SettingState { state: "未设置", value: None, detail: String::new() },
+        detail: String::new(),
+        profile_count: 0,
+        sample_apps: Vec::new(),
+        diag: Vec::new(),
+    };
+    if want.is_empty() {
+        out.state = SettingState { state: "读取失败", value: None, detail: "没有给 EXE 路径".to_owned() };
+        out.detail = "没有给 EXE 路径".to_owned();
+        return out;
+    }
+    let sess = match nv::Session::open() {
+        Ok(s) => s,
+        Err(e) => {
+            out.state = SettingState { state: "读取失败", value: None, detail: e.clone() };
+            out.detail = e;
+            return out;
+        }
+    };
+    let profs = sess.profiles();
+    out.profile_count = profs.len();
+    out.diag.push(format!("profiles={}", profs.len()));
+    for (idx, prof) in profs.into_iter().enumerate() {
+        let apps = sess.apps(prof);
+        if idx == 0 {
+            out.sample_apps = apps.clone();
+            out.diag.push(format!("apps(first profile)={}", apps.len()));
+            // 当前驱动/接口版本上 EnumApplications 被拒（rc=-9 INVALID_POINTER）：
+            // 拿不到应用列表就没法按 EXE 匹配，直接停，不白跑几百次调用。
+            if apps.is_empty() {
+                out.diag.push("读取应用列表被拒，按 EXE 的匹配暂不可用".to_owned());
+                break;
+            }
+        }
+        let hit = apps.iter().any(|a| {
+            std::path::Path::new(a)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_ascii_lowercase() == want)
+                .unwrap_or(false)
+        });
+        if !hit {
+            continue;
+        }
+        out.found = true;
+        out.matched = apps;
+        out.state = state_from_read(sess.read(prof, SM_SETTING_ID));
+        break;
+    }
+    if !out.found {
+        out.detail = "驱动里没有挂这个 EXE 的 profile（还没为它建过驱动配置）".to_owned();
+        out.diag.push(format!("scanned={} profiles, exe={}", out.profile_count, want));
+    }
+    out
 }
 
 /// NVAPI 动态调用（只读）。不链接 import 库 —— nvapi64.dll 随 NVIDIA 驱动安装。
@@ -197,58 +289,215 @@ mod nv {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// 读基础 profile 里的一个 u32 设置项。
-    pub fn read_base_setting(id: u32) -> Result<u32, String> {
-        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-        unsafe {
-            let lib = LoadLibraryW(wide("nvapi64.dll").as_ptr());
-            if lib.is_null() {
-                return Err("加载 nvapi64.dll 失败（没装 NVIDIA 驱动？）".to_owned());
-            }
-            let Some(p) = GetProcAddress(lib, c"nvapi_QueryInterface".as_ptr() as *const u8) else {
-                return Err("nvapi64.dll 里没有 nvapi_QueryInterface".to_owned());
-            };
-            let query: FnQuery = std::mem::transmute(p);
 
-            let init: unsafe extern "C" fn() -> i32 = std::mem::transmute(query(ID_INIT));
-            let rc = init();
-            if rc != 0 {
-                return Err(format!("NvAPI_Initialize rc={rc}"));
+    // ---- 按 EXE 定位 profile（只读）----
+
+    const ID_ENUM_PROFILES: u32 = 0xBC37_1EE0;
+    const ID_ENUM_APPLICATIONS: u32 = 0x7FA2_173A;
+    /// NVAPI_END_ENUMERATION
+    const END_ENUM: i32 = -7;
+
+    /// NVDRS_APPLICATION：4 个内联的 2048 wchar 名字数组（和 NVAPI 头文件一致）。
+    #[repr(C)]
+    struct NvApplication {
+        version: u32,
+        is_predefined: u32,
+        app_name: [u16; 2048],
+        user_friendly_name: [u16; 2048],
+        launcher: [u16; 2048],
+        file_in_folder: [u16; 2048],
+    }
+
+    impl Default for NvApplication {
+        fn default() -> Self {
+            NvApplication {
+                version: ((std::mem::size_of::<NvApplication>() as u32) << 16) | 1,
+                is_predefined: 0,
+                app_name: [0; 2048],
+                user_friendly_name: [0; 2048],
+                launcher: [0; 2048],
+                file_in_folder: [0; 2048],
             }
-            let mut sess: *mut c_void = std::ptr::null_mut();
-            let create: unsafe extern "C" fn(*mut *mut c_void) -> i32 =
-                std::mem::transmute(query(ID_CREATE_SESSION));
-            let rc = create(&mut sess);
-            if rc != 0 {
-                return Err(format!("DRS_CreateSession rc={rc}"));
+        }
+    }
+
+    fn wide_to_string(buf: &[u16]) -> String {
+        let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..end])
+    }
+
+    /// 一次 NVAPI 会话（只读使用）。
+    pub struct Session {
+        sess: *mut c_void,
+        query: FnQuery,
+    }
+
+    impl Session {
+        pub fn open() -> Result<Session, String> {
+            use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+            unsafe {
+                let lib = LoadLibraryW(wide("nvapi64.dll").as_ptr());
+                if lib.is_null() {
+                    return Err("加载 nvapi64.dll 失败（没装 NVIDIA 驱动？）".to_owned());
+                }
+                let Some(p) = GetProcAddress(lib, c"nvapi_QueryInterface".as_ptr() as *const u8) else {
+                    return Err("nvapi64.dll 里没有 nvapi_QueryInterface".to_owned());
+                };
+                let query: FnQuery = std::mem::transmute(p);
+                let init: unsafe extern "C" fn() -> i32 = std::mem::transmute(query(ID_INIT));
+                let rc = init();
+                if rc != 0 {
+                    return Err(format!("NvAPI_Initialize rc={rc}"));
+                }
+                let mut sess: *mut c_void = std::ptr::null_mut();
+                let create: unsafe extern "C" fn(*mut *mut c_void) -> i32 =
+                    std::mem::transmute(query(ID_CREATE_SESSION));
+                let rc = create(&mut sess);
+                if rc != 0 {
+                    return Err(format!("DRS_CreateSession rc={rc}"));
+                }
+                let load: unsafe extern "C" fn(*mut c_void) -> i32 =
+                    std::mem::transmute(query(ID_LOAD_SETTINGS));
+                let rc = load(sess);
+                if rc != 0 {
+                    return Err(format!("DRS_LoadSettings rc={rc}"));
+                }
+                Ok(Session { sess, query })
             }
-            let load: unsafe extern "C" fn(*mut c_void) -> i32 =
-                std::mem::transmute(query(ID_LOAD_SETTINGS));
-            let rc = load(sess);
-            if rc != 0 {
-                return Err(format!("DRS_LoadSettings rc={rc}"));
+        }
+
+        pub(crate) fn base(&self) -> Result<*mut c_void, String> {
+            unsafe {
+                let mut prof: *mut c_void = std::ptr::null_mut();
+                let f: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> i32 =
+                    std::mem::transmute((self.query)(ID_GET_BASE_PROFILE));
+                let rc = f(self.sess, &mut prof);
+                if rc != 0 {
+                    return Err(format!("DRS_GetBaseProfile rc={rc}"));
+                }
+                Ok(prof)
             }
-            let mut prof: *mut c_void = std::ptr::null_mut();
-            let getbase: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> i32 =
-                std::mem::transmute(query(ID_GET_BASE_PROFILE));
-            let rc = getbase(sess, &mut prof);
-            if rc != 0 {
-                return Err(format!("DRS_GetBaseProfile rc={rc}"));
+        }
+
+        /// 枚举所有 profile 的句柄（最多 5000 个，防死循环）。
+        pub fn profiles(&self) -> Vec<*mut c_void> {
+            let mut out = Vec::new();
+            unsafe {
+                let raw = (self.query)(ID_ENUM_PROFILES);
+                if raw.is_null() {
+                    crate::log::line("[sm] nvapi_QueryInterface(EnumProfiles) 返回空");
+                    return out;
+                }
+                let f: unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void) -> i32 =
+                    std::mem::transmute(raw);
+                let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                for i in 0..512u32 {
+                    let mut prof: *mut c_void = std::ptr::null_mut();
+                    let rc = f(self.sess, i, &mut prof);
+                    if rc != 0 || prof.is_null() {
+                        if i == 0 {
+                            crate::log::line(&format!("[sm] EnumProfiles(0) rc={rc}"));
+                        }
+                        break;
+                    }
+                    // 有的驱动/接口版本不会返回 END_ENUMERATION，而是把同一个句柄一直吐出来：
+                    // 句柄重复即视为枚举结束（否则会白跑几千次 API 调用）。
+                    if !seen.insert(prof as usize) {
+                        break;
+                    }
+                    out.push(prof);
+                }
             }
-            let mut st = NvSetting::default();
-            st.version = ((std::mem::size_of::<NvSetting>() as u32) << 16) | 1;
-            let get: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut NvSetting) -> i32 =
-                std::mem::transmute(query(ID_GET_SETTING));
-            let rc = get(sess, prof, id, &mut st);
-            if rc != 0 {
-                return Err(format!("rc={rc}"));
+            out
+        }
+
+        /// 取某个 profile 下挂的所有应用程序名（通常是 exe 的完整路径）。
+        ///
+        /// 注意签名：NVAPI 的 DRS_EnumApplications 是**5 个参数**
+        /// （hSession, hProfile, startIndex, **ref appCount**, pApps）——
+        /// 少传那个 count 会读进垃圾参数并让本进程崩溃（我们踩过）。
+        /// 结构体用 NVDRS_APPLICATION_V4 的布局（version=0x500C0004 即 size<<16|4），
+        /// 并用一整块足够大的缓冲区，避免驱动写越界。
+        pub fn apps(&self, prof: *mut c_void) -> Vec<String> {
+            const SLOTS: usize = 32;
+            const APP_SIZE: usize = 20492; // V4: 4+4+5*4096+4
+            let mut buf = vec![0u8; SLOTS * APP_SIZE];
+            let ver: u32 = ((APP_SIZE as u32) << 16) | 4;
+            for i in 0..SLOTS {
+                let off = i * APP_SIZE;
+                buf[off..off + 4].copy_from_slice(&ver.to_le_bytes());
             }
-            Ok(u32::from_le_bytes([
-                st.current[0],
-                st.current[1],
-                st.current[2],
-                st.current[3],
-            ]))
+            let mut count: u32 = SLOTS as u32;
+            unsafe {
+                let raw = (self.query)(ID_ENUM_APPLICATIONS);
+                if raw.is_null() {
+                    return Vec::new();
+                }
+                let f: unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_void,
+                    u32,
+                    *mut u32,
+                    *mut c_void,
+                ) -> i32 = std::mem::transmute(raw);
+                let rc = f(self.sess, prof, 0, &mut count, buf.as_mut_ptr() as *mut c_void);
+                if rc != 0 {
+                    crate::log::line(&format!("[sm] EnumApplications rc={rc} count={count}"));
+                    return Vec::new();
+                }
+            }
+            let n = (count as usize).min(SLOTS);
+            let mut out: Vec<String> = Vec::new();
+            // 一个应用条目里 4 个名字字段都可能用来标识游戏：
+            //   appName(偏移 8) / userFriendlyName(4104) / launcher(8200) / fileInFolder(12296)
+            // NVIDIA 的预置 profile 有时只填 launcher 或 fileInFolder，所以四个都要看。
+            const NAME_OFFSETS: [usize; 4] = [8, 4104, 8200, 12296];
+            for i in 0..n {
+                let base = i * APP_SIZE;
+                for off in NAME_OFFSETS {
+                    let start = base + off;
+                    let mut name_buf = [0u16; 2048];
+                    for (k, slot) in name_buf.iter_mut().enumerate() {
+                        let p = start + k * 2;
+                        if p + 1 >= buf.len() {
+                            break;
+                        }
+                        *slot = u16::from_le_bytes([buf[p], buf[p + 1]]);
+                    }
+                    let name = wide_to_string(&name_buf);
+                    if !name.is_empty() {
+                        out.push(name);
+                    }
+                }
+            }
+            out
+        }
+
+        /// 读任意 profile 里的一个 u32 设置项。
+        pub fn read(&self, prof: *mut c_void, id: u32) -> Result<u32, String> {
+            unsafe {
+                let mut st = NvSetting {
+                    version: ((std::mem::size_of::<NvSetting>() as u32) << 16) | 1,
+                    ..Default::default()
+                };
+                let raw = (self.query)(ID_GET_SETTING);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_GetSetting".to_owned());
+                }
+                let f: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut NvSetting) -> i32 =
+                    std::mem::transmute(raw);
+                let rc = f(self.sess, prof, id, &mut st);
+                if rc != 0 {
+                    return Err(format!("rc={rc}"));
+                }
+                Ok(u32::from_le_bytes([
+                    st.current[0],
+                    st.current[1],
+                    st.current[2],
+                    st.current[3],
+                ]))
+            }
         }
     }
 }
+
