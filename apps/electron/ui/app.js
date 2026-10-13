@@ -1922,22 +1922,7 @@
         : '不满足要求时无法部署；原因见上面的提示。');
       var sub = document.getElementById('sm-sub');
       if (sub) sub.textContent = GAMES.length + ' 个游戏 · 一个游戏只能启用一个引擎（帧生成 / DLSS5 / Smooth Motion）';
-      var box = document.getElementById('sm-list');
-      if (box) {
-        box.textContent = '';
-        if (!GAMES.length) {
-          box.appendChild(h('div', { class: 'empty', text: '游戏库是空的 —— 点右上「扫描游戏库」。扫描只读启动器记录，不改动任何游戏文件。' }));
-        } else {
-          GAMES.forEach(function (g, i) {
-            box.appendChild(gameCard(g, i, {
-              label: '开启 Smooth Motion',
-              onClick: function () {
-                toast('Smooth Motion 的写入功能还在开发中：目前已经能读显卡/驱动、并按 616.64 门槛判定是否允许部署。', 'info', 9000);
-              },
-            }));
-          });
-        }
-      }
+      paintSmList();
       return r;
     }).catch(function (e) {
       setSmText('sm-note', '检测失败：' + errText(e));
@@ -1945,6 +1930,49 @@
     });
   }
 
+  // Smooth Motion 列表：状态来自驱动里我们自己的 profile（三态：无 / 已开启 / 已关闭）
+  function paintSmList() {
+    var box = document.getElementById('sm-list');
+    if (!box) return;
+    box.textContent = '';
+    if (!GAMES.length) {
+      box.appendChild(h('div', { class: 'empty', text: '游戏库是空的 —— 点右上「扫描游戏库」。扫描只读启动器记录，不改动任何游戏文件。' }));
+      return;
+    }
+    var names = GAMES.map(function (g) { return g.name || ''; });
+    invoke('sm_game_states', { names: names }).then(function (d) {
+      var map = {};
+      ((d && d.states) || []).forEach(function (s) { map[s.name] = s.value; });
+      box.textContent = '';
+      GAMES.forEach(function (g, i) {
+        var v = map[g.name];
+        var on = v === 1;
+        box.appendChild(gameCard(g, i, {
+          label: on ? '关闭 Smooth Motion' : '开启 Smooth Motion',
+          onClick: function () { toggleSm(g, !on); },
+        }));
+      });
+    }).catch(function (e) {
+      box.appendChild(h('div', { class: 'empty', text: '读取 Smooth Motion 状态失败：' + errText(e) }));
+    });
+  }
+
+  // 开启 / 关闭某个游戏的 Smooth Motion（只写我们自己的单游戏 profile，绝不写全局）
+  function toggleSm(g, on) {
+    if (!g || !g.name) return;
+    var exe = g.target || g.dir || '';
+    if (g.deployed && g.deployed !== '未部署') {
+      var go = window.confirm('这个游戏已经用「' + g.deployed + '」部署过。\n\n同一个游戏同时只能启用一个引擎，继续前建议先用帧生成页把它还原成原版。\n\n仍要继续开启 Smooth Motion 吗？');
+      if (!go) return;
+    }
+    invoke('sm_set_game', { name: g.name, exe: exe, on: !!on }).then(function (r) {
+      var ok = r && r.ok;
+      toast((ok ? '' : '未生效：') + ((r && r.message) || (on ? '已开启' : '已关闭')), ok ? 'info' : 'warn', 6000);
+      paintSmList();
+    }).catch(function (e) {
+      toast('Smooth Motion 操作失败：' + errText(e), 'error', 8000);
+    });
+  }
   // ---------------------------------------------------------------- 页面切换与绑定
   var PAGES = { lib: 'page-lib', sm: 'page-sm', dlss5: 'page-dlss5', settings: 'page-settings', help: 'page-help' };
 
