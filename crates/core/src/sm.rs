@@ -266,21 +266,39 @@ mod nv {
     const ID_CREATE_SESSION: u32 = 0x0694_D52E;
     const ID_LOAD_SETTINGS: u32 = 0x375D_BD6B;
     const ID_GET_BASE_PROFILE: u32 = 0xDA84_66A0;
-    const ID_GET_SETTING: u32 = 0x73BF_8338;
+    /// 读设置：优先用 PI 的首选 ID（它和回退 ID 的参数个数不同，这里必须用首选）
+    const ID_GET_SETTING: u32 = 0xEA99_498D;
 
-    /// NVDRS_SETTING：56 字节，布局与 Profile Inspector 的声明一致
-    /// （version 字段里编码了结构体大小，驱动会校验它）。
+    /// NVDRS_SETTING：**12320 字节**，与 Profile Inspector 的声明逐字段对齐
+    /// （version 低位放结构体大小、高位放版本号：size | (1 << 16)）。
     #[repr(C)]
-    #[derive(Default, Clone, Copy)]
+    #[derive(Clone, Copy)]
     struct NvSetting {
         version: u32,
-        setting_name: u32,
+        /// 设置名（2048 个 wchar，内联；这里用不到但必须占位，否则偏移全错）
+        setting_name: [u16; 2048],
+        setting_id: u32,
         setting_type: u32,
         setting_location: u32,
         is_current_predefined: u32,
         is_predefined_valid: u32,
-        predefined: [u8; 16],
-        current: [u8; 16],
+        predefined: [u8; 4100],
+        current: [u8; 4100],
+    }
+
+    impl NvSetting {
+        fn new(id: u32) -> NvSetting {
+            let mut st: NvSetting = unsafe { std::mem::zeroed() };
+            st.version = (std::mem::size_of::<NvSetting>() as u32) | (1 << 16);
+            st.setting_id = id;
+            st
+        }
+
+        fn value(&self) -> u32 {
+            u32::from_le_bytes([
+                self.current[0], self.current[1], self.current[2], self.current[3],
+            ])
+        }
     }
 
     type FnQuery = unsafe extern "C" fn(u32) -> *mut c_void;
@@ -450,26 +468,26 @@ mod nv {
         /// 读任意 profile 里的一个 u32 设置项。
         pub fn read(&self, prof: *mut c_void, id: u32) -> Result<u32, String> {
             unsafe {
-                let mut st = NvSetting {
-                    version: ((std::mem::size_of::<NvSetting>() as u32) << 16) | 1,
-                    ..Default::default()
-                };
+                let mut st = NvSetting::new(id);
                 let raw = (self.query)(ID_GET_SETTING);
                 if raw.is_null() {
                     return Err("驱动没有提供 DRS_GetSetting".to_owned());
                 }
-                let f: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut NvSetting) -> i32 =
-                    std::mem::transmute(raw);
-                let rc = f(self.sess, prof, id, &mut st);
+                // 注意：DRS_GetSetting 实际是【5 个参数】（最后还有一个 ref uint）。
+                // 少传会让被调函数读到垃圾参数，表现为「什么都读不到」——我们踩过。
+                let f: unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_void,
+                    u32,
+                    *mut NvSetting,
+                    *mut u32,
+                ) -> i32 = std::mem::transmute(raw);
+                let mut extra: u32 = 0;
+                let rc = f(self.sess, prof, id, &mut st, &mut extra);
                 if rc != 0 {
                     return Err(format!("rc={rc}"));
                 }
-                Ok(u32::from_le_bytes([
-                    st.current[0],
-                    st.current[1],
-                    st.current[2],
-                    st.current[3],
-                ]))
+                Ok(st.value())
             }
         }
     }
