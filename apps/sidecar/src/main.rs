@@ -394,6 +394,21 @@ fn sm_remove_game(args: &Value) -> Result<Value, String> {
     Ok(json!({ "removed": removed }))
 }
 
+
+/// 批量查询多个游戏在我们 profile 里的 SM 状态（界面一次调用拿全部）。
+/// 返回 [{ name, value }]：value = null 表示没有我们建的配置。
+fn sm_game_states(args: &Value) -> Result<Value, String> {
+    let names = args.get("names").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for n in names {
+        let name = n.as_str().unwrap_or("").to_string();
+        if name.is_empty() { continue; }
+        let value = framegen_core::sm::game_sm_value(&name).unwrap_or(None);
+        out.push(json!({ "name": name, "value": value }));
+    }
+    Ok(json!({ "states": out }))
+}
+
 /// 备份目录（界面上显示）
 fn backups_dir() -> String {
     framegen_core::util::backups_dir()
@@ -1420,6 +1435,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         "sm_info" => sm_info(args),
         "sm_set_game" => sm_set_game(args),
         "sm_remove_game" => sm_remove_game(args),
+        "sm_game_states" => sm_game_states(args),
         "backups_dir" => Ok(Value::String(backups_dir())),
         "backups_info" => Ok(backups_info()),
         "clean_backups" => clean_backups(),
