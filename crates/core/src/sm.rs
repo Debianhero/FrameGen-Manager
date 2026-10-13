@@ -705,10 +705,7 @@ pub fn set_game_sm(
     }
     let rc_set = sess.set_dword(prof, SM_SETTING_ID, want)?;
     sess.save()?;
-    let readback = match sess.read(prof, SM_SETTING_ID) {
-        Ok(v) => Some(v),
-        Err(_) => None,
-    };
+    let readback = sess.read(prof, SM_SETTING_ID).ok();
     let ok = readback == Some(want);
     Ok(SmWriteResult {
         ok,
