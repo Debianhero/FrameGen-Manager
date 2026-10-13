@@ -1881,8 +1881,72 @@
     });
   }
 
+  /* ---------------------------------------------------------------- Smooth Motion（30 系实验性）
+     **只读**：显示适用性（显卡 / 驱动 / 门槛判定）与驱动里全局那一项的现状。
+     每个游戏的状态来自我们自己的记录；写入路径（单 EXE 的驱动配置）在下一步接入，
+     所以卡片上的按钮暂时只说明现状。布局与帧生成页共用 gameCard，观感完全一致。 */
+  function setSmText(id, txt) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  }
+
+  function renderSm() {
+    if (!document.getElementById('page-sm')) return Promise.resolve();
+    var chips = document.getElementById('sm-chips');
+    if (chips) chips.innerHTML = '<span class="chip gray">检测中…</span>';
+    setSmText('sm-note', '正在读取显卡与驱动…');
+    return invoke('sm_info').then(function (r) {
+      var allowed = !!(r && r.allowed);
+      if (chips) {
+        chips.innerHTML = allowed
+          ? '<span class="chip">可以部署</span>'
+          : '<span class="chip gray">当前不适用</span>';
+      }
+      setSmText('sm-gpu', (r && r.gpu) || '读不到（需要 NVIDIA 显卡）');
+      setSmText('sm-drv', (r && r.driver) || '读不到');
+      setSmText('sm-min', (r && r.minDriver) || '616.64');
+      var gate = document.getElementById('sm-gate');
+      if (gate) {
+        if (allowed) {
+          gate.className = 'gate hidden';
+          gate.textContent = '';
+        } else {
+          gate.className = 'gate';
+          gate.textContent = (r && r.reason) || '当前不适用';
+        }
+      }
+      var base = (r && r.profileBase) || {};
+      setSmText('sm-base', base.state || '读不到');
+      setSmText('sm-note', allowed
+        ? '驱动满足本工具要求（>=' + ((r && r.minDriver) || '616.64') + '）。'
+        : '不满足要求时无法部署；原因见上面的提示。');
+      var sub = document.getElementById('sm-sub');
+      if (sub) sub.textContent = GAMES.length + ' 个游戏 · 一个游戏只能启用一个引擎（帧生成 / DLSS5 / Smooth Motion）';
+      var box = document.getElementById('sm-list');
+      if (box) {
+        box.textContent = '';
+        if (!GAMES.length) {
+          box.appendChild(h('div', { class: 'empty', text: '游戏库是空的 —— 点右上「扫描游戏库」。扫描只读启动器记录，不改动任何游戏文件。' }));
+        } else {
+          GAMES.forEach(function (g, i) {
+            box.appendChild(gameCard(g, i, {
+              label: '开启 Smooth Motion',
+              onClick: function () {
+                toast('Smooth Motion 的写入功能还在开发中：目前已经能读显卡/驱动、并按 616.64 门槛判定是否允许部署。', 'info', 9000);
+              },
+            }));
+          });
+        }
+      }
+      return r;
+    }).catch(function (e) {
+      setSmText('sm-note', '检测失败：' + errText(e));
+      if (chips) chips.innerHTML = '<span class="chip gray">检测失败</span>';
+    });
+  }
+
   // ---------------------------------------------------------------- 页面切换与绑定
-  var PAGES = { lib: 'page-lib', dlss5: 'page-dlss5', settings: 'page-settings', help: 'page-help' };
+  var PAGES = { lib: 'page-lib', sm: 'page-sm', dlss5: 'page-dlss5', settings: 'page-settings', help: 'page-help' };
 
   function setupTabs() {
     var tabs = document.querySelectorAll('.tab');
@@ -1899,6 +1963,8 @@
         /* 日志已移到主页左栏：进程序实时刷新，切页不再需要读日志。
            进设置页则刷一次备份情况（用户点进来基本就是想知道"有没有东西可以清"）。 */
         if (want === 'settings') refreshBackups().catch(function () { });
+        // 进 Smooth Motion 页就重新检测一次（显卡/驱动/门槛/驱动里的全局现状，全部只读）
+        if (want === 'sm') renderSm().catch(function () { });
       });
     });
   }
@@ -1994,6 +2060,9 @@ if ($('sel-proxy')) {
       if (!url) { toast('还读不到发布页地址。', 'info', 5000); return; }
       invoke('open_url', { url: url }).catch(function (e) { toast('打开失败：' + errText(e), 'err'); });
     });
+    // Smooth Motion 页的两个按钮：重新检测（只读）与扫描游戏库（复用同一个动作）
+    if ($('btn-sm-refresh')) $('btn-sm-refresh').addEventListener('click', function () { renderSm().catch(function () { }); });
+    if ($('btn-sm-scan') && $('btn-scan')) $('btn-sm-scan').addEventListener('click', function () { $('btn-scan').click(); });
     if ($('btn-clean-backups')) $('btn-clean-backups').addEventListener('click', function () {
       var me = this;
       invoke('backups_info').then(function (info) {

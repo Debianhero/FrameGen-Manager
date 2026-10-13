@@ -13,6 +13,7 @@
   <div class="spacer"></div>
   <nav class="tabs" id="tabs">
     <button class="tab active" data-page="lib" type="button">帧生成</button>
+    <button class="tab" data-page="sm" type="button">Smooth Motion（实验）</button>
     <button class="tab" data-page="dlss5" type="button">DLSS5（实验性）</button>
     <button class="tab" data-page="settings" type="button">设置</button>
     <button class="tab" data-page="help" type="button">打赏赞助</button>
@@ -99,6 +100,49 @@
   </div>
 </main>
 
+<!-- ------------------------------------------------ Smooth Motion 页（30 系实验性） -->
+<main class="page hidden" id="page-sm">
+  <div class="layout">
+
+    <aside class="side">
+      <section class="panel">
+        <div class="ctitle">Smooth Motion 适用性</div>
+        <div class="chips" id="sm-chips"><span class="chip gray">读取中…</span></div>
+        <div class="kv2"><span>显卡</span><b id="sm-gpu">-</b></div>
+        <div class="kv2"><span>驱动版本</span><b id="sm-drv">-</b></div>
+        <div class="kv2"><span>最低要求</span><b id="sm-min">616.64</b></div>
+        <div class="gate hidden" id="sm-gate"></div>
+        <div class="hint" id="sm-note">读取中…</div>
+        <button class="btn wide" id="btn-sm-refresh" type="button">重新检测</button>
+      </section>
+
+      <section class="panel">
+        <div class="ctitle">驱动里的 Smooth Motion 状态</div>
+        <div class="kv2"><span>全局（基础 profile）</span><b id="sm-base">-</b></div>
+        <div class="hint">本工具只写「单个游戏」的驱动配置，绝不修改全局。这一行显示驱动里的现状，只读。</div>
+      </section>
+
+      <section class="panel">
+        <div class="ctitle">说明</div>
+        <div class="hint">解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X），仅 30 系可用。与「帧生成 / DLSS5」互斥：同一个游戏只能启用一个引擎。</div>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div class="listhead">
+        <div class="lh-text">
+          <h1>Smooth Motion</h1>
+          <div class="sub" id="sm-sub">正在载入…</div>
+        </div>
+        <div class="lh-actions">
+          <button class="btn primary" id="btn-sm-scan" type="button" title="扫描 Steam / Epic / WeGame 的游戏库（只读）">扫描游戏库</button>
+        </div>
+      </div>
+      <div class="liblist" id="sm-list"></div>
+    </section>
+
+  </div>
+</main>
 <!-- ------------------------------------------------ DLSS5 页 -->
 <main class="page hidden" id="page-dlss5">
   <div class="pagehead">
