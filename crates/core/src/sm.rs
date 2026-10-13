@@ -726,19 +726,22 @@ pub fn set_game_sm(
     if let Err(e) = sess.create_application(prof, exe) {
         crate::log::line(&format!("[sm] CreateApplication 提示：{e}"));
     }
-    // 开启 = 写 1；关闭 = 删掉我们这一项（等价于"跟随全局"，PI 也是这么做的）
-    let rc_set = if on {
-        sess.set_dword(prof, SM_SETTING_ID, want)?
+    // 开启 = 写 1；关闭 = 写显式 0（本游戏强制关闭）。
+    // 极端情况下驱动不接受 0，则退化为删掉这一项（= 跟随全局）。
+    let mut rc_set;
+    let mut deleted = false;
+    if on {
+        rc_set = sess.set_dword(prof, SM_SETTING_ID, 1)?;
     } else {
-        sess.delete_setting(prof, SM_SETTING_ID)?
-    };
+        rc_set = sess.set_dword(prof, SM_SETTING_ID, 0)?;
+        if sess.read(prof, SM_SETTING_ID).ok() != Some(0) {
+            rc_set = sess.delete_setting(prof, SM_SETTING_ID)?;
+            deleted = true;
+        }
+    }
     sess.save()?;
-    // 复核：
-    //  · 开启 —— 读回值必须是 1（实测：驱动返回码会骗人，读回的值不会）
-    //  · 关闭 —— 判据是"删除这一项"这个调用本身成功；之后读到的值会变成**跟随全局**
-    //    （用户全局开着就是 1，这不是失败，所以不能拿值来判断）
     let readback = sess.read(prof, SM_SETTING_ID).ok();
-    let ok = if on { readback == Some(1) } else { rc_set == 0 };
+    let ok = if on { readback == Some(1) } else if deleted { rc_set == 0 } else { readback == Some(0) };
     Ok(SmWriteResult {
         ok,
         readback,
@@ -746,8 +749,10 @@ pub fn set_game_sm(
         message: if ok {
             if on {
                 format!("已开启（本游戏强制开启；已读回复核确认，驱动返回码 {rc_set}）")
+            } else if deleted {
+                format!("已取消本游戏的设置，改为跟随全局（删除返回 {rc_set}）")
             } else {
-                format!("已取消本游戏的设置，改为跟随全局（删除调用返回 {rc_set}）")
+                format!("已关闭本游戏的 Smooth Motion（读回复核 = 0；驱动返回码 {rc_set}）")
             }
         } else if on {
             format!("写入后复核不符：期望 1，实际读到 {readback:?}")
