@@ -382,8 +382,10 @@ fn sm_set_game(args: &Value) -> Result<Value, String> {
     let name = arg_str(args, "name")?;
     let exe = arg_str(args, "exe")?;
     let on = args.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
-    let dir = arg_opt_str(args, "dir")?;
-    let dir_path = dir.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| {
+    // 备份记录的名字取自**游戏目录**。界面传的是库里那个目录；没传时按 EXE 的上一级推 ——
+    // 渲染 EXE 常常在子目录里（…\Binaries\Win64\x.exe）。
+    // 两种算法对"EXE 就在游戏根目录"的游戏结果一样，对别的游戏也稳定（同一个键写、同一个键还原）。
+    let dir = arg_opt_str(args, "dir")?.filter(|d| !d.is_empty()).unwrap_or_else(|| {
         std::path::Path::new(&exe)
             .parent()
             .map(|p| p.display().to_string())
@@ -391,12 +393,12 @@ fn sm_set_game(args: &Value) -> Result<Value, String> {
     });
     let r = framegen_core::sm::set_game_sm(
         &name,
-        std::path::Path::new(&dir_path),
+        std::path::Path::new(&dir),
         std::path::Path::new(&exe),
         on,
     )?;
     framegen_core::log::line(&format!(
-        "[sm] set_game_sm name={name} on={on} profile={} ok={} readback={:?}",
+        "[sm] set_game_sm name={name} dir={dir} on={on} profile={} ok={} readback={:?}",
         r.profile, r.ok, r.readback
     ));
     Ok(json!({
@@ -411,9 +413,20 @@ fn sm_set_game(args: &Value) -> Result<Value, String> {
 /// **只删我们自建的 profile**，NVIDIA 预置的绝不删。
 fn sm_restore_game(args: &Value) -> Result<Value, String> {
     let name = arg_str(args, "name")?;
-    let dir = arg_opt_str(args, "dir")?.unwrap_or_default();
-    let msg = framegen_core::sm::restore_game_sm(&name, std::path::Path::new(&dir))?;
-    framegen_core::log::line(&format!("[sm] restore_game_sm name={name} dir={dir}"));
+    // 和 set_game_sm 用同一套推导，记录名才对得上（见那边的注释）。
+    let dir = arg_opt_str(args, "dir")?
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| arg_opt_str(args, "exe").ok().flatten().and_then(|e| {
+            std::path::Path::new(&e).parent().map(|p| p.to_path_buf())
+        }))
+        .unwrap_or_default();
+    let exe = arg_opt_str(args, "exe")?.unwrap_or_default();
+    let msg = framegen_core::sm::restore_game_sm(&name, &dir, std::path::Path::new(&exe))?;
+    framegen_core::log::line(&format!(
+        "[sm] restore_game_sm name={name} dir={}",
+        dir.display()
+    ));
     Ok(json!({ "ok": true, "message": msg }))
 }
 

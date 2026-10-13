@@ -800,7 +800,49 @@ fn sm_records_dir() -> Result<std::path::PathBuf, String> {
 }
 
 fn record_path(game_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    Ok(sm_records_dir()?.join(format!("{}.json", crate::util::dir_key(game_dir))))
+    // 目录为空时退回"按游戏名算键"：这种记录只可能来自"调用方没给目录"，还原时会用
+    // find_record 再按 EXE / 游戏名找回来，所以键本身是什么不重要。
+    let key = if game_dir.as_os_str().is_empty() {
+        crate::util::dir_key(std::path::Path::new(""))
+    } else {
+        crate::util::dir_key(game_dir)
+    };
+    Ok(sm_records_dir()?.join(format!("{key}.json")))
+}
+
+/// 备份记录里的每一条（还原时按 EXE / 游戏名兜底查找用）。
+fn all_records() -> Vec<(std::path::PathBuf, SmRecord)> {
+    let Ok(dir) = sm_records_dir() else {
+        return Vec::new();
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.extension().map(|x| x == "json").unwrap_or(false) {
+            continue;
+        }
+        if let Some(r) = record_read(&p) {
+            out.push((p, r));
+        }
+    }
+    out
+}
+
+/// 按目录找不到记录时，按 EXE 路径（忽略大小写）或游戏名再找一次。
+fn find_record(
+    recs: &[(std::path::PathBuf, SmRecord)],
+    exe: &std::path::Path,
+    game: &str,
+) -> Option<(std::path::PathBuf, SmRecord)> {
+    let exe_s = exe.display().to_string();
+    let hit = recs.iter().find(|(_, r)| {
+        (!exe_s.is_empty() && !r.exe.is_empty() && r.exe.eq_ignore_ascii_case(&exe_s))
+            || (!game.is_empty() && !r.game.is_empty() && r.game == game)
+    });
+    hit.map(|(p, r)| (p.clone(), r.clone()))
 }
 
 /// JSON 字符串转义。记录是手写的（不引 serde），字段值一律走这里。
@@ -1098,14 +1140,25 @@ pub fn set_game_sm(
 ///   * 只有 profile 是**我们自建的**才把它删掉 —— NVIDIA 预置的 profile 绝不删。
 ///
 /// 返回一句给用户看的结果说明。
-pub fn restore_game_sm(game: &str, game_dir: &std::path::Path) -> Result<String, String> {
+pub fn restore_game_sm(
+    game: &str,
+    game_dir: &std::path::Path,
+    exe: &std::path::Path,
+) -> Result<String, String> {
     let dir = if game_dir.as_os_str().is_empty() {
         std::path::Path::new(game)
     } else {
         game_dir
     };
-    let rec_path = record_path(dir)?;
-    let rec = record_read(&rec_path);
+    // 记录名是目录的哈希：目录对不上时（调用方只给了 EXE、或者库里的目录和记记录时的不一样），
+    // 按 EXE / 游戏名把记录找回来 —— 否则这里会以为"没改过"，把驱动里开着的开关留在原地。
+    let (rec_path, rec) = match record_read(&record_path(dir)?) {
+        Some(r) => (record_path(dir)?, Some(r)),
+        None => match find_record(&all_records(), exe, game) {
+            Some((p, r)) => (p, Some(r)),
+            None => (record_path(dir)?, None),
+        },
+    };
     let sess = nv::Session::open()?;
 
     // 找目标 profile：优先用记录里的名字；记录没了就再问一次驱动。
@@ -1211,7 +1264,7 @@ pub fn restore_all_game_sm() -> (usize, usize, Vec<String>) {
         if rec.dir.is_empty() {
             continue; // 老记录没有目录字段：按名字也能还原，界面上的"全部还原"跳过它
         }
-        match restore_game_sm(&rec.game, std::path::Path::new(&rec.dir)) {
+        match restore_game_sm(&rec.game, std::path::Path::new(&rec.dir), std::path::Path::new(&rec.exe)) {
             Ok(_) => done += 1,
             Err(e) => errs.push(format!(
                 "{}：{e}",
