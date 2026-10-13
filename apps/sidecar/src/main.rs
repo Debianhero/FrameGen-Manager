@@ -373,42 +373,124 @@ fn sm_info(args: &Value) -> Result<Value, String> {
 }
 
 
-/// 开启/关闭某个游戏的 Smooth Motion（只写我们自己的单游戏 profile，绝不写全局）。
+/// 开启 / 关闭某个游戏的 Smooth Motion。
+///
+/// 目标 profile = **这个 EXE 真正归属的那一个**（问驱动的 DRS_FindApplicationByName）：
+/// NVIDIA 预置 profile 就直接写它；驱动里没有归属才自建我们自己的那个。
+/// 写之前把旧值记进备份目录（dir 决定记录名），关闭/还原时写回。
 fn sm_set_game(args: &Value) -> Result<Value, String> {
     let name = arg_str(args, "name")?;
     let exe = arg_str(args, "exe")?;
     let on = args.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
-    let r = framegen_core::sm::set_game_sm(&name, std::path::Path::new(&exe), on)?;
+    let dir = arg_opt_str(args, "dir")?;
+    let dir_path = dir.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| {
+        std::path::Path::new(&exe)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    });
+    let r = framegen_core::sm::set_game_sm(
+        &name,
+        std::path::Path::new(&dir_path),
+        std::path::Path::new(&exe),
+        on,
+    )?;
     framegen_core::log::line(&format!(
-        "[sm] set_game_sm name={name} on={on} ok={} rc_set={} readback={:?}",
-        r.ok, r.rc_set, r.readback
+        "[sm] set_game_sm name={name} on={on} profile={} ok={} readback={:?}",
+        r.profile, r.ok, r.readback
     ));
-    Ok(json!({ "ok": r.ok, "readback": r.readback, "rcSet": r.rc_set, "message": r.message }))
+    Ok(json!({
+        "ok": r.ok,
+        "readback": r.readback,
+        "profile": r.profile,
+        "message": r.message,
+    }))
 }
 
-/// 删掉我们为某个游戏建的 profile（还原）。
-fn sm_remove_game(args: &Value) -> Result<Value, String> {
+/// 还原某个游戏：把 SM 那一项写回本工具改它之前的值（本来没设置就删掉这一项）。
+/// **只删我们自建的 profile**，NVIDIA 预置的绝不删。
+fn sm_restore_game(args: &Value) -> Result<Value, String> {
     let name = arg_str(args, "name")?;
-    let removed = framegen_core::sm::remove_game_sm(&name)?;
-    framegen_core::log::line(&format!("[sm] remove_game_sm name={name} removed={removed}"));
-    Ok(json!({ "removed": removed }))
+    let dir = arg_opt_str(args, "dir")?.unwrap_or_default();
+    let msg = framegen_core::sm::restore_game_sm(&name, std::path::Path::new(&dir))?;
+    framegen_core::log::line(&format!("[sm] restore_game_sm name={name} dir={dir}"));
+    Ok(json!({ "ok": true, "message": msg }))
 }
 
+/// 把备份记录里的每个游戏都还原一遍（设置页的"全部还原"）。
+fn sm_restore_all(_args: &Value) -> Result<Value, String> {
+    let (done, total, errs) = framegen_core::sm::restore_all_game_sm();
+    framegen_core::log::line(&format!("[sm] restore_all done={done} total={total}"));
+    Ok(json!({ "done": done, "total": total, "errors": errs }))
+}
 
-/// 批量查询多个游戏在我们 profile 里的 SM 状态（界面一次调用拿全部）。
-/// 返回 [{ name, value }]：value = null 表示没有我们建的配置。
+/// 清掉孤儿配置（我们建的、但没挂任何应用的 profile）。
+fn sm_clean_orphans(_args: &Value) -> Result<Value, String> {
+    let (removed, errs) = framegen_core::sm::clean_orphan_profiles()?;
+    framegen_core::log::line(&format!("[sm] clean_orphans removed={removed}"));
+    Ok(json!({ "removed": removed, "errors": errs }))
+}
+
+/// 批量查询多个游戏现在的 SM 状态。
+///
+/// 状态来自**游戏真正归属的 profile**（NVIDIA 预置的那个也算），不再是"我们自建的
+/// profile 里有没有值"。exes 里的顺序要和 names 对齐；缺 exe 的那些退回查我们自建
+/// 的 profile（老记录还在的仍能显示）。
 fn sm_game_states(args: &Value) -> Result<Value, String> {
     let names = args.get("names").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let exes = args.get("exes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let sess = framegen_core::sm::open_session().ok();
     let mut out = Vec::new();
-    for n in names {
+    for (i, n) in names.iter().enumerate() {
         let name = n.as_str().unwrap_or("").to_string();
-        if name.is_empty() { continue; }
-        let value = framegen_core::sm::game_sm_value(&name).unwrap_or(None);
-        out.push(json!({ "name": name, "value": value }));
+        if name.is_empty() {
+            continue;
+        }
+        let exe = exes
+            .get(i)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let st = match (&sess, exe.is_empty()) {
+            (Some(s), false) => framegen_core::sm::game_state_with(s, std::path::Path::new(&exe)),
+            _ => {
+                let mut g = framegen_core::sm::game_state(std::path::Path::new(&exe));
+                if g.profile.is_empty() {
+                    // 没有 EXE 路径（或驱动里没归属）时，退回按游戏名找我们自建的 profile
+                    let ours_name = framegen_core::sm::game_profile_name(&name);
+                    if let Ok(v) = framegen_core::sm::game_sm_value_in(&ours_name) {
+                        g.profile = ours_name;
+                        g.ours = true;
+                        g.value = v;
+                    }
+                }
+                g
+            }
+        };
+        out.push(json!({
+            "name": name,
+            "exe": exe,
+            "profile": st.profile,
+            "ours": st.ours,
+            "value": st.value,
+            "detail": st.detail,
+        }));
     }
     Ok(json!({ "states": out }))
 }
 
+/// 单个游戏的状态（诊断/自测）。
+fn sm_game_state(args: &Value) -> Result<Value, String> {
+    let exe = arg_str(args, "exe")?;
+    let st = framegen_core::sm::game_state(std::path::Path::new(&exe));
+    Ok(json!({
+        "exe": st.exe,
+        "profile": st.profile,
+        "ours": st.ours,
+        "value": st.value,
+        "detail": st.detail,
+    }))
+}
 
 /// 把内置解锁组件放进游戏目录（带备份与哈希复核）。
 fn sm_asset_deploy(args: &Value) -> Result<Value, String> {
@@ -422,6 +504,23 @@ fn sm_asset_restore(args: &Value) -> Result<Value, String> {
     let dir = arg_str(args, "dir")?;
     let msg = framegen_core::sm::asset_restore(std::path::Path::new(&dir))?;
     Ok(json!({ "ok": true, "message": msg }))
+}
+
+
+/// 【只读】问驱动：这个 exe 属于哪个 profile、那个 profile 里 SM 是什么值。
+fn sm_profile_of(args: &Value) -> Result<Value, String> {
+    let exe = arg_str(args, "exe")?;
+    let sess = framegen_core::sm::open_session_for_probe()?;
+    let p = std::path::Path::new(&exe);
+    let prof = sess.find_profile_for_exe(p)?;
+    match prof {
+        None => Ok(json!({ "found": false })),
+        Some(h) => {
+            let name = sess.profile_name(h);
+            let value = sess.read(h, framegen_core::sm::SM_SETTING_ID).ok();
+            Ok(json!({ "found": true, "profile": name, "value": value }))
+        }
+    }
 }
 
 /// 备份目录（界面上显示）
@@ -1451,8 +1550,12 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         }
         "sm_info" => sm_info(args),
         "sm_set_game" => sm_set_game(args),
-        "sm_remove_game" => sm_remove_game(args),
+        "sm_restore_game" => sm_restore_game(args),
+        "sm_restore_all" => sm_restore_all(args),
+        "sm_clean_orphans" => sm_clean_orphans(args),
         "sm_game_states" => sm_game_states(args),
+        "sm_game_state" => sm_game_state(args),
+        "sm_profile_of" => sm_profile_of(args),
         "sm_asset_deploy" => sm_asset_deploy(args),
         "sm_asset_restore" => sm_asset_restore(args),
         "backups_dir" => Ok(Value::String(backups_dir())),

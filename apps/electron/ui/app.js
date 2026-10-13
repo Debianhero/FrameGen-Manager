@@ -866,6 +866,7 @@
         ])
       ]),
       h('div', { class: 'gpath', text: g.dir || '' }),
+      back && back.note ? h('div', { class: 'gpath', text: back.note }) : null,
       h('div', { class: 'gactions' }, back ? [
         h('button', { class: 'btn ' + (back.danger ? 'danger' : 'primary') + ' small', type: 'button', text: back.label, on: { click: back.onClick } }),
         h('button', { class: 'btn small', type: 'button', text: '打开文件夹', on: { click: function () { openPath(g.exists ? (g.target || g.dir) : g.dir); } } })
@@ -1953,7 +1954,8 @@
     });
   }
 
-  // Smooth Motion 列表：状态来自驱动里我们自己的 profile（三态：无 / 已开启 / 已关闭）
+  // Smooth Motion 列表：状态来自**游戏真正归属的那个驱动配置**（NVIDIA 预置的也算），
+  // 不是"我们自建的 profile 里有没有值"。写入目标与状态显示用的是同一个 profile。
   function paintSmList() {
     var box = document.getElementById('sm-list');
     if (!box) return;
@@ -1963,15 +1965,24 @@
       return;
     }
     // 先把状态取回来，再一次性替换内容；否则列表会先空一下再出现（看起来就是闪一下）
-    invoke('sm_game_states', { names: GAMES.map(function (g) { return g.name || ''; }) }).then(function (d) {
+    invoke('sm_game_states', {
+      names: GAMES.map(function (g) { return g.name || ''; }),
+      exes: GAMES.map(function (g) { return g.targetExe || g.target || ''; }),
+    }).then(function (d) {
       var map = {};
-      ((d && d.states) || []).forEach(function (s) { map[s.name] = s.value; });
+      ((d && d.states) || []).forEach(function (s) { map[s.name] = s; });
       var frag = document.createDocumentFragment();
       GAMES.forEach(function (g, i) {
-        var on = map[g.name] === 1;
+        var st = map[g.name] || {};
+        var on = st.value === 1;
+        // 有归属配置就把名字写在卡片上：用户能直接和 NVIDIA 控制面板 / Profile Inspector 对上
+        var prof = st.profile
+          ? '驱动配置：' + st.profile + (st.value === null || st.value === undefined ? '（未设置，跟随全局）' : '（Smooth Motion = ' + (on ? '开' : '关') + '）')
+          : '驱动里还没有这个游戏的配置';
         frag.appendChild(gameCard(g, i, {
           label: on ? '关闭 Smooth Motion' : '开启 Smooth Motion',
           danger: on,
+          note: prof,
           onClick: function () { toggleSm(g, !on); },
         }));
       });
@@ -1986,7 +1997,12 @@
   // 引擎互斥：同一个游戏只能启用一个引擎。已部署帧生成时，先引导还原成原版再开 SM。
   function toggleSm(g, on) {
     if (!g || !g.name) return;
-    var exe = g.target || g.dir || '';
+    // 写进驱动配置的必须是**游戏真正运行的那个 EXE**（targetExe），不是目录。
+    var exe = g.targetExe || '';
+    if (!exe) {
+      toast('这个游戏没有识别到启动用的 EXE，先到「帧生成」页确认游戏路径。', 'warn', 12000);
+      return;
+    }
     var deployedFg = /^已部署/.test(g.deployed || '');
     var manualFg = /^已安装/.test(g.deployed || '');
     // 引擎互斥（硬性）：帧生成和 Smooth Motion 用的是同一个 version.dll，
@@ -2009,14 +2025,24 @@
       ? invoke('sm_asset_deploy', { dir: dir })
       : Promise.resolve(null);
     return first.then(function (a) {
-      return invoke('sm_set_game', { name: g.name, exe: exe, on: !!on }).then(function (r) {
+      return invoke('sm_set_game', { name: g.name, dir: dir, exe: exe, on: !!on }).then(function (r) {
         return { r: r, asset: a };
       });
     }).then(function (o) {
       var r = o.r;
       var extra = on ? ((o.asset && o.asset.message) || '') : '';
+      // 关闭 = ①把驱动里那一项写回本工具改它之前的值（本来没设置就删掉这一项）
+      //        ②取回游戏目录里的解锁组件。两步的说明拼在一起给用户看。
       var tail = !on
-        ? invoke('sm_asset_restore', { dir: dir }).then(function (m) { return (m && m.message) || ''; }).catch(function () { return ''; })
+        ? invoke('sm_restore_game', { name: g.name, dir: dir }).then(function (m) {
+            return invoke('sm_asset_restore', { dir: dir }).then(function (a) {
+              return [m && m.message, a && a.message].filter(Boolean).join('；');
+            }).catch(function () { return (m && m.message) || ''; });
+          }).catch(function (e) {
+            return invoke('sm_asset_restore', { dir: dir }).then(function (a) {
+              return [(a && a.message) || '', '驱动设置还原失败：' + errText(e)].filter(Boolean).join('；');
+            }).catch(function () { return '驱动设置还原失败：' + errText(e); });
+          })
         : Promise.resolve(extra);
       return tail.then(function (t) {
         hideBarLater(1200);
@@ -2157,6 +2183,20 @@ if ($('sel-proxy')) {
     // Smooth Motion 页的两个按钮：重新检测（只读）与扫描游戏库（复用同一个动作）
     if ($('btn-sm-refresh')) $('btn-sm-refresh').addEventListener('click', function () { renderSm().catch(function () { }); });
     if ($('btn-sm-scan') && $('btn-scan')) $('btn-sm-scan').addEventListener('click', function () { $('btn-scan').click(); });
+    // 清掉本工具建的、但没挂任何应用的驱动配置（以前那版写进自建 profile 留下的残余）
+    if ($('btn-sm-clean')) $('btn-sm-clean').addEventListener('click', function () {
+      if (!window.confirm('清理「FrameGen Manager - 」开头、而且没有挂任何游戏的驱动配置。\n\nNVIDIA 自带的配置一个都不会动。继续吗？')) return;
+      busy(this, '正在清理…', function () {
+        return invoke('sm_clean_orphans').then(function (r) {
+          var n = (r && r.removed) || 0;
+          var errs = (r && r.errors) || [];
+          if (n === 0 && !errs.length) toast('没有需要清理的残留配置。', 'info', 6000);
+          else if (n === 0) toast('清理失败：' + errs.join('；'), 'warn', 12000);
+          else toast('已清掉 ' + n + ' 条残留配置' + (errs.length ? '（' + errs.length + ' 条失败：' + errs.join('；') + '）' : '') + '。', errs.length ? 'warn' : 'ok', 10000);
+          renderSm().catch(function () { });
+        });
+      });
+    });
     if ($('btn-clean-backups')) $('btn-clean-backups').addEventListener('click', function () {
       var me = this;
       invoke('backups_info').then(function (info) {

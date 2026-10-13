@@ -3,8 +3,9 @@
 //! 产品规定：**驱动 >= 616.64 才允许部署**，低于该版本一律不允许
 //! （见 docs/SM-事实来源与策略.md；该门槛是本项目的决定，不是上游/NVIDIA 的要求）。
 //!
-//! 本模块**只读**：不写驱动 profile、不动任何文件。写入逻辑在后续步骤里单独实现，
-//! 且只允许写"绑定到某个游戏 EXE"的 profile，绝不写全局/基础 profile。
+//! 写入路径只动**绑定到某个游戏 EXE 的 profile**（NVIDIA 预置的那一个，或者
+//! 没找到时我们自己建的 "FrameGen Manager - 游戏名"），绝不写全局/基础 profile；
+//! 写前把旧值记进备份记录，关掉/还原时按记录写回。
 
 use crate::gpu;
 
@@ -229,12 +230,6 @@ pub fn exe_sm_state(exe: &std::path::Path) -> ExeProfileState {
         if idx == 0 {
             out.sample_apps = apps.clone();
             out.diag.push(format!("apps(first profile)={}", apps.len()));
-            // 当前驱动/接口版本上 EnumApplications 被拒（rc=-9 INVALID_POINTER）：
-            // 拿不到应用列表就没法按 EXE 匹配，直接停，不白跑几百次调用。
-            if apps.is_empty() {
-                out.diag.push("读取应用列表被拒，按 EXE 的匹配暂不可用".to_owned());
-                break;
-            }
         }
         let hit = apps.iter().any(|a| {
             std::path::Path::new(a)
@@ -274,6 +269,8 @@ mod nv {
     const ID_SET_SETTING: u32 = 0x8A2C_F5F5;
     const ID_SAVE_SETTINGS: u32 = 0xFCBC_7E14;
     const ID_DELETE_PROFILE: u32 = 0x1709_3206;
+    /// 问驱动：这个 exe 属于哪个 profile（PI 也是用它定位游戏配置的）。
+    const ID_FIND_APPLICATION_BY_NAME: u32 = 0xEEE5_66B2;
     /// 删掉某个 profile 里的单项设置（PI 的"恢复默认"就是用它，而不是写 0）。
     /// 和写设置一样，用首选 ID（与 PI 的 GetDelegate 调用顺序一致）。
     const ID_DELETE_PROFILE_SETTING: u32 = 0xD20D_29DF;
@@ -387,7 +384,12 @@ mod nv {
             }
         }
 
-        /// 枚举所有 profile 的句柄（最多 5000 个，防死循环）。
+        /// 枚举所有 profile 的句柄。
+        ///
+        /// 上限给得很宽（20000）：NVIDIA 自带的 profile 有一千多个，默认驱动装完就容易
+        /// 超过 512 —— 卡在 512 会让排在后面的自建 profile 直接"不存在"（枚举不到就
+        /// 清不掉，也查不到）。真正的结束条件是驱动返回错误码，或在驱动不报结束时
+        /// 吐出重复句柄（见下面的去重）。
         pub fn profiles(&self) -> Vec<*mut c_void> {
             let mut out = Vec::new();
             unsafe {
@@ -399,7 +401,7 @@ mod nv {
                 let f: unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void) -> i32 =
                     std::mem::transmute(raw);
                 let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
-                for i in 0..512u32 {
+                for i in 0..20_000u32 {
                     let mut prof: *mut c_void = std::ptr::null_mut();
                     let rc = f(self.sess, i, &mut prof);
                     if rc != 0 || prof.is_null() {
@@ -479,6 +481,74 @@ mod nv {
                 }
             }
             out
+        }
+
+
+        /// 问驱动：这个 exe 属于哪个 profile？找不到返回 Ok(None)。
+        ///
+        /// 为什么必须用它：真实游戏几乎都已经属于某个 NVIDIA 预置 profile，
+        /// 此时 CreateApplication 会返回 -167（exe 已被占用），我们自建的 profile
+        /// 根本挂不上游戏 —— 设置写进去也不会生效。
+        pub fn find_profile_for_exe(
+            &self,
+            exe: &std::path::Path,
+        ) -> Result<Option<*mut c_void>, String> {
+            unsafe {
+                let raw = (self.query)(ID_FIND_APPLICATION_BY_NAME);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_FindApplicationByName".to_owned());
+                }
+                let f: unsafe extern "C" fn(
+                    *mut c_void,
+                    *const u16,
+                    *mut *mut c_void,
+                    *mut c_void,
+                ) -> i32 = std::mem::transmute(raw);
+                let w: Vec<u16> = exe
+                    .display()
+                    .to_string()
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let mut app = vec![0u8; 20492];
+                app[0..4].copy_from_slice(&(20492u32 | (4u32 << 16)).to_le_bytes());
+                let mut prof: *mut c_void = std::ptr::null_mut();
+                let rc = f(self.sess, w.as_ptr(), &mut prof, app.as_mut_ptr() as *mut c_void);
+                if rc == 0 && !prof.is_null() {
+                    Ok(Some(prof))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        /// 读一个 profile 自己的名字（诊断/日志用）。
+        pub fn profile_name(&self, prof: *mut c_void) -> String {
+            unsafe {
+                const ID_PROFILE_INFO: u32 = 0x61CD_6FD6;
+                let raw = (self.query)(ID_PROFILE_INFO);
+                if raw.is_null() {
+                    return String::new();
+                }
+                let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32 =
+                    std::mem::transmute(raw);
+                let mut info = vec![0u8; 4116];
+                info[0..4].copy_from_slice(&(4116u32 | (1u32 << 16)).to_le_bytes());
+                let rc = f(self.sess, prof, info.as_mut_ptr() as *mut c_void);
+                if rc != 0 {
+                    return String::new();
+                }
+                let mut name = String::new();
+                for i in 0..2048 {
+                    let o = 4 + i * 2;
+                    let c = u16::from_le_bytes([info[o], info[o + 1]]);
+                    if c == 0 {
+                        break;
+                    }
+                    name.push(char::from_u32(c as u32).unwrap_or('?'));
+                }
+                name
+            }
         }
 
         /// 读任意 profile 里的一个 u32 设置项。
@@ -593,6 +663,10 @@ mod nv {
         /// 写一个 DWORD 设置。返回驱动的原始返回码 —— **它不可信**
         /// （实测：SM 这一项返回 -160 但值其实写进去了），判成败必须靠读回复核。
         pub fn set_dword(&self, prof: *mut c_void, id: u32, value: u32) -> Result<i32, String> {
+            // 最后一道护栏：全局/基础 profile 一律不许写（连句柄都不接）。
+            if self.is_base_profile(prof) {
+                return Err("拒绝：不允许写全局/基础 profile。".to_owned());
+            }
             unsafe {
                 let raw = (self.query)(ID_SET_SETTING);
                 if raw.is_null() {
@@ -664,118 +738,614 @@ mod nv {
 }
 
 
-// ---------------------------------------------------------------- 写入路径（单游戏 profile）
+// ---------------------------------------------------------------- 写入路径（游戏自己的 profile）
 
 /// 我们自己创建的 profile 名前缀 —— 用来区分「我们的」与 NVIDIA 预置的配置。
 pub const PROFILE_PREFIX: &str = "FrameGen Manager - ";
+
+/// 某个游戏 EXE 在驱动里的归属与当前 SM 值（界面状态用它）。
+#[derive(Debug, Clone)]
+pub struct SmGameState {
+    pub exe: String,
+    /// 驱动里挂了这个 EXE 的 profile 名字；空串 = 没有
+    pub profile: String,
+    /// 命中的是**我们建的** profile 吗（只有这种才允许被删掉）
+    pub ours: bool,
+    /// 该 profile 里 SM 的值；None = 没设置（跟随全局）
+    pub value: Option<u32>,
+    pub detail: String,
+}
+
+/// 一次写入的结果。ok 只取决于**读回复核**，不取决于驱动返回码。
+#[derive(Debug, Clone)]
+pub struct SmWriteResult {
+    pub ok: bool,
+    pub readback: Option<u32>,
+    /// 到底写进了哪个 profile（NVIDIA 预置的，还是我们自建的）
+    pub profile: String,
+    pub message: String,
+}
 
 pub fn game_profile_name(game: &str) -> String {
     format!("{}{}", PROFILE_PREFIX, game)
 }
 
-/// 一次写入的结果。注意 ok 只取决于**读回复核**，不取决于驱动返回码。
-#[derive(Debug, Clone)]
-pub struct SmWriteResult {
-    pub ok: bool,
-    pub readback: Option<u32>,
-    pub rc_set: i32,
-    pub message: String,
+// ---- 备份记录：这个游戏上一次的 SM 值是什么 ----
+
+/// 一条"我们改过这个游戏"的记录。
+///
+/// 为什么要记：真实游戏都归属 NVIDIA 预置 profile，我们不能再像以前那样把配置
+/// 写进自建 profile 就完事 —— 关闭时得把**旧值**写回去，还得知道那个 profile
+/// 是不是我们建的（不是就绝不能删）。
+#[derive(Debug, Clone, PartialEq)]
+struct SmRecord {
+    game: String,
+    exe: String,
+    profile: String,
+    /// profile 是我们自建的吗（是的话还原时可以连 profile 一起删）
+    ours: bool,
+    /// 改之前这一项存在吗
+    had: bool,
+    had_value: Option<u32>,
+    /// 游戏目录（记录名是它的哈希；这里存原值，好让"全部还原"找回同一个记录）
+    dir: String,
 }
 
-/// 读某个游戏（我们自己的 profile）里的 SM 值。None = 我们还没为它建过配置。
-pub fn game_sm_value(game: &str) -> Result<Option<u32>, String> {
-    let sess = nv::Session::open()?;
-    let name = game_profile_name(game);
-    match sess.find(&name)? {
-        None => Ok(None),
-        Some(prof) => {
-            if sess.is_base_profile(prof) {
-                return Err("拒绝：按名字找到的竟然是全局 profile".to_owned());
-            }
-            match sess.read(prof, SM_SETTING_ID) {
-                Ok(v) => Ok(Some(v)),
-                Err(e) if e.starts_with("rc=-160") => Ok(None),
-                Err(e) => Err(e),
-            }
+fn sm_records_dir() -> Result<std::path::PathBuf, String> {
+    let dir = crate::util::backups_dir()
+        .map_err(|e| format!("{e:#}"))?
+        .join("sm-profiles");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建目录 {} 失败：{e}", dir.display()))?;
+    Ok(dir)
+}
+
+fn record_path(game_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    Ok(sm_records_dir()?.join(format!("{}.json", crate::util::dir_key(game_dir))))
+}
+
+/// JSON 字符串转义。记录是手写的（不引 serde），字段值一律走这里。
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
         }
     }
+    out
+}
+
+fn record_write(path: &std::path::Path, r: &SmRecord) -> Result<(), String> {
+    let had_value = match r.had_value {
+        Some(v) => v.to_string(),
+        None => "null".to_owned(),
+    };
+    let body = format!(
+        "{{\"game\":\"{}\",\"exe\":\"{}\",\"profile\":\"{}\",\"ours\":{},\"had\":{},\"had_value\":{},\"dir\":\"{}\"}}",
+        json_escape(&r.game),
+        json_escape(&r.exe),
+        json_escape(&r.profile),
+        r.ours,
+        r.had,
+        had_value,
+        json_escape(&r.dir)
+    );
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, body.as_bytes()).map_err(|e| format!("写记录失败：{e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("落盘记录失败：{e}"))?;
+    Ok(())
+}
+
+fn record_read(path: &std::path::Path) -> Option<SmRecord> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(SmRecord {
+        game: record_str(&text, "game").unwrap_or_default(),
+        exe: record_str(&text, "exe").unwrap_or_default(),
+        profile: record_str(&text, "profile").unwrap_or_default(),
+        ours: record_bool(&text, "ours").unwrap_or(false),
+        had: record_bool(&text, "had").unwrap_or(false),
+        had_value: record_u32(&text, "had_value"),
+        dir: record_str(&text, "dir").unwrap_or_default(),
+    })
+}
+
+/// 在记录里找 "key":"值"（值由 json_escape 写出）。找不到返回 None。
+fn record_str(text: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{key}\":\"");
+    let start = text.find(&marker)? + marker.len();
+    let rest = text.get(start..)?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                other => out.push(other),
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// 在记录里找 "key":true|false。找不到返回 None。
+fn record_bool(text: &str, key: &str) -> Option<bool> {
+    for want in ["true", "false"] {
+        if text.contains(&format!("\"{key}\":{want}")) {
+            return Some(want == "true");
+        }
+    }
+    None
+}
+
+/// 在记录里找 "key":123 或 "key":null。找不到/null 都返回 None。
+fn record_u32(text: &str, key: &str) -> Option<u32> {
+    let marker = format!("\"{key}\":");
+    let start = text.find(&marker)? + marker.len();
+    let rest = text.get(start..)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// 记录里的 profile 句柄。None = 名字对不上了（被驱动改名/删掉），交给调用方退回自建。
+fn handle_by_name(sess: &nv::Session, name: &str) -> Result<Option<*mut std::ffi::c_void>, String> {
+    match sess.find(name)? {
+        Some(p) if !sess.is_base_profile(p) => Ok(Some(p)),
+        _ => Ok(None),
+    }
+}
+
+/// 读某个 profile 里的 SM 值。rc=-160 = 这一项没设置（跟随全局）→ None。
+fn read_current(sess: &nv::Session, prof: *mut std::ffi::c_void) -> Result<Option<u32>, String> {
+    match sess.read(prof, SM_SETTING_ID) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e.starts_with("rc=-160") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// 还原之后的值是不是我们期望的"改之前那样"。
+fn restored_matches(sess: &nv::Session, prof: *mut std::ffi::c_void, want: Option<u32>) -> bool {
+    match read_current(sess, prof) {
+        Ok(v) => v == want,
+        Err(_) => false,
+    }
+}
+
+/// 算出某个游戏 EXE 现在的 SM 状态：它在哪个 profile 里、那个 profile 是不是我们建的、
+/// 值是多少。界面上的状态列表用它（自己开会话）。
+pub fn game_state(exe: &std::path::Path) -> SmGameState {
+    match nv::Session::open() {
+        Ok(sess) => game_state_with(&sess, exe),
+        Err(e) => SmGameState {
+            exe: exe.display().to_string(),
+            profile: String::new(),
+            ours: false,
+            value: None,
+            detail: e,
+        },
+    }
+}
+
+/// 同上，但复用调用方已经开好的会话（一次查询一批游戏时省掉反复开会话）。
+pub fn game_state_with(sess: &nv::Session, exe: &std::path::Path) -> SmGameState {
+    let mut out = SmGameState {
+        exe: exe.display().to_string(),
+        profile: String::new(),
+        ours: false,
+        value: None,
+        detail: String::new(),
+    };
+    let prof = match sess.find_profile_for_exe(exe) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            out.detail = "驱动里没有挂这个 EXE 的 profile".to_owned();
+            return out;
+        }
+        Err(e) => {
+            out.detail = e;
+            return out;
+        }
+    };
+    if sess.is_base_profile(prof) {
+        out.detail = "拒绝：按 EXE 找到的竟然是全局 profile".to_owned();
+        return out;
+    }
+    out.profile = sess.profile_name(prof);
+    out.ours = !out.profile.is_empty() && out.profile.starts_with(PROFILE_PREFIX);
+    out.value = read_current(sess, prof).unwrap_or_else(|e| {
+        out.detail = e;
+        None
+    });
+    out
+}
+
+/// 按 profile 名字读 SM 值（老记录只存了游戏名、没有 EXE 路径时用它兜底）。
+/// None = 没有这个 profile，或者里面没设置这一项。
+pub fn game_sm_value_in(profile: &str) -> Result<Option<u32>, String> {
+    if profile.is_empty() {
+        return Ok(None);
+    }
+    let sess = nv::Session::open()?;
+    match handle_by_name(&sess, profile)? {
+        None => Ok(None),
+        Some(p) => read_current(&sess, p),
+    }
+}
+
+/// 开一个会话给批量查询用（界面的状态列表）。
+pub fn open_session() -> Result<nv::Session, String> {
+    nv::Session::open()
 }
 
 /// 开启 / 关闭某个游戏的 Smooth Motion。
 ///
-/// **只写我们自己的 profile（名字见 PROFILE_PREFIX），绝不碰全局/基础 profile**
-/// （句柄若等于全局 profile 直接拒绝）。成功判据是**读回复核** —— 实测
-/// DRS_SetSetting 对 SM 会返回 -160 但值其实已经写进去，所以返回码不可信。
+/// 目标 profile 的选择顺序：
+///   1. 问驱动这个 EXE 归属哪个 profile（真实游戏几乎都已经属于 NVIDIA 预置的那一个）；
+///   2. 找不到才自建 "FrameGen Manager - 游戏名" 并把这个 EXE 挂上去 —— 挂不上（被占用）
+///      就直接报错，不留一个挂不上游戏的空 profile。
+///
+/// 写之前先把旧值记进备份目录（game_dir 决定记录名）。关闭时按你要求走
+/// restore_game_sm —— 把旧值写回去（本来没设置就删掉这一项）。
 pub fn set_game_sm(
     game: &str,
+    game_dir: &std::path::Path,
     exe: &std::path::Path,
     on: bool,
 ) -> Result<SmWriteResult, String> {
+    if !game.is_empty() && game_dir.as_os_str().is_empty() {
+        return Err("缺少游戏目录（备份记录要放在那里）".to_owned());
+    }
+    let dir = if game_dir.as_os_str().is_empty() {
+        std::path::Path::new(game)
+    } else {
+        game_dir
+    };
+    let want = record_path(dir)?;
+    let rec = record_read(&want);
     let sess = nv::Session::open()?;
-    let name = game_profile_name(game);
-    let prof = match sess.find(&name)? {
+
+    // 驱动里现在的归属。这一步必须在写之前 —— 写完句柄可能就变了。
+    let target = sess.find_profile_for_exe(exe)?;
+    let (prof, profile_name) = match target {
         Some(p) => {
             if sess.is_base_profile(p) {
                 return Err("拒绝：不允许写全局/基础 profile。".to_owned());
             }
-            p
+            let name = sess.profile_name(p);
+            if name.is_empty() {
+                return Err(
+                    "读不到这个 EXE 归属的 profile 的名字，为安全起见中止（不写）。".to_owned(),
+                );
+            }
+            (p, name)
         }
-        None => sess.create_profile(&name)?,
+        None => {
+            let name = game_profile_name(game);
+            let p = match sess.find(&name)? {
+                Some(p) if !sess.is_base_profile(p) => p,
+                _ => sess.create_profile(&name)?,
+            };
+            // 自建的 profile 必须真的把 EXE 挂上，否则设置永远不会生效 ——
+            // 挂不上就撤掉这个 profile，不留孤儿。
+            if let Err(e) = sess.create_application(p, exe) {
+                let _ = sess.delete_profile(p);
+                let _ = sess.save();
+                return Err(format!(
+                    "这个游戏还不属于任何驱动配置，而新建的配置也挂不上它：{e}。请确认选的是游戏真正运行的那个 EXE。"
+                ));
+            }
+            (p, name)
+        }
     };
-    if let Err(e) = sess.create_application(prof, exe) {
-        crate::log::line(&format!("[sm] CreateApplication 提示：{e}"));
+
+    // 只在"这次是第一次改这个游戏"或者记录指向的 profile 变了的时候才重新记旧值。
+    let need_record = rec
+        .as_ref()
+        .map(|r| r.profile != profile_name)
+        .unwrap_or(true);
+    if need_record {
+        let had = read_current(&sess, prof)?;
+        let r = SmRecord {
+            game: game.to_owned(),
+            exe: exe.display().to_string(),
+            profile: profile_name.clone(),
+            ours: profile_name.starts_with(PROFILE_PREFIX),
+            had: had.is_some(),
+            had_value: had,
+            dir: dir.display().to_string(),
+        };
+        record_write(&want, &r)?;
     }
-    // 开启 = 写 1；关闭 = 写显式 0（本游戏强制关闭）。
-    // 极端情况下驱动不接受 0，则退化为删掉这一项（= 跟随全局）。
-    let mut rc_set;
-    let mut deleted = false;
-    if on {
-        rc_set = sess.set_dword(prof, SM_SETTING_ID, 1)?;
-    } else {
-        rc_set = sess.set_dword(prof, SM_SETTING_ID, 0)?;
-        if sess.read(prof, SM_SETTING_ID).ok() != Some(0) {
-            rc_set = sess.delete_setting(prof, SM_SETTING_ID)?;
-            deleted = true;
-        }
-    }
+
+    let value = if on { 1u32 } else { 0u32 };
+    let rc_set = sess.set_dword(prof, SM_SETTING_ID, value)?;
     sess.save()?;
-    let readback = sess.read(prof, SM_SETTING_ID).ok();
-    let ok = if on { readback == Some(1) } else if deleted { rc_set == 0 } else { readback == Some(0) };
+
+    // 复核必须换一个**全新的会话**：同一个会话里读回来的可能只是内存里那份。
+    let readback = nv::Session::open().ok().and_then(|s| s.read(prof, SM_SETTING_ID).ok());
+    let ok = readback == Some(value);
+    crate::log::line(&format!(
+        "[sm] set_game_sm game={game} on={on} profile={profile_name} rc={rc_set} readback={readback:?}"
+    ));
     Ok(SmWriteResult {
         ok,
         readback,
-        rc_set,
+        profile: profile_name.clone(),
         message: if ok {
-            if on {
-                format!("已开启（本游戏强制开启；已读回复核确认，驱动返回码 {rc_set}）")
-            } else if deleted {
-                format!("已取消本游戏的设置，改为跟随全局（删除返回 {rc_set}）")
-            } else {
-                format!("已关闭本游戏的 Smooth Motion（读回复核 = 0；驱动返回码 {rc_set}）")
-            }
-        } else if on {
-            format!("写入后复核不符：期望 1，实际读到 {readback:?}")
+            format!(
+                "已{}（写进驱动配置「{profile_name}」，读回复核 = {value}，驱动返回码 {rc_set}）",
+                if on { "开启" } else { "关闭" }
+            )
         } else {
-            format!("删除本游戏的设置失败（返回 {rc_set}）")
+            format!(
+                "写入后复核不符：期望 {value}，实际读到 {readback:?}（配置「{profile_name}」）"
+            )
         },
     })
 }
 
-/// 删掉我们为某个游戏建的 profile（等于「驱动里从没为它配过」）。返回是否真的删了。
-pub fn remove_game_sm(game: &str) -> Result<bool, String> {
+/// 还原某个游戏：把 SM 这一项恢复成本工具改它之前的样子。
+///
+///   * 改之前本来就有值 → 写回那个值；
+///   * 改之前没这一项 → 删掉这一项（跟随全局）；
+///   * 只有 profile 是**我们自建的**才把它删掉 —— NVIDIA 预置的 profile 绝不删。
+///
+/// 返回一句给用户看的结果说明。
+pub fn restore_game_sm(game: &str, game_dir: &std::path::Path) -> Result<String, String> {
+    let dir = if game_dir.as_os_str().is_empty() {
+        std::path::Path::new(game)
+    } else {
+        game_dir
+    };
+    let rec_path = record_path(dir)?;
+    let rec = record_read(&rec_path);
     let sess = nv::Session::open()?;
-    let name = game_profile_name(game);
-    match sess.find(&name)? {
-        None => Ok(false),
-        Some(prof) => {
-            if sess.is_base_profile(prof) {
-                return Err("拒绝：不允许删除全局/基础 profile。".to_owned());
+
+    // 找目标 profile：优先用记录里的名字；记录没了就再问一次驱动。
+    let mut target: Option<(*mut std::ffi::c_void, String)> = None;
+    if let Some(r) = &rec {
+        if !r.profile.is_empty() {
+            if let Some(p) = handle_by_name(&sess, &r.profile)? {
+                target = Some((p, r.profile.clone()));
             }
-            sess.delete_profile(prof)?;
-            sess.save()?;
-            Ok(true)
+        }
+        if target.is_none() && !r.exe.is_empty() {
+            if let Some(p) = sess.find_profile_for_exe(std::path::Path::new(&r.exe))? {
+                if !sess.is_base_profile(p) {
+                    target = Some((p, sess.profile_name(p)));
+                }
+            }
         }
     }
+
+    let Some((prof, profile_name)) = target else {
+        // 没有记录、驱动里也没有挂这个 EXE 的配置 = 本来就没改过。
+        let _ = std::fs::remove_file(&rec_path);
+        return Ok("驱动里没有这个游戏的配置，也没有本工具的记录 —— 无需还原。".to_owned());
+    };
+
+    let want = rec
+        .as_ref()
+        .map(|r| if r.had { r.had_value } else { None })
+        .unwrap_or(None);
+    let ours = rec
+        .as_ref()
+        .map(|r| r.ours)
+        .unwrap_or_else(|| profile_name.starts_with(PROFILE_PREFIX));
+
+    if let Some(v) = want {
+        sess.set_dword(prof, SM_SETTING_ID, v)?;
+    } else {
+        sess.delete_setting(prof, SM_SETTING_ID)?;
+    }
+    sess.save()?;
+
+    // 复核同样换新会话。
+    let mut back_ok = false;
+    let mut back_seen: Option<u32> = None;
+    if let Ok(s) = nv::Session::open() {
+        back_seen = read_current(&s, prof).ok().flatten();
+        back_ok = restored_matches(&s, prof, want);
+    }
+    if !back_ok {
+        return Err(format!(
+            "写回旧值时复核不符：期望 {want:?}，实际读到 {back_seen:?}（配置「{profile_name}」）"
+        ));
+    }
+
+    // 我们自建的 profile 现在没有别的东西了：删掉它，驱动里就当从没配过。
+    let mut deleted_profile = false;
+    if ours && !profile_name.is_empty() && profile_name.starts_with(PROFILE_PREFIX) {
+        if let Some(p) = handle_by_name(&sess, &profile_name)? {
+            if sess.apps(p).is_empty() {
+                sess.delete_profile(p)?;
+                sess.save()?;
+                deleted_profile = true;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&rec_path);
+    crate::log::line(&format!(
+        "[sm] restore_game_sm game={game} profile={profile_name} ours={ours} want={want:?} deleted_profile={deleted_profile}"
+    ));
+    Ok(if deleted_profile {
+        format!("已还原并删掉本工具建的配置「{profile_name}」")
+    } else if let Some(v) = want {
+        format!("已还原成原来的设置（配置「{profile_name}」里的旧值 {v}）")
+    } else {
+        format!("已还原（配置「{profile_name}」里这一项已删除，跟随全局）")
+    })
+}
+
+/// 把备份记录里所有游戏都还原一遍（界面上的"全部还原"）。
+/// 返回 (成功数, 记录总数, 失败说明)。
+pub fn restore_all_game_sm() -> (usize, usize, Vec<String>) {
+    let dir = match sm_records_dir() {
+        Ok(d) => d,
+        Err(e) => return (0, 0, vec![e]),
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return (0, 0, Vec::new());
+    };
+    let mut files: Vec<std::path::PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    files.sort();
+    let total = files.len();
+    let mut done = 0usize;
+    let mut errs = Vec::new();
+    for f in files {
+        let Some(rec) = record_read(&f) else {
+            continue;
+        };
+        // 记录名是「游戏目录」的哈希、不可逆；直接拿记录里存的目录算回同一个名字。
+        if rec.dir.is_empty() {
+            continue; // 老记录没有目录字段：按名字也能还原，界面上的"全部还原"跳过它
+        }
+        match restore_game_sm(&rec.game, std::path::Path::new(&rec.dir)) {
+            Ok(_) => done += 1,
+            Err(e) => errs.push(format!(
+                "{}：{e}",
+                if rec.game.is_empty() { "（未知游戏）" } else { &rec.game }
+            )),
+        }
+    }
+    (done, total, errs)
+}
+
+// ---------------------------------------------------------------- 自测用的小接口
+
+/// 自测用的一条记录（形如 "备份记录里的一行"）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestRecord {
+    pub game: String,
+    pub exe: String,
+    pub profile: String,
+    pub ours: bool,
+    pub had: bool,
+    pub had_value: Option<u32>,
+    pub dir: String,
+}
+
+fn to_test_record(r: &SmRecord) -> TestRecord {
+    TestRecord {
+        game: r.game.clone(),
+        exe: r.exe.clone(),
+        profile: r.profile.clone(),
+        ours: r.ours,
+        had: r.had,
+        had_value: r.had_value,
+        dir: r.dir.clone(),
+    }
+}
+
+/// 自测用：按游戏目录写一条记录并读回来（不碰驱动）。写读不一致就是 bug。
+pub fn test_record(
+    game: &str,
+    exe: &str,
+    profile: &str,
+    ours: bool,
+    had: bool,
+    had_value: Option<u32>,
+    game_dir: &std::path::Path,
+) -> TestRecord {
+    let r = SmRecord {
+        game: game.to_owned(),
+        exe: exe.to_owned(),
+        profile: profile.to_owned(),
+        ours,
+        had,
+        had_value,
+        dir: game_dir.display().to_string(),
+    };
+    let path = record_path(game_dir).expect("算记录路径失败");
+    record_write(&path, &r).expect("写记录失败");
+    let back = record_read(&path).expect("记录读不回来");
+    to_test_record(&back)
+}
+
+/// 自测用：按游戏目录把记录读回来。None = 没有这份记录。
+pub fn test_record_read(game_dir: &std::path::Path) -> Option<TestRecord> {
+    let path = record_path(game_dir).ok()?;
+    record_read(&path).as_ref().map(to_test_record)
+}
+
+/// 我们建过但没挂任何应用的 profile（挂不上应用、或者游戏被删掉了）。
+/// 返回它们的名字。
+pub fn orphan_profiles() -> Result<Vec<String>, String> {
+    let sess = nv::Session::open()?;
+    let recorded = recorded_profile_names();
+    let mut out = Vec::new();
+    for prof in sess.profiles() {
+        let name = sess.profile_name(prof);
+        if name.is_empty() || !name.starts_with(PROFILE_PREFIX) {
+            continue;
+        }
+        if recorded.iter().any(|n| n == &name) {
+            continue;
+        }
+        if sess.apps(prof).is_empty() {
+            out.push(name);
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// 备份记录里出现过的 profile 名（这些还在用，不能当孤儿清掉）。
+fn recorded_profile_names() -> Vec<String> {
+    let Ok(dir) = sm_records_dir() else {
+        return Vec::new();
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        if e.path().extension().map(|x| x == "json").unwrap_or(false) {
+            if let Some(r) = record_read(&e.path()) {
+                if !r.profile.is_empty() {
+                    out.push(r.profile);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 清掉孤儿 profile。返回 (删掉的个数, 每个失败的说明)。
+pub fn clean_orphan_profiles() -> Result<(usize, Vec<String>), String> {
+    let sess = nv::Session::open()?;
+    let names = orphan_profiles()?;
+    let mut removed = 0usize;
+    let mut errs = Vec::new();
+    for name in names {
+        match handle_by_name(&sess, &name)? {
+            Some(p) => match sess.apps(p).is_empty() {
+                true => match sess.delete_profile(p) {
+                    Ok(()) => {
+                        removed += 1;
+                        crate::log::line(&format!("[sm] 清掉孤儿配置 {name}"));
+                    }
+                    Err(e) => errs.push(format!("{name}：{e}")),
+                },
+                false => errs.push(format!("{name}：又挂上应用了，跳过")),
+            },
+            None => errs.push(format!("{name}：找不到句柄，跳过")),
+        }
+    }
+    sess.save()?;
+    Ok((removed, errs))
 }
 
 // ---------------------------------------------------------------- 内置解锁组件的部署 / 还原
@@ -911,3 +1481,9 @@ pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
     let _ = std::fs::remove_file(&rec);
     Ok("已取回解锁组件（原本没有同名文件，直接删除）".to_owned())
 }
+
+/// 【只读探测】给诊断命令用的会话入口（不写任何配置）。
+pub fn open_session_for_probe() -> Result<nv::Session, String> {
+    nv::Session::open()
+}
+
