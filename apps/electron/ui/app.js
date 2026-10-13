@@ -856,10 +856,18 @@
       ]),
       h('div', { class: 'gpath', text: g.dir || '' }),
       h('div', { class: 'gactions' }, back ? [
-        h('button', { class: 'btn primary small', type: 'button', text: back.label, on: { click: back.onClick } }),
+        h('button', { class: 'btn ' + (back.danger ? 'danger' : 'primary') + ' small', type: 'button', text: back.label, on: { click: back.onClick } }),
         h('button', { class: 'btn small', type: 'button', text: '打开文件夹', on: { click: function () { openPath(g.exists ? (g.target || g.dir) : g.dir); } } })
       ] : [
-        h('button', { class: 'btn primary small', type: 'button', text: '部署', on: { click: function () { openGameDialog(g); } } }),
+        h('button', {
+          // 已部署/手动安装时按钮是「还原」/「清理」—— 用红色，避免和「部署」看混
+          class: 'btn ' + (/^已部署/.test(g.deployed || '') || /^已安装/.test(g.deployed || '') ? 'danger' : 'primary') + ' small',
+          type: 'button',
+          // 已经部署过 → 按钮直接是「还原」（点开同一个对话框，里面是还原流程）；
+          // 手动装的（无本工具记录）→ 「清理」，同样走那个对话框。
+          text: /^已部署/.test(g.deployed || '') ? '还原' : (/^已安装/.test(g.deployed || '') ? '清理' : '部署'),
+          on: { click: function () { openGameDialog(g); } },
+        }),
         h('button', { class: 'btn small', type: 'button', text: '打开文件夹', on: { click: function () { openPath(g.exists ? g.target : g.dir); } } }),
         h('div', { class: 'spacer' }),
         h('button', { class: 'btn small danger', type: 'button', text: '从库中移除', on: { click: function () { removeGame(g); } } })
@@ -1084,6 +1092,12 @@
      代理入口 + 优化等级 + 倍率上限，走 deploy_game。DLSS5 那一套在 DLSS5 页自己的
      对话框里（openDlss5Dialog），两者互不干扰。 */
   function openGameDialog(g) {
+  // Smooth Motion 的解锁组件和帧生成用的是同一个 version.dll ——
+  // 它占着的话，帧生成这一步必须停下，否则会把它覆盖掉。
+  if (/Smooth Motion/.test((g && g.deployed) || '')) {
+    toast('这个游戏目录里是 Smooth Motion 的解锁组件（它和帧生成都用 version.dll）。请先到「Smooth Motion」页把这个游戏关闭或还原，再来部署帧生成。', 'warn', 12000);
+    return;
+  }
     var sel = h('select', { class: 'input' });
     PROXIES.forEach(function (p) { sel.appendChild(h('option', { value: p, text: p })); });
     sel.value = PROXY;
@@ -1915,8 +1929,6 @@
           gate.textContent = (r && r.reason) || '当前不适用';
         }
       }
-      var base = (r && r.profileBase) || {};
-      setSmText('sm-base', base.state || '读不到');
       setSmText('sm-note', allowed
         ? '驱动满足本工具要求（>=' + ((r && r.minDriver) || '616.64') + '）。'
         : '不满足要求时无法部署；原因见上面的提示。');
@@ -1934,29 +1946,31 @@
   function paintSmList() {
     var box = document.getElementById('sm-list');
     if (!box) return;
-    box.textContent = '';
     if (!GAMES.length) {
+      box.textContent = '';
       box.appendChild(h('div', { class: 'empty', text: '游戏库是空的 —— 点右上「扫描游戏库」。扫描只读启动器记录，不改动任何游戏文件。' }));
       return;
     }
-    var names = GAMES.map(function (g) { return g.name || ''; });
-    invoke('sm_game_states', { names: names }).then(function (d) {
+    // 先把状态取回来，再一次性替换内容；否则列表会先空一下再出现（看起来就是闪一下）
+    invoke('sm_game_states', { names: GAMES.map(function (g) { return g.name || ''; }) }).then(function (d) {
       var map = {};
       ((d && d.states) || []).forEach(function (s) { map[s.name] = s.value; });
-      box.textContent = '';
+      var frag = document.createDocumentFragment();
       GAMES.forEach(function (g, i) {
-        var v = map[g.name];
-        var on = v === 1;
-        box.appendChild(gameCard(g, i, {
+        var on = map[g.name] === 1;
+        frag.appendChild(gameCard(g, i, {
           label: on ? '关闭 Smooth Motion' : '开启 Smooth Motion',
+          danger: on,
           onClick: function () { toggleSm(g, !on); },
         }));
       });
+      box.textContent = '';
+      box.appendChild(frag);
     }).catch(function (e) {
+      box.textContent = '';
       box.appendChild(h('div', { class: 'empty', text: '读取 Smooth Motion 状态失败：' + errText(e) }));
     });
   }
-
   // 开启 / 关闭某个游戏的 Smooth Motion（只写我们自己的单游戏 profile，绝不写全局）。
   // 引擎互斥：同一个游戏只能启用一个引擎。已部署帧生成时，先引导还原成原版再开 SM。
   function toggleSm(g, on) {
@@ -1964,28 +1978,18 @@
     var exe = g.target || g.dir || '';
     var deployedFg = /^已部署/.test(g.deployed || '');
     var manualFg = /^已安装/.test(g.deployed || '');
-    var needRestore = on && (deployedFg || manualFg);
-    if (!needRestore) {
-      doSmWrite(g, exe, on);
+    // 引擎互斥（硬性）：帧生成和 Smooth Motion 用的是同一个 version.dll，
+    // 所以不许我们替他做决定 —— 让用户自己去帧生成页还原，再回来开 SM。
+    if (on && (deployedFg || manualFg)) {
+      toast('这个游戏已经装了帧生成（' + g.deployed + '），而帧生成和 Smooth Motion 用的是同一个 version.dll，不能同时开。\n\n请先到「帧生成」页找到这个游戏，点『还原』把它还原成原版，再回来开启 Smooth Motion。', 'warn', 14000);
       return;
     }
-    var why = manualFg
-      ? '这个游戏里的帧生成不是本工具部署的（检测到手动安装）。'
-      : '这个游戏已经用本工具部署了帧生成。';
-    var go = window.confirm('同一个游戏同时只能启用一个引擎。\n\n' + why +
-      '\n\n继续的话，我会先把帧生成还原成原版，再为它开启 Smooth Motion。\n\n要现在还原并开启吗？');
-    if (!go) return;
-    showBar('正在还原帧生成…', 0.5);
-    invoke('restore', { dir: g.target || g.dir }).then(function (r) {
-      toast(String(r || '已还原'), 'ok', 12000);
-      showBar('正在开启 Smooth Motion…', 0.8);
-      return doSmWrite(g, exe, true);
-    }).catch(function (e) {
-      hideBar();
-      toast('先还原帧生成这一步失败了，已中止（没有改动 Smooth Motion）：' + errText(e), 'error', 10000);
-    });
+    // 目录里如果立着『不是本工具放』的入口（别人的 Mod），也先说清楚再动
+    if (on && /入口被占用/.test(g.deployed || '') && !window.confirm('这个游戏目录里已经有一个不是本工具放的入口文件（' + g.deployed + '）。\n\n继续会先把它原样备份，再放入 Smooth Motion 的解锁组件；之后可以用关闭或还原取回。\n\n要继续吗？')) {
+      return;
+    }
+    doSmWrite(g, exe, on);
   }
-
   // 真正落地：开启时「先放解锁组件 → 再写驱动配置」；关闭时「先关驱动 → 再取回组件」。
   // 任一步失败都会明确报出来，不留半成品状态。
   function doSmWrite(g, exe, on) {
@@ -2004,15 +2008,21 @@
         ? invoke('sm_asset_restore', { dir: dir }).then(function (m) { return (m && m.message) || ''; }).catch(function () { return ''; })
         : Promise.resolve(extra);
       return tail.then(function (t) {
-        hideBar();
+        hideBarLater(1200);
         var ok = r && r.ok;
         var msg = ((r && r.message) || (on ? '已开启' : '已关闭')) + (t ? '；' + t : '');
         toast((ok ? '' : '未生效：') + msg, ok ? 'ok' : 'warn', 9000);
-        paintSmList();
+        // 重新拉一次游戏库，再重画两边的列表：
+        // refreshLibrary 只重画帧生成页，SM 页那份得自己再画一次（否则徽章留在旧状态）。
+        if (ok) {
+          refreshLibrary().then(function () { paintSmList(); }).catch(function () { paintSmList(); });
+        } else {
+          paintSmList();
+        }
         return r;
       });
     }).catch(function (e) {
-      hideBar();
+      hideBarLater(1200);
       toast('Smooth Motion 操作中止：' + errText(e), 'error', 10000);
     });
   }
@@ -2036,6 +2046,8 @@
         if (want === 'settings') refreshBackups().catch(function () { });
         // 进 Smooth Motion 页就重新检测一次（显卡/驱动/门槛/驱动里的全局现状，全部只读）
         if (want === 'sm') renderSm().catch(function () { });
+        // 进帧生成页也刷新一次：状态可能被 Smooth Motion 页改过（同一个 version.dll）
+        if (want === 'lib') refreshLibrary().catch(function () { });
       });
     });
   }

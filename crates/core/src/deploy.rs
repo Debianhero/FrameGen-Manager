@@ -91,6 +91,8 @@ pub enum DeployState {
     ManuallyInstalled { files: Vec<String> },
     /// 目录里有代理 DLL，但不是本项目的 —— 可能是别的 Mod
     Occupied { files: Vec<String> },
+    /// Smooth Motion 的解锁组件占着 version.dll（和帧生成同一个文件名，必须分开认）
+    SmDeployed,
 }
 
 impl DeployState {
@@ -103,6 +105,7 @@ impl DeployState {
                 format!("已安装，本工具无记录（{}）", files.join("、"))
             }
             DeployState::Occupied { files } => format!("入口被占用: {}", files.join(", ")),
+            DeployState::SmDeployed => "已被 Smooth Motion 占用".to_owned(),
         }
     }
 
@@ -159,6 +162,11 @@ pub fn state_of(dir: &Path) -> DeployState {
             proxy: m.proxy_name,
             deployed_at: m.deployed_at,
         };
+    }
+    // Smooth Motion 的解锁组件也叫 version.dll —— 先认出它，
+    // 否则会被当成"没部署"（允许再部署，覆盖掉它）或者"别人的 Mod"。
+    if crate::sm::has_our_asset(dir) {
+        return DeployState::SmDeployed;
     }
     // 没有 manifest，就靠签名判断目录里的文件是不是本项目的。
     // 这样用户自己手动安装的情况也能被识别出来，而不是一律显示「未部署」。

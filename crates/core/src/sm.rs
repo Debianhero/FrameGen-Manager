@@ -780,8 +780,21 @@ pub fn remove_game_sm(game: &str) -> Result<bool, String> {
 
 // ---------------------------------------------------------------- 内置解锁组件的部署 / 还原
 
-const SM_ASSET_DIR: &str = "bundled-sm";
-const SM_ASSET_FILE: &str = "version.dll";
+pub const SM_ASSET_DIR: &str = "bundled-sm";
+pub const SM_ASSET_FILE: &str = "version.dll";
+
+/// 内置解锁组件的 SHA256（固定值；用它就能在任意游戏目录里认出"这是 SM 放的"）。
+pub const SM_ASSET_SHA256: &str =
+    "4091efe2db3dc8dbb671a187b3904c36a58da18149b309021c5367d1646c21cb";
+
+/// 这个目录里的 version.dll 是不是我们的解锁组件？
+pub fn has_our_asset(dir: &std::path::Path) -> bool {
+    let p = dir.join(SM_ASSET_FILE);
+    p.is_file()
+        && crate::util::sha256_file(&p)
+            .map(|h| h.eq_ignore_ascii_case(SM_ASSET_SHA256))
+            .unwrap_or(false)
+}
 
 /// 内置组件在磁盘上的位置（随包分发，位于 assets 目录下的 bundled-sm）。
 pub fn asset_path() -> Result<std::path::PathBuf, String> {
