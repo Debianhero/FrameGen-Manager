@@ -266,6 +266,12 @@ mod nv {
     const ID_CREATE_SESSION: u32 = 0x0694_D52E;
     const ID_LOAD_SETTINGS: u32 = 0x375D_BD6B;
     const ID_GET_BASE_PROFILE: u32 = 0xDA84_66A0;
+    const ID_FIND_PROFILE: u32 = 0x7E4A_9A0B;
+    const ID_CREATE_PROFILE: u32 = 0xCC17_6068;
+    const ID_CREATE_APPLICATION: u32 = 0x4347_A9DE;
+    const ID_SET_SETTING: u32 = 0x577D_D202;
+    const ID_SAVE_SETTINGS: u32 = 0xFCBC_7E14;
+    const ID_DELETE_PROFILE: u32 = 0x1709_3206;
     /// 读设置：优先用 PI 的首选 ID（它和回退 ID 的参数个数不同，这里必须用首选）
     const ID_GET_SETTING: u32 = 0xEA99_498D;
 
@@ -490,6 +496,248 @@ mod nv {
                 Ok(st.value())
             }
         }
+
+        /// 按名字找 profile。返回 Ok(None) 表示"没有这个 profile"（rc = -163）。
+        pub fn find(&self, name: &str) -> Result<Option<*mut c_void>, String> {
+            unsafe {
+                let raw = (self.query)(ID_FIND_PROFILE);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_FindProfileByName".to_owned());
+                }
+                let f: unsafe extern "C" fn(*mut c_void, *const u16, *mut *mut c_void) -> i32 =
+                    std::mem::transmute(raw);
+                let w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+                let mut prof: *mut c_void = std::ptr::null_mut();
+                let rc = f(self.sess, w.as_ptr(), &mut prof);
+                if rc == 0 {
+                    Ok(Some(prof))
+                } else if rc == -163 {
+                    Ok(None)
+                } else {
+                    Err(format!("DRS_FindProfileByName rc={rc}"))
+                }
+            }
+        }
+
+        /// 建一个**我们自己的** profile（NVDRS_PROFILE = 4116 字节）。
+        pub fn create_profile(&self, name: &str) -> Result<*mut c_void, String> {
+            unsafe {
+                let raw = (self.query)(ID_CREATE_PROFILE);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_CreateProfile".to_owned());
+                }
+                let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> i32 =
+                    std::mem::transmute(raw);
+                let mut buf = vec![0u8; 4116];
+                buf[0..4].copy_from_slice(&(4116u32 | (1u32 << 16)).to_le_bytes());
+                let w: Vec<u16> = name.encode_utf16().collect();
+                for (i, c) in w.iter().enumerate() {
+                    let o = 4 + i * 2;
+                    if o + 2 > buf.len() {
+                        break;
+                    }
+                    buf[o..o + 2].copy_from_slice(&c.to_le_bytes());
+                }
+                let mut prof: *mut c_void = std::ptr::null_mut();
+                let rc = f(self.sess, buf.as_mut_ptr() as *mut c_void, &mut prof);
+                if rc != 0 {
+                    return Err(format!("DRS_CreateProfile rc={rc}"));
+                }
+                Ok(prof)
+            }
+        }
+
+        /// 把某个 exe 挂到我们的 profile 上（NVDRS_APPLICATION_V4 = 20492 字节）。
+        /// rc = -167 表示这个 exe 已经被别的 profile 占了。
+        pub fn create_application(
+            &self,
+            prof: *mut c_void,
+            exe: &std::path::Path,
+        ) -> Result<(), String> {
+            unsafe {
+                let raw = (self.query)(ID_CREATE_APPLICATION);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_CreateApplication".to_owned());
+                }
+                let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32 =
+                    std::mem::transmute(raw);
+                let mut buf = vec![0u8; 20492];
+                buf[0..4].copy_from_slice(&(20492u32 | (4u32 << 16)).to_le_bytes());
+                let text = exe.display().to_string();
+                let w: Vec<u16> = text.encode_utf16().collect();
+                for (i, c) in w.iter().enumerate() {
+                    let o = 8 + i * 2;
+                    if o + 2 > buf.len() {
+                        break;
+                    }
+                    buf[o..o + 2].copy_from_slice(&c.to_le_bytes());
+                }
+                let rc = f(self.sess, prof, buf.as_mut_ptr() as *mut c_void);
+                if rc != 0 {
+                    return Err(format!("DRS_CreateApplication rc={rc}（-167 = 该 exe 已被别的配置占用）"));
+                }
+                Ok(())
+            }
+        }
+
+        /// 写一个 DWORD 设置。返回驱动的原始返回码 —— **它不可信**
+        /// （实测：SM 这一项返回 -160 但值其实写进去了），判成败必须靠读回复核。
+        pub fn set_dword(&self, prof: *mut c_void, id: u32, value: u32) -> Result<i32, String> {
+            unsafe {
+                let raw = (self.query)(ID_SET_SETTING);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_SetSetting".to_owned());
+                }
+                // 同样是 5 个参数（结构体 + 两个 uint）
+                let f: unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_void,
+                    *mut NvSetting,
+                    u32,
+                    u32,
+                ) -> i32 = std::mem::transmute(raw);
+                let mut st = NvSetting::new(id);
+                st.current[0..4].copy_from_slice(&value.to_le_bytes());
+                Ok(f(self.sess, prof, &mut st, 0, 0))
+            }
+        }
+
+        pub fn save(&self) -> Result<(), String> {
+            unsafe {
+                let raw = (self.query)(ID_SAVE_SETTINGS);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_SaveSettings".to_owned());
+                }
+                let f: unsafe extern "C" fn(*mut c_void) -> i32 = std::mem::transmute(raw);
+                let rc = f(self.sess);
+                if rc != 0 {
+                    return Err(format!("DRS_SaveSettings rc={rc}"));
+                }
+                Ok(())
+            }
+        }
+
+        pub fn delete_profile(&self, prof: *mut c_void) -> Result<(), String> {
+            unsafe {
+                let raw = (self.query)(ID_DELETE_PROFILE);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_DeleteProfile".to_owned());
+                }
+                let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 =
+                    std::mem::transmute(raw);
+                let rc = f(self.sess, prof);
+                if rc != 0 {
+                    return Err(format!("DRS_DeleteProfile rc={rc}"));
+                }
+                Ok(())
+            }
+        }
+
+        /// 这个句柄是不是**全局/基础 profile**？是的话一律拒绝写入（硬护栏）。
+        pub fn is_base_profile(&self, prof: *mut c_void) -> bool {
+            matches!(self.base(), Ok(b) if b == prof)
+        }
     }
 }
 
+
+// ---------------------------------------------------------------- 写入路径（单游戏 profile）
+
+/// 我们自己创建的 profile 名前缀 —— 用来区分「我们的」与 NVIDIA 预置的配置。
+pub const PROFILE_PREFIX: &str = "FrameGen Manager - ";
+
+pub fn game_profile_name(game: &str) -> String {
+    format!("{}{}", PROFILE_PREFIX, game)
+}
+
+/// 一次写入的结果。注意 ok 只取决于**读回复核**，不取决于驱动返回码。
+#[derive(Debug, Clone)]
+pub struct SmWriteResult {
+    pub ok: bool,
+    pub readback: Option<u32>,
+    pub rc_set: i32,
+    pub message: String,
+}
+
+/// 读某个游戏（我们自己的 profile）里的 SM 值。None = 我们还没为它建过配置。
+pub fn game_sm_value(game: &str) -> Result<Option<u32>, String> {
+    let sess = nv::Session::open()?;
+    let name = game_profile_name(game);
+    match sess.find(&name)? {
+        None => Ok(None),
+        Some(prof) => {
+            if sess.is_base_profile(prof) {
+                return Err("拒绝：按名字找到的竟然是全局 profile".to_owned());
+            }
+            match sess.read(prof, SM_SETTING_ID) {
+                Ok(v) => Ok(Some(v)),
+                Err(e) if e.starts_with("rc=-160") => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+/// 开启 / 关闭某个游戏的 Smooth Motion。
+///
+/// **只写我们自己的 profile（名字见 PROFILE_PREFIX），绝不碰全局/基础 profile**
+/// （句柄若等于全局 profile 直接拒绝）。成功判据是**读回复核** —— 实测
+/// DRS_SetSetting 对 SM 会返回 -160 但值其实已经写进去，所以返回码不可信。
+pub fn set_game_sm(
+    game: &str,
+    exe: &std::path::Path,
+    on: bool,
+) -> Result<SmWriteResult, String> {
+    let want = if on { 1u32 } else { 0u32 };
+    let sess = nv::Session::open()?;
+    let name = game_profile_name(game);
+    let prof = match sess.find(&name)? {
+        Some(p) => {
+            if sess.is_base_profile(p) {
+                return Err("拒绝：不允许写全局/基础 profile。".to_owned());
+            }
+            p
+        }
+        None => sess.create_profile(&name)?,
+    };
+    if let Err(e) = sess.create_application(prof, exe) {
+        crate::log::line(&format!("[sm] CreateApplication 提示：{e}"));
+    }
+    let rc_set = sess.set_dword(prof, SM_SETTING_ID, want)?;
+    sess.save()?;
+    let readback = match sess.read(prof, SM_SETTING_ID) {
+        Ok(v) => Some(v),
+        Err(_) => None,
+    };
+    let ok = readback == Some(want);
+    Ok(SmWriteResult {
+        ok,
+        readback,
+        rc_set,
+        message: if ok {
+            format!(
+                "{} Smooth Motion（已读回复核确认；驱动返回码 {rc_set}）",
+                if on { "已开启" } else { "已关闭" }
+            )
+        } else {
+            format!("写入后复核不符：期望 {want}，实际读到 {readback:?}")
+        },
+    })
+}
+
+/// 删掉我们为某个游戏建的 profile（等于「驱动里从没为它配过」）。返回是否真的删了。
+pub fn remove_game_sm(game: &str) -> Result<bool, String> {
+    let sess = nv::Session::open()?;
+    let name = game_profile_name(game);
+    match sess.find(&name)? {
+        None => Ok(false),
+        Some(prof) => {
+            if sess.is_base_profile(prof) {
+                return Err("拒绝：不允许删除全局/基础 profile。".to_owned());
+            }
+            sess.delete_profile(prof)?;
+            sess.save()?;
+            Ok(true)
+        }
+    }
+}
