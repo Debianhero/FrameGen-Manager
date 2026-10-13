@@ -1986,17 +1986,34 @@
     });
   }
 
-  // 真正调用驱动写入（写→读回复核），完成后刷新列表
+  // 真正落地：开启时「先放解锁组件 → 再写驱动配置」；关闭时「先关驱动 → 再取回组件」。
+  // 任一步失败都会明确报出来，不留半成品状态。
   function doSmWrite(g, exe, on) {
-    return invoke('sm_set_game', { name: g.name, exe: exe, on: !!on }).then(function (r) {
-      hideBar();
-      var ok = r && r.ok;
-      toast((ok ? '' : '未生效：') + ((r && r.message) || (on ? '已开启' : '已关闭')), ok ? 'ok' : 'warn', 8000);
-      paintSmList();
-      return r;
+    var dir = g.target || g.dir || '';
+    var first = on
+      ? invoke('sm_asset_deploy', { dir: dir })
+      : Promise.resolve(null);
+    return first.then(function (a) {
+      return invoke('sm_set_game', { name: g.name, exe: exe, on: !!on }).then(function (r) {
+        return { r: r, asset: a };
+      });
+    }).then(function (o) {
+      var r = o.r;
+      var extra = on ? ((o.asset && o.asset.message) || '') : '';
+      var tail = !on
+        ? invoke('sm_asset_restore', { dir: dir }).then(function (m) { return (m && m.message) || ''; }).catch(function () { return ''; })
+        : Promise.resolve(extra);
+      return tail.then(function (t) {
+        hideBar();
+        var ok = r && r.ok;
+        var msg = ((r && r.message) || (on ? '已开启' : '已关闭')) + (t ? '；' + t : '');
+        toast((ok ? '' : '未生效：') + msg, ok ? 'ok' : 'warn', 9000);
+        paintSmList();
+        return r;
+      });
     }).catch(function (e) {
       hideBar();
-      toast('Smooth Motion 操作失败：' + errText(e), 'error', 10000);
+      toast('Smooth Motion 操作中止：' + errText(e), 'error', 10000);
     });
   }
   // ---------------------------------------------------------------- 页面切换与绑定
