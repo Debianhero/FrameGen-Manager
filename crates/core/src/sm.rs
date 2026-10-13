@@ -273,7 +273,8 @@ mod nv {
     const ID_SAVE_SETTINGS: u32 = 0xFCBC_7E14;
     const ID_DELETE_PROFILE: u32 = 0x1709_3206;
     /// 删掉某个 profile 里的单项设置（PI 的"恢复默认"就是用它，而不是写 0）。
-    const ID_DELETE_PROFILE_SETTING: u32 = 0xD20D_29DF;
+    /// 注意用它的是回退 ID：实测首选 ID 0xD20D29DF 对 SM 返回 -160，回退 ID 才通。
+    const ID_DELETE_PROFILE_SETTING: u32 = 0xE4A2_6362;
     /// 读设置：优先用 PI 的首选 ID（它和回退 ID 的参数个数不同，这里必须用首选）
     const ID_GET_SETTING: u32 = 0xEA99_498D;
 
@@ -300,10 +301,6 @@ mod nv {
             st.version = (std::mem::size_of::<NvSetting>() as u32) | (1 << 16);
             st.setting_id = id;
             st
-        }
-
-        fn location(&self) -> u32 {
-            self.setting_location
         }
 
         fn value(&self) -> u32 {
@@ -636,35 +633,6 @@ mod nv {
                     return Err(format!("DRS_DeleteProfile rc={rc}"));
                 }
                 Ok(())
-            }
-        }
-
-        /// 读一个设置，同时把"这个值来自哪里"也带回来：
-        /// location == 0 表示**这个 profile 自己的值**；非 0 表示是从别处继承/往返得到的。
-        pub fn read_with_location(
-            &self,
-            prof: *mut c_void,
-            id: u32,
-        ) -> Result<(u32, u32), String> {
-            unsafe {
-                let raw = (self.query)(ID_GET_SETTING);
-                if raw.is_null() {
-                    return Err("驱动没有提供 DRS_GetSetting".to_owned());
-                }
-                let f: unsafe extern "C" fn(
-                    *mut c_void,
-                    *mut c_void,
-                    u32,
-                    *mut NvSetting,
-                    *mut u32,
-                ) -> i32 = std::mem::transmute(raw);
-                let mut st = NvSetting::new(id);
-                let mut extra: u32 = 0;
-                let rc = f(self.sess, prof, id, &mut st, &mut extra);
-                if rc != 0 {
-                    return Err(format!("rc={rc}"));
-                }
-                Ok((st.value(), st.location()))
             }
         }
 
