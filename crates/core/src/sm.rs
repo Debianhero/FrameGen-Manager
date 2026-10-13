@@ -272,6 +272,8 @@ mod nv {
     const ID_SET_SETTING: u32 = 0x577D_D202;
     const ID_SAVE_SETTINGS: u32 = 0xFCBC_7E14;
     const ID_DELETE_PROFILE: u32 = 0x1709_3206;
+    /// 删掉某个 profile 里的单项设置（PI 的"恢复默认"就是用它，而不是写 0）。
+    const ID_DELETE_PROFILE_SETTING: u32 = 0xD20D_29DF;
     /// 读设置：优先用 PI 的首选 ID（它和回退 ID 的参数个数不同，这里必须用首选）
     const ID_GET_SETTING: u32 = 0xEA99_498D;
 
@@ -298,6 +300,10 @@ mod nv {
             st.version = (std::mem::size_of::<NvSetting>() as u32) | (1 << 16);
             st.setting_id = id;
             st
+        }
+
+        fn location(&self) -> u32 {
+            self.setting_location
         }
 
         fn value(&self) -> u32 {
@@ -633,6 +639,48 @@ mod nv {
             }
         }
 
+        /// 读一个设置，同时把"这个值来自哪里"也带回来：
+        /// location == 0 表示**这个 profile 自己的值**；非 0 表示是从别处继承/往返得到的。
+        pub fn read_with_location(
+            &self,
+            prof: *mut c_void,
+            id: u32,
+        ) -> Result<(u32, u32), String> {
+            unsafe {
+                let raw = (self.query)(ID_GET_SETTING);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_GetSetting".to_owned());
+                }
+                let f: unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_void,
+                    u32,
+                    *mut NvSetting,
+                    *mut u32,
+                ) -> i32 = std::mem::transmute(raw);
+                let mut st = NvSetting::new(id);
+                let mut extra: u32 = 0;
+                let rc = f(self.sess, prof, id, &mut st, &mut extra);
+                if rc != 0 {
+                    return Err(format!("rc={rc}"));
+                }
+                Ok((st.value(), st.location()))
+            }
+        }
+
+        /// 删掉某个 profile 里的一个设置项（= 恢复成"没有覆盖、跟随全局"）。
+        pub fn delete_setting(&self, prof: *mut c_void, id: u32) -> Result<i32, String> {
+            unsafe {
+                let raw = (self.query)(ID_DELETE_PROFILE_SETTING);
+                if raw.is_null() {
+                    return Err("驱动没有提供 DRS_DeleteProfileSetting".to_owned());
+                }
+                let f: unsafe extern "C" fn(*mut c_void, *mut c_void, u32) -> i32 =
+                    std::mem::transmute(raw);
+                Ok(f(self.sess, prof, id))
+            }
+        }
+
         /// 这个句柄是不是**全局/基础 profile**？是的话一律拒绝写入（硬护栏）。
         pub fn is_base_profile(&self, prof: *mut c_void) -> bool {
             self.base().is_ok_and(|b| b == prof)
@@ -688,7 +736,7 @@ pub fn set_game_sm(
     exe: &std::path::Path,
     on: bool,
 ) -> Result<SmWriteResult, String> {
-    let want = if on { 1u32 } else { 0u32 };
+    let want = 1u32;   // 只有"开启"才写值；"关闭"= 删掉我们的覆盖（跟随全局）
     let sess = nv::Session::open()?;
     let name = game_profile_name(game);
     let prof = match sess.find(&name)? {
@@ -703,21 +751,33 @@ pub fn set_game_sm(
     if let Err(e) = sess.create_application(prof, exe) {
         crate::log::line(&format!("[sm] CreateApplication 提示：{e}"));
     }
-    let rc_set = sess.set_dword(prof, SM_SETTING_ID, want)?;
+    // 开启 = 写 1；关闭 = 删掉我们这一项（等价于"跟随全局"，PI 也是这么做的）
+    let rc_set = if on {
+        sess.set_dword(prof, SM_SETTING_ID, want)?
+    } else {
+        sess.delete_setting(prof, SM_SETTING_ID)?
+    };
     sess.save()?;
+    // 复核：
+    //  · 开启 —— 读回值必须是 1（实测：驱动返回码会骗人，读回的值不会）
+    //  · 关闭 —— 判据是"删除这一项"这个调用本身成功；之后读到的值会变成**跟随全局**
+    //    （用户全局开着就是 1，这不是失败，所以不能拿值来判断）
     let readback = sess.read(prof, SM_SETTING_ID).ok();
-    let ok = readback == Some(want);
+    let ok = if on { readback == Some(1) } else { rc_set == 0 };
     Ok(SmWriteResult {
         ok,
         readback,
         rc_set,
         message: if ok {
-            format!(
-                "{} Smooth Motion（已读回复核确认；驱动返回码 {rc_set}）",
-                if on { "已开启" } else { "已关闭" }
-            )
+            if on {
+                format!("已开启（本游戏强制开启；已读回复核确认，驱动返回码 {rc_set}）")
+            } else {
+                format!("已取消本游戏的设置，改为跟随全局（删除调用返回 {rc_set}）")
+            }
+        } else if on {
+            format!("写入后复核不符：期望 1，实际读到 {readback:?}")
         } else {
-            format!("写入后复核不符：期望 {want}，实际读到 {readback:?}")
+            format!("删除本游戏的设置失败（返回 {rc_set}）")
         },
     })
 }
