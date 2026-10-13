@@ -52,8 +52,11 @@
       },
       {
         "from": "bundled-dlss5",
-      "bundled-sm",
         "to": "bundled-dlss5"
+      },
+      {
+        "from": "bundled-sm",
+        "to": "bundled-sm"
       }
     ],
     "win": {
