@@ -345,6 +345,29 @@ function ensureBundledAssets() {
         copied++; names.push(f);
       } catch (e) { console.error('[bundled] 复制失败', f, e.message); }
     }
+    // Smooth Motion 的解锁组件（30 系）：放到 <资产目录>\bundled-sm\，
+    // core 里按 assets_dir()/bundled-sm/version.dll 取用。
+    const smsrc = path.join(exeDir, 'bundled-sm');
+    if (fs.existsSync(smsrc)) {
+      const smdst = path.join(dst, 'bundled-sm');
+      try { fs.mkdirSync(smdst, { recursive: true }); } catch (e) {}
+      for (const f of fs.readdirSync(smsrc)) {
+        const s = path.join(smsrc, f);
+        const t = path.join(smdst, f);
+        try {
+          const st = fs.statSync(s);
+          if (!st.isFile()) continue;
+          if (skipMarker) {
+            let ok = false;
+            try { ok = fs.statSync(t).size === st.size; } catch (e) { ok = false; }
+            if (ok) continue;
+          }
+          fs.copyFileSync(s, t);
+          copied++; names.push('bundled-sm/' + f);
+        } catch (e) { console.error('[bundled] 复制失败', f, e.message); }
+      }
+    }
+
     // DLSS5 的文件（ReShade addon 插件 + ReShade 安装包 + 对应显卡系列的模型）
     // 单独放到 <资产目录>\DLSS5\（用户要求）：不和帧生成资产混在同一层，
     // 资产卡片只读资产目录这一层，所以也不会在卡片里冒出一个 158MB 的 dll。
