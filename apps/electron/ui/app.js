@@ -1957,20 +1957,46 @@
     });
   }
 
-  // 开启 / 关闭某个游戏的 Smooth Motion（只写我们自己的单游戏 profile，绝不写全局）
+  // 开启 / 关闭某个游戏的 Smooth Motion（只写我们自己的单游戏 profile，绝不写全局）。
+  // 引擎互斥：同一个游戏只能启用一个引擎。已部署帧生成时，先引导还原成原版再开 SM。
   function toggleSm(g, on) {
     if (!g || !g.name) return;
     var exe = g.target || g.dir || '';
-    if (g.deployed && g.deployed !== '未部署') {
-      var go = window.confirm('这个游戏已经用「' + g.deployed + '」部署过。\n\n同一个游戏同时只能启用一个引擎，继续前建议先用帧生成页把它还原成原版。\n\n仍要继续开启 Smooth Motion 吗？');
-      if (!go) return;
+    var deployedFg = /^已部署/.test(g.deployed || '');
+    var manualFg = /^已安装/.test(g.deployed || '');
+    var needRestore = on && (deployedFg || manualFg);
+    if (!needRestore) {
+      doSmWrite(g, exe, on);
+      return;
     }
-    invoke('sm_set_game', { name: g.name, exe: exe, on: !!on }).then(function (r) {
-      var ok = r && r.ok;
-      toast((ok ? '' : '未生效：') + ((r && r.message) || (on ? '已开启' : '已关闭')), ok ? 'info' : 'warn', 6000);
-      paintSmList();
+    var why = manualFg
+      ? '这个游戏里的帧生成不是本工具部署的（检测到手动安装）。'
+      : '这个游戏已经用本工具部署了帧生成。';
+    var go = window.confirm('同一个游戏同时只能启用一个引擎。\n\n' + why +
+      '\n\n继续的话，我会先把帧生成还原成原版，再为它开启 Smooth Motion。\n\n要现在还原并开启吗？');
+    if (!go) return;
+    showBar('正在还原帧生成…', 0.5);
+    invoke('restore', { dir: g.target || g.dir }).then(function (r) {
+      toast(String(r || '已还原'), 'ok', 12000);
+      showBar('正在开启 Smooth Motion…', 0.8);
+      return doSmWrite(g, exe, true);
     }).catch(function (e) {
-      toast('Smooth Motion 操作失败：' + errText(e), 'error', 8000);
+      hideBar();
+      toast('先还原帧生成这一步失败了，已中止（没有改动 Smooth Motion）：' + errText(e), 'error', 10000);
+    });
+  }
+
+  // 真正调用驱动写入（写→读回复核），完成后刷新列表
+  function doSmWrite(g, exe, on) {
+    return invoke('sm_set_game', { name: g.name, exe: exe, on: !!on }).then(function (r) {
+      hideBar();
+      var ok = r && r.ok;
+      toast((ok ? '' : '未生效：') + ((r && r.message) || (on ? '已开启' : '已关闭')), ok ? 'ok' : 'warn', 8000);
+      paintSmList();
+      return r;
+    }).catch(function (e) {
+      hideBar();
+      toast('Smooth Motion 操作失败：' + errText(e), 'error', 10000);
     });
   }
   // ---------------------------------------------------------------- 页面切换与绑定
