@@ -134,7 +134,7 @@ fn nvidia_smi_path() -> Option<std::path::PathBuf> {
     cands.into_iter().find(|p| p.is_file())
 }
 
-fn nvidia_smi_version() -> Option<String> {
+pub fn nvidia_smi_version() -> Option<String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = std::process::Command::new(nvidia_smi_path()?)

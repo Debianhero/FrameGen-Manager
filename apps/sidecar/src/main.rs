@@ -324,6 +324,35 @@ fn assets_status() -> Value {
     })
 }
 
+/// Smooth Motion 适用性（**只读**）：显卡/驱动门槛 + 本机 NvPresent 构建。
+/// 门槛按产品规定：驱动 >= 616.64 才允许部署（见 docs/SM-事实来源与策略.md）。
+fn sm_info() -> Value {
+    let gate = framegen_core::sm::gate();
+    let nvp: Vec<Value> = framegen_core::sm::nvpresent_all()
+        .into_iter()
+        .map(|n| {
+            json!({
+                "path": n.path,
+                "bytes": n.bytes,
+                "sha256": n.sha256,
+                "recognized": n.recognized,
+                "note": n.note,
+            })
+        })
+        .collect();
+    json!({
+        "minDriver": framegen_core::sm::MIN_SM_DRIVER_TEXT,
+        "isSm86": gate.is_sm86,
+        "gpu": gate.gpu_name,
+        "driver": gate.driver,
+        "driverVersion": gate.version.map(|(a, b)| format!("{a}.{b}")),
+        "driverSource": gate.source,
+        "allowed": gate.allowed,
+        "reason": gate.reason,
+        "nvpresent": nvp,
+    })
+}
+
 /// 备份目录（界面上显示）
 fn backups_dir() -> String {
     framegen_core::util::backups_dir()
@@ -1347,6 +1376,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             let (ok, total) = set_efficiency(&pids);
             Ok(json!({ "ok": ok, "total": total }))
         }
+        "sm_info" => Ok(sm_info()),
         "backups_dir" => Ok(Value::String(backups_dir())),
         "backups_info" => Ok(backups_info()),
         "clean_backups" => clean_backups(),

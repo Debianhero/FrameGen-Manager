@@ -571,6 +571,30 @@ fn selftest() -> usize {
             &format!("{name} → {}", want.label()),
         );
     }
+    println!("\n--- Smooth Motion 驱动门槛（产品规定：>= 616.64 才允许）---");
+    for (drv, sm86, want) in [
+        (Some("616.64"), true, true),   // 门槛本身：允许
+        (Some("616.63"), true, false),  // 刚好低一档：拒绝
+        (Some("617.42"), true, true),   // 高于门槛：允许（本机就是这档）
+        (Some("591.86"), true, false),  // 上游列为实验，但按本产品规定 <616.64 一律不许
+        (Some("580.0"), true, false),   // 帧生成的最低驱动，但 SM 不够
+        (None, true, false),            // 读不到驱动版本：拒绝
+        (Some("617.42"), false, false), // 不是 30 系：拒绝
+    ] {
+        let g = framegen_core::sm::gate_for(drv, sm86, "NVIDIA GeForce RTX 3070");
+        ck(
+            &mut fails,
+            g.allowed == want,
+            &format!(
+                "SM 门槛 driver={:?} sm86={} → 允许={}（期望 {}）{}",
+                drv,
+                sm86,
+                g.allowed,
+                want,
+                if g.reason.is_empty() { String::new() } else { format!("｜原因：{}", g.reason) }
+            ),
+        );
+    }
     // GTX 16 系必须被挡在部署外面，而且绝不能和 RTX 20 系混成一条路 ——
     // 混了的话界面会给出一条根本无效的建议。
     ck(
