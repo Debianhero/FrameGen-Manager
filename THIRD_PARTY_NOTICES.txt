@@ -92,3 +92,19 @@ bundled-dlss5/ —— DLSS5，复制到 <资产目录>\DLSS5\
 · RenoDX —— GitHub: clshortfuse/renodx
 · ReShade —— https://reshade.me（官方安装器内附有许可文件）
 · 本程序以 MIT 许可发布，见 LICENSE。
+
+----------------------------------------------------------------
+Smooth Motion 解锁组件（30 系）
+----------------------------------------------------------------
+文件：bundled-sm/version.dll（1,053,696 字节）
+SHA256：4091efe2db3dc8dbb671a187b3904c36a58da18149b309021c5367d1646c21cb
+
+来源：https://github.com/pipotoufikxyz-lgtm/dlssg_for_sm86-MFG-version
+      （社区修改版；该仓库声明此 DLL 并非其所作，仅做打包分发）
+组件自称：RTXMFG Smooth Motion Quality for RTX 3000/4000, version 0.30.3.2
+上游参考实现：https://github.com/ItsAdeline/NVSmooth30
+驱动兼容性资料：https://github.com/xikarioz/Smooth-Motion-RTX30
+设置项名称数据库：https://github.com/Orbmu2k/nvidiaProfileInspector
+
+声明：这是社区修改版组件，不是 NVIDIA 官方产品，也不受 NVIDIA 支持。
+      本工具仅将其原样复制到游戏目录、并在还原时取回，不修改该文件本身。

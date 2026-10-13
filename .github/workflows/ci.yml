@@ -37,8 +37,11 @@ jobs:
       - name: clippy (warnings are errors)
         run: cargo clippy --all-targets -- -D warnings
 
+      # 内置资产（apps/electron/bundled-*）按发布规则不进代码镜像，所以这里没有它们：
+      # 跳过几个"需要内置资产真在磁盘上"的测试，其余照跑。本地开发时这些测试仍会跑
+      # （资产就在工作区里），所以"改名忘了同步清单"这类错依然会在本地被抓住。
       - name: tests（core 的无界面自测：sourcetest / selftest / deploytest）
-        run: cargo test
+        run: cargo test -- --skip bundled_ --skip dlss5_assets_report
 
       # The shipped UI is the Electron app in apps/electron (plain HTML/CSS/JS, no
       # build step) plus the Rust sidecar in apps/sidecar. The sidecar has its own
