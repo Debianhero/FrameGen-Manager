@@ -294,32 +294,6 @@ mod nv {
 
     const ID_ENUM_PROFILES: u32 = 0xBC37_1EE0;
     const ID_ENUM_APPLICATIONS: u32 = 0x7FA2_173A;
-    /// NVAPI_END_ENUMERATION
-    const END_ENUM: i32 = -7;
-
-    /// NVDRS_APPLICATION：4 个内联的 2048 wchar 名字数组（和 NVAPI 头文件一致）。
-    #[repr(C)]
-    struct NvApplication {
-        version: u32,
-        is_predefined: u32,
-        app_name: [u16; 2048],
-        user_friendly_name: [u16; 2048],
-        launcher: [u16; 2048],
-        file_in_folder: [u16; 2048],
-    }
-
-    impl Default for NvApplication {
-        fn default() -> Self {
-            NvApplication {
-                version: ((std::mem::size_of::<NvApplication>() as u32) << 16) | 1,
-                is_predefined: 0,
-                app_name: [0; 2048],
-                user_friendly_name: [0; 2048],
-                launcher: [0; 2048],
-                file_in_folder: [0; 2048],
-            }
-        }
-    }
 
     fn wide_to_string(buf: &[u16]) -> String {
         let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
