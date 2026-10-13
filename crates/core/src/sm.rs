@@ -711,7 +711,6 @@ pub fn set_game_sm(
     exe: &std::path::Path,
     on: bool,
 ) -> Result<SmWriteResult, String> {
-    let want = 1u32;   // 只有"开启"才写值；"关闭"= 删掉我们的覆盖（跟随全局）
     let sess = nv::Session::open()?;
     let name = game_profile_name(game);
     let prof = match sess.find(&name)? {
@@ -777,4 +776,125 @@ pub fn remove_game_sm(game: &str) -> Result<bool, String> {
             Ok(true)
         }
     }
+}
+
+// ---------------------------------------------------------------- 内置解锁组件的部署 / 还原
+
+const SM_ASSET_DIR: &str = "bundled-sm";
+const SM_ASSET_FILE: &str = "version.dll";
+
+/// 内置组件在磁盘上的位置（随包分发，位于 assets 目录下的 bundled-sm）。
+pub fn asset_path() -> Result<std::path::PathBuf, String> {
+    let d = crate::util::assets_dir().map_err(|e| format!("找不到内置资产目录：{e:#}"))?;
+    Ok(d.join(SM_ASSET_DIR).join(SM_ASSET_FILE))
+}
+
+fn asset_record_path(game_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let dir = crate::util::backups_dir().map_err(|e| format!("{e:#}"))?.join("sm-assets");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建目录 {} 失败：{e}", dir.display()))?;
+    let key: String = game_dir
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    Ok(dir.join(format!("{}.json", key)))
+}
+
+/// 把内置解锁组件放进这个游戏目录（备份同名原文件，写入后逐字节复核）。
+/// 返回给用户看的一句话说明。
+pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
+    let src = asset_path()?;
+    if !src.is_file() {
+        return Err(format!("内置组件不存在：{}", src.display()));
+    }
+    if !game_dir.is_dir() {
+        return Err(format!("游戏目录不存在：{}", game_dir.display()));
+    }
+    if !crate::util::is_writable(game_dir) {
+        return Err(format!("没有权限写入 {}", game_dir.display()));
+    }
+    let want = crate::util::sha256_file(&src).map_err(|e| format!("{e:#}"))?;
+    let dst = game_dir.join(SM_ASSET_FILE);
+    let mut had_original = false;
+    let mut backup: Option<std::path::PathBuf> = None;
+    if dst.is_file() {
+        let rec = asset_record_path(game_dir)?;
+        let bdir = rec.parent().unwrap_or(std::path::Path::new(".")).join("originals");
+        std::fs::create_dir_all(&bdir).map_err(|e| format!("{e}"))?;
+        let bp = bdir.join(format!("{}.bak", dst.file_name().unwrap_or_default().to_string_lossy()));
+        std::fs::copy(&dst, &bp).map_err(|e| format!("备份原文件失败：{e}"))?;
+        had_original = true;
+        backup = Some(bp);
+    }
+    std::fs::copy(&src, &dst).map_err(|e| format!("复制到 {} 失败：{e}", dst.display()))?;
+    let got = crate::util::sha256_file(&dst).map_err(|e| format!("{e:#}"))?;
+    if got != want {
+        let _ = std::fs::remove_file(&dst);
+        return Err("复制后校验不一致，已撤掉写入的文件".to_owned());
+    }
+    let rec = asset_record_path(game_dir)?;
+    let body = format!(
+        "{{\"dir\":\"{}\",\"hadOriginal\":{},\"backup\":{},\"sha\":\"{}\"}}",
+        game_dir.display().to_string().replace(std::path::MAIN_SEPARATOR, "/"),
+        had_original,
+        match &backup { Some(p) => format!("\"{}\"", p.display().to_string().replace(std::path::MAIN_SEPARATOR, "/")), None => "null".to_owned() },
+        got
+    );
+    std::fs::write(&rec, body).map_err(|e| format!("写部署记录失败：{e}"))?;
+    crate::log::line(&format!("[sm] 已部署解锁组件到 {}", game_dir.display()));
+    Ok(format!(
+        "已放入解锁组件（{}，{:.1} MB）{}",
+        SM_ASSET_FILE,
+        std::fs::metadata(&src).map(|m| m.len() as f64 / 1048576.0).unwrap_or(0.0),
+        if had_original { "，原文件已备份" } else { "" }
+    ))
+}
+
+/// 取回内置解锁组件：有备份就还原原文件，没有就删掉我们放的那份。
+pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
+    let rec = asset_record_path(game_dir)?;
+    let dst = game_dir.join(SM_ASSET_FILE);
+    if !rec.is_file() {
+        // 没有记录：如果这个文件正好是我们的组件，就把它清掉；否则不动
+        let mine = dst.is_file()
+            && asset_path()
+                .ok()
+                .and_then(|p| crate::util::sha256_file(&p).ok())
+                .zip(crate::util::sha256_file(&dst).ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false);
+        if mine {
+            std::fs::remove_file(&dst).map_err(|e| format!("删除失败：{e}"))?;
+            return Ok("已取回解锁组件（没有部署记录，按文件指纹确认后清理）".to_owned());
+        }
+        return Err("没有本工具的部署记录，未做任何改动".to_owned());
+    }
+    let text = std::fs::read_to_string(&rec).map_err(|e| format!("{e}"))?;
+    let backup = {
+        let k = "\"backup\":";
+        match text.find(k) {
+            Some(i) => {
+                let rest = &text[i + k.len()..];
+                let end = rest.find(',').unwrap_or(rest.len());
+                let v = rest[..end].trim().trim_matches('"');
+                if v == "null" || v.is_empty() { None } else { Some(std::path::PathBuf::from(v)) }
+            }
+            None => None,
+        }
+    };
+    if let Some(bp) = backup {
+        if bp.is_file() {
+            std::fs::copy(&bp, &dst).map_err(|e| format!("还原原文件失败：{e}"))?;
+            let _ = std::fs::remove_file(&bp);
+            let _ = std::fs::remove_file(&rec);
+            crate::log::line(&format!("[sm] 已还原 {} 的原文件", game_dir.display()));
+            return Ok("已还原成原来的 version.dll".to_owned());
+        }
+    }
+    if dst.is_file() {
+        std::fs::remove_file(&dst).map_err(|e| format!("删除失败：{e}"))?;
+    }
+    let _ = std::fs::remove_file(&rec);
+    Ok("已取回解锁组件（原本没有同名文件，直接删除）".to_owned())
 }
