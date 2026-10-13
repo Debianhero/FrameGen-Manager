@@ -325,21 +325,23 @@ fn assets_status() -> Value {
 }
 
 /// Smooth Motion 适用性（**只读**）：显卡/驱动门槛 + 本机 NvPresent 构建。
-/// 门槛按产品规定：驱动 >= 616.64 才允许部署（见 docs/SM-事实来源与策略.md）。
+/// 门槛按产品规定：驱动 >= 616.64 才允许部署。**全部只读**，不写任何驱动配置。
 fn sm_info() -> Value {
     let gate = framegen_core::sm::gate();
-    let nvp: Vec<Value> = framegen_core::sm::nvpresent_all()
+    // NvPresent 只作为内部诊断写日志，**不上界面**（用户要求不出现"未被验证"之类的字样）。
+    let nvp_all = framegen_core::sm::nvpresent_all();
+    if let Some(first) = nvp_all.first() {
+        framegen_core::log::line(&format!(
+            "[sm] NvPresent {} 字节 sha256={} 已知构建={}",
+            first.bytes, first.sha256, first.recognized
+        ));
+    }
+    let nvp: Vec<Value> = nvp_all
         .into_iter()
-        .map(|n| {
-            json!({
-                "path": n.path,
-                "bytes": n.bytes,
-                "sha256": n.sha256,
-                "recognized": n.recognized,
-                "note": n.note,
-            })
-        })
+        .map(|n| json!({ "path": n.path, "bytes": n.bytes, "sha256": n.sha256 }))
         .collect();
+    // 驱动【基础/全局 profile】里 SM 开关的现状（只读；本工具绝不写这一层）
+    let base = framegen_core::sm::base_sm_state();
     json!({
         "minDriver": framegen_core::sm::MIN_SM_DRIVER_TEXT,
         "isSm86": gate.is_sm86,
@@ -350,6 +352,7 @@ fn sm_info() -> Value {
         "allowed": gate.allowed,
         "reason": gate.reason,
         "nvpresent": nvp,
+        "profileBase": { "state": base.state, "value": base.value },
     })
 }
 

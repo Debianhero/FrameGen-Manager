@@ -137,3 +137,118 @@ pub fn nvpresent_all() -> Vec<NvPresent> {
     out.sort_by_key(|x| std::cmp::Reverse(x.bytes));
     out
 }
+
+// ---------------------------------------------------------------- NVAPI（只读）
+
+/// 驱动 profile 里某个设置项的读取结果。
+#[derive(Debug, Clone)]
+pub struct SettingState {
+    /// 未设置 / 已开启 / 已关闭 / 读取失败
+    pub state: &'static str,
+    pub value: Option<u32>,
+    /// 出错时的原始信息（只进日志与诊断，不上界面）
+    pub detail: String,
+}
+
+/// Smooth Motion 开关这一项在驱动里的设置 ID（来源：Profile Inspector 的
+/// CustomSettingNames.xml，0=Off / 1=On）。见工作区里的 SM 事实来源记录。
+pub const SM_SETTING_ID: u32 = 0xB0D3_84C0;
+
+/// 读**基础/全局 profile**里的 SM 开关（只读；本工具**绝不写**这一层）。
+pub fn base_sm_state() -> SettingState {
+    match nv::read_base_setting(SM_SETTING_ID) {
+        Ok(1) => SettingState { state: "已开启", value: Some(1), detail: String::new() },
+        Ok(0) => SettingState { state: "已关闭", value: Some(0), detail: String::new() },
+        Ok(v) => SettingState { state: "未设置", value: Some(v), detail: String::new() },
+        Err(e) if e.starts_with("rc=-160") => SettingState { state: "未设置", value: None, detail: e },
+        Err(e) => SettingState { state: "读取失败", value: None, detail: e },
+    }
+}
+
+/// NVAPI 动态调用（只读）。不链接 import 库 —— nvapi64.dll 随 NVIDIA 驱动安装。
+#[cfg(windows)]
+mod nv {
+    use std::ffi::c_void;
+
+    const ID_INIT: u32 = 0x0150_E828;
+    const ID_CREATE_SESSION: u32 = 0x0694_D52E;
+    const ID_LOAD_SETTINGS: u32 = 0x375D_BD6B;
+    const ID_GET_BASE_PROFILE: u32 = 0xDA84_66A0;
+    const ID_GET_SETTING: u32 = 0x73BF_8338;
+
+    /// NVDRS_SETTING：56 字节，布局与 Profile Inspector 的声明一致
+    /// （version 字段里编码了结构体大小，驱动会校验它）。
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct NvSetting {
+        version: u32,
+        setting_name: u32,
+        setting_type: u32,
+        setting_location: u32,
+        is_current_predefined: u32,
+        is_predefined_valid: u32,
+        predefined: [u8; 16],
+        current: [u8; 16],
+    }
+
+    type FnQuery = unsafe extern "C" fn(u32) -> *mut c_void;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// 读基础 profile 里的一个 u32 设置项。
+    pub fn read_base_setting(id: u32) -> Result<u32, String> {
+        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+        unsafe {
+            let lib = LoadLibraryW(wide("nvapi64.dll").as_ptr());
+            if lib.is_null() {
+                return Err("加载 nvapi64.dll 失败（没装 NVIDIA 驱动？）".to_owned());
+            }
+            let Some(p) = GetProcAddress(lib, c"nvapi_QueryInterface".as_ptr() as *const u8) else {
+                return Err("nvapi64.dll 里没有 nvapi_QueryInterface".to_owned());
+            };
+            let query: FnQuery = std::mem::transmute(p);
+
+            let init: unsafe extern "C" fn() -> i32 = std::mem::transmute(query(ID_INIT));
+            let rc = init();
+            if rc != 0 {
+                return Err(format!("NvAPI_Initialize rc={rc}"));
+            }
+            let mut sess: *mut c_void = std::ptr::null_mut();
+            let create: unsafe extern "C" fn(*mut *mut c_void) -> i32 =
+                std::mem::transmute(query(ID_CREATE_SESSION));
+            let rc = create(&mut sess);
+            if rc != 0 {
+                return Err(format!("DRS_CreateSession rc={rc}"));
+            }
+            let load: unsafe extern "C" fn(*mut c_void) -> i32 =
+                std::mem::transmute(query(ID_LOAD_SETTINGS));
+            let rc = load(sess);
+            if rc != 0 {
+                return Err(format!("DRS_LoadSettings rc={rc}"));
+            }
+            let mut prof: *mut c_void = std::ptr::null_mut();
+            let getbase: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> i32 =
+                std::mem::transmute(query(ID_GET_BASE_PROFILE));
+            let rc = getbase(sess, &mut prof);
+            if rc != 0 {
+                return Err(format!("DRS_GetBaseProfile rc={rc}"));
+            }
+            let mut st = NvSetting::default();
+            st.version = ((std::mem::size_of::<NvSetting>() as u32) << 16) | 1;
+            let get: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut NvSetting) -> i32 =
+                std::mem::transmute(query(ID_GET_SETTING));
+            let rc = get(sess, prof, id, &mut st);
+            if rc != 0 {
+                return Err(format!("rc={rc}"));
+            }
+            Ok(u32::from_le_bytes([
+                st.current[0],
+                st.current[1],
+                st.current[2],
+                st.current[3],
+            ]))
+        }
+    }
+}
