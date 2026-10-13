@@ -635,7 +635,7 @@ mod nv {
 
         /// 这个句柄是不是**全局/基础 profile**？是的话一律拒绝写入（硬护栏）。
         pub fn is_base_profile(&self, prof: *mut c_void) -> bool {
-            matches!(self.base(), Ok(b) if b == prof)
+            self.base().is_ok_and(|b| b == prof)
         }
     }
 }
