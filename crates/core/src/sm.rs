@@ -269,12 +269,14 @@ mod nv {
     const ID_FIND_PROFILE: u32 = 0x7E4A_9A0B;
     const ID_CREATE_PROFILE: u32 = 0xCC17_6068;
     const ID_CREATE_APPLICATION: u32 = 0x4347_A9DE;
-    const ID_SET_SETTING: u32 = 0x577D_D202;
+    /// 写设置：**必须用首选 ID**。实测回退 ID 0x577DD202 对 Smooth Motion 返回 -160，
+    /// 而首选 ID 返回 0 —— 这就是之前那个误导性 -160 的真凶。
+    const ID_SET_SETTING: u32 = 0x8A2C_F5F5;
     const ID_SAVE_SETTINGS: u32 = 0xFCBC_7E14;
     const ID_DELETE_PROFILE: u32 = 0x1709_3206;
     /// 删掉某个 profile 里的单项设置（PI 的"恢复默认"就是用它，而不是写 0）。
-    /// 注意用它的是回退 ID：实测首选 ID 0xD20D29DF 对 SM 返回 -160，回退 ID 才通。
-    const ID_DELETE_PROFILE_SETTING: u32 = 0xE4A2_6362;
+    /// 和写设置一样，用首选 ID（与 PI 的 GetDelegate 调用顺序一致）。
+    const ID_DELETE_PROFILE_SETTING: u32 = 0xD20D_29DF;
     /// 读设置：优先用 PI 的首选 ID（它和回退 ID 的参数个数不同，这里必须用首选）
     const ID_GET_SETTING: u32 = 0xEA99_498D;
 
@@ -300,6 +302,11 @@ mod nv {
             let mut st: NvSetting = unsafe { std::mem::zeroed() };
             st.version = (std::mem::size_of::<NvSetting>() as u32) | (1 << 16);
             st.setting_id = id;
+            // 名字必须填。Profile Inspector 写进驱动的就是这串固定占位串
+            // （从 PI 写好的 CS2 profile 里读出来的原文正是 PLACEHOLDER）。
+            for (i, c) in "PLACEHOLDER".encode_utf16().enumerate() {
+                st.setting_name[i] = c;
+            }
             st
         }
 
