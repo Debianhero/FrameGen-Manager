@@ -409,6 +409,21 @@ fn sm_game_states(args: &Value) -> Result<Value, String> {
     Ok(json!({ "states": out }))
 }
 
+
+/// 把内置解锁组件放进游戏目录（带备份与哈希复核）。
+fn sm_asset_deploy(args: &Value) -> Result<Value, String> {
+    let dir = arg_str(args, "dir")?;
+    let msg = framegen_core::sm::asset_deploy(std::path::Path::new(&dir))?;
+    Ok(json!({ "ok": true, "message": msg }))
+}
+
+/// 取回内置解锁组件（还原原文件或删除我们放的那份）。
+fn sm_asset_restore(args: &Value) -> Result<Value, String> {
+    let dir = arg_str(args, "dir")?;
+    let msg = framegen_core::sm::asset_restore(std::path::Path::new(&dir))?;
+    Ok(json!({ "ok": true, "message": msg }))
+}
+
 /// 备份目录（界面上显示）
 fn backups_dir() -> String {
     framegen_core::util::backups_dir()
@@ -1436,6 +1451,8 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         "sm_set_game" => sm_set_game(args),
         "sm_remove_game" => sm_remove_game(args),
         "sm_game_states" => sm_game_states(args),
+        "sm_asset_deploy" => sm_asset_deploy(args),
+        "sm_asset_restore" => sm_asset_restore(args),
         "backups_dir" => Ok(Value::String(backups_dir())),
         "backups_info" => Ok(backups_info()),
         "clean_backups" => clean_backups(),
