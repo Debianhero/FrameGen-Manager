@@ -280,6 +280,39 @@ pub fn fetch_latest_self_version(client: &reqwest::blocking::Client) -> Option<S
     best
 }
 
+/// 这个版本的安装包**真的存在**吗（release 资产）。
+///
+/// 为什么需要：main 上的版本号是"发布一条龙"里的第一步，但它可能先于 release 存在。
+/// 真实踩到过：版本号提到 1.0.6、release 还没建，于是所有旧版用户都被提示"发现新版本"，
+/// 点下载却 404。界面上拒绝显示一个点不动的更新，比事后解释便宜得多。
+///
+/// 判据是对 **release 资产直链**发一个 HEAD：资产存在时 GitHub 会 302 到签名地址、
+/// 跟随之后是 200；不存在时直接 404（官方源与 ghproxy 镜像实测都是 404）。
+/// 这条路不碰 api.github.com，所以不吃那 60 次/小时的配额，镜像也能验。
+pub fn self_release_exists(client: &reqwest::blocking::Client, version: &str) -> bool {
+    let tag = if version.starts_with('v') {
+        version.to_owned()
+    } else {
+        format!("v{version}")
+    };
+    let asset = format!("FrameGen-Manager-{tag}-setup.exe");
+    let official = self_release_url(&tag, &asset);
+    let mut urls = vec![official.clone()];
+    // 只试第一个镜像：官方被墙时它常常是通的，全试一遍会把界面拖住
+    if let Some(m) = mirrors("").into_iter().next() {
+        urls.push(format!("{m}{official}"));
+    }
+    for url in urls {
+        let Ok(resp) = client.head(&url).timeout(Duration::from_secs(8)).send() else {
+            continue;
+        };
+        if resp.status().is_success() {
+            return true;
+        }
+    }
+    false
+}
+
 /// 给自测用的入口（见上的说明）。
 pub fn same_version_pub(a: &str, b: &str) -> bool {
     same_version(a, b)

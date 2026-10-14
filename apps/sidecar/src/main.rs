@@ -1546,10 +1546,24 @@ fn check_self_update() -> Result<Value, String> {
     let client = framegen_core::update::client().map_err(|e| format!("{e:#}"))?;
     let current = framegen_core::update::SELF_VERSION.to_string();
     let latest = framegen_core::update::fetch_latest_self_version(&client);
-    let has_update = latest
+    // 「有新版本」= 版本号更大 **且** 那个版本的安装包真的在 release 里。
+    // 只看版本号会出现"发现新版本 1.0.6"但 release 里没有、点下载 404 的情况
+    // （版本号是先于 release 提交到 main 的）。真实存在才提示。
+    let newer = latest
         .as_deref()
         .map(|l| framegen_core::update::is_newer(l, &current))
         .unwrap_or(false);
+    let has_update = newer
+        && latest
+            .as_deref()
+            .map(|l| framegen_core::update::self_release_exists(&client, l))
+            .unwrap_or(false);
+    if newer && !has_update {
+        framegen_core::log::line(&format!(
+            "[自更新] main 上是 {}，但 release 里没有对应的安装包，先不提示",
+            latest.as_deref().unwrap_or("?")
+        ));
+    }
     Ok(json!({
         "current": current,
         // 有新版本时顺便把更新日志取回来（raw 小文本：不占 API 配额、镜像也拿得到）
