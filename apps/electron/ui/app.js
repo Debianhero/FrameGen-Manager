@@ -609,12 +609,14 @@
     [3, '4X（出厂默认）'],
     [5, '6X（要游戏自带的插件也支持）']
   ];
-  /* DLSS-G 渲染预设（0.4.0 的 [DLSSG] Preset）。空串 = 不写这一项，用资产里的出厂值。
-   * preset C（FG Lite）是 0.4.0 新给的档：每生成帧的 GPU 时间明显更低，画质略低
-   * （主要影响 HUD 与遮挡边缘）。*/
+  /* DLSS-G 渲染预设（0.4.0 的 [DLSSG] Preset）。出厂默认由 core 的 DEFAULT_PRESET 决定
+   * （当前 = C / FG Lite：每生成帧 GPU 时间约少 32-54%，画质略低，主要在 HUD 与遮挡边缘）。
+   * 「跟随游戏/驱动」= 上游出厂值 Auto，交回游戏和驱动配置决定。 */
   var PRESET_LABELS = [
-    ['', '跟随出厂（Auto）'],
-    ['C', 'C · FG Lite：开销更低，画质略低']
+    ['Auto', '跟随游戏/驱动（Auto）'],
+    ['A', 'A · 强制关闭 UI 重组'],
+    ['B', 'B · 强制开启 UI 重组（多数游戏无效）'],
+    ['C', 'C · FG Lite：开销更低，画质略低（默认）']
   ];
 
   function fillSelect(sel, pairs, value) {
@@ -644,10 +646,11 @@
   }
   function frmLabelOf(v) { return Number(v) >= 5 ? '6X' : '4X'; }
   function presetLabelOf(v) {
+    var want = String(v || (CFG && CFG.defaultPreset) || 'Auto');
     for (var i = 0; i < PRESET_LABELS.length; i++) {
-      if (String(PRESET_LABELS[i][0]) === String(v || '')) return PRESET_LABELS[i][1];
+      if (String(PRESET_LABELS[i][0]) === want) return PRESET_LABELS[i][1];
     }
-    return v ? String(v) : '跟随出厂（Auto）';
+    return want;
   }
 
   /** 把这次用的档位记下来当默认值（下次打开详情就是上次的选择） */
@@ -1214,7 +1217,7 @@
     if (CFG) {
       optSel.value = String(CFG.optimized);
       frmSel.value = String(CFG.frames);
-      preSel.value = String(CFG.preset || '');
+      preSel.value = String(CFG.preset || CFG.defaultPreset || 'C');
     }
 
     var stateLabel = g.deployed || '未部署';
@@ -1373,7 +1376,8 @@
 
   function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset) {
     var body = '会先备份被覆盖的原件，之后可以一键还原。';
-    if (!(optimized === 2 && frames === 3 && !preset)) {
+    var dfltPreset = (CFG && CFG.defaultPreset) || 'C';
+    if (!(optimized === (CFG ? CFG.defaultOptimized : 2) && frames === (CFG ? CFG.defaultFrames : 3) && preset === dfltPreset)) {
       body += '\n这几个档位会被写进游戏目录那份 dlssg_sm86.ini（资产里的原文件不动）。';
     }
     if (g.acAny) body += '\n\n注意：这个游戏有反作弊（' + g.ac + '）。';

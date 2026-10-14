@@ -1016,6 +1016,20 @@ pub fn clear_download_records() -> usize {
 
 /// 出厂默认的「优化等级」（上游 0.4.0 的出厂 INI：Optimized=2；0.3.x 时期是 1）
 pub const DEFAULT_OPTIMIZED: u8 = 2;
+
+/// 出厂默认的 DLSS-G 渲染预设。
+///
+/// **C = FG Lite**，是本项目的默认选择：每个生成帧的 GPU 时间约少 32-54%，代价是画质略低
+/// （主要在 HUD 与遮挡边缘）。上游出厂值是 Auto（交给游戏/驱动决定），界面把它列成
+/// 「跟随游戏/驱动」供人改回去。
+///
+/// 为什么默认值必须写在这里、而不是改内置 INI：资产目录里的 dlssg_sm86.ini 是**用户可改**
+/// 的一份拷贝，老用户升级上来时它可能还是 Autou 那份 stock 文件 —— 默认值放在代码里，
+/// 每次部署都按它写进游戏目录，结果才是确定的。
+pub const DEFAULT_PRESET: &str = "C";
+
+/// 预设的合法取值（空串按出厂默认处理）。A/B 是上游 0.4.0 里就有的正式档位。
+pub const PRESETS: [&str; 4] = ["Auto", "A", "B", "C"];
 /// 出厂默认的「倍率上限」（3 = 最高 4X；5 = 最高 6X）
 pub const DEFAULT_MAX_FRAMES: u8 = 3;
 
@@ -1065,10 +1079,52 @@ fn ini_set_key_in(
     }
 }
 
+/// 在指定段里插入一行 key=value（段里没有这个键时用）。
+///
+/// 为什么需要它：只做"改已有行"是不够的 —— 上游把键挪段、或某天精简掉一行时，
+/// 我们会静默地什么都不写（只在说明里提一句），用户看到的就是"设了 Tier/预设却没生效"。
+/// 段不存在时追加一个新段，保证设置一定落得下去。
+fn ini_insert_key(text: &str, section: &str, key: &str, value: &str) -> String {
+    let mut out = String::with_capacity(text.len() + key.len() + value.len() + 4);
+    let mut cur_section = String::new();
+    let mut inserted = false;
+    let mut section_seen = false;
+    for line in text.split_inclusive('\n') {
+        let t = line.trim();
+        let is_header = t.starts_with('[') && t.ends_with(']');
+        if is_header {
+            // 走出目标段还没插进去 -> 插在段尾
+            if cur_section == section && !inserted {
+                out.push_str(&format!("{key}={value}\n"));
+                inserted = true;
+            }
+            cur_section = t.to_owned();
+            if cur_section == section {
+                section_seen = true;
+            }
+        }
+        out.push_str(line);
+    }
+    if cur_section == section && !inserted {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("{key}={value}\n"));
+        inserted = true;
+    }
+    if !inserted && !section_seen {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("\n{section}\n{key}={value}\n"));
+    }
+    out
+}
+
 /// 准备要部署的 INI，返回（文件路径, 给人看的改动说明）。
 ///
-/// 出厂 INI 本来就是对的，所以**两个值都是默认值时直接返回资产里那份原文件，一个字都不改**；
-/// 只有用户主动选了别的档位才写一份 dlssg_sm86.deploy.ini（资产里那份原文件始终不动）。
+/// 只有"预设 = Auto（跟随上游出厂）且两个档位都是出厂值"时才直接返回资产里那份原文件；
+/// 其余情况都会写一份 dlssg_sm86.deploy.ini（资产里那份原文件始终不动）。
 ///
 /// optimized：0 原厂不加速 / 1 加速且画面与官方逐位一致 / 2 再加有损图像内核（出厂默认）/ 3 全部有损
 /// max_frames：3 = 最高 4X（出厂默认）/ 5 = 最高 6X（仅 310.9 版，且要游戏自带插件支持）
@@ -1081,25 +1137,33 @@ pub fn prepare_deploy_ini(
     if !upstream.is_file() {
         bail!("还没有下载 {INI_REPO_PATH}, 请先点「下载 / 更新资产」");
     }
-    // preset 留空 = 用资产里的出厂值（Auto），不用生成部署用 INI
-    if optimized == DEFAULT_OPTIMIZED && max_frames == DEFAULT_MAX_FRAMES && preset.is_empty() {
+    /* 空串 = 没选过（老配置），按出厂默认。
+       **注意不能"是默认值就跳过写文件"**：资产里那份 dlssg_sm86.ini 是上游 stock，
+       它的 Preset 是 Auto。默认 C 要想真的生效，就必须把 Preset=C 写进游戏目录那份 ——
+       跳过写文件等于把 stock 的 Auto 部署出去，默认值形同虚设。
+       所以只有"预设选 Auto（跟随上游）+ 两个档位也是出厂值"时，才原样用 stock 文件；
+       其余情况一律生成 deploy.ini。 */
+    let preset = if preset.is_empty() { DEFAULT_PRESET } else { preset };
+    if preset == "Auto" && optimized == DEFAULT_OPTIMIZED && max_frames == DEFAULT_MAX_FRAMES {
         return Ok((upstream.to_path_buf(), Vec::new()));
     }
     let mut out = std::fs::read_to_string(upstream).context("读取 INI 失败")?;
     let mut notes: Vec<String> = Vec::new();
     /* 段名跟着上游 0.4.0：Optimized 与 Preset 在 [DLSSG]，MaxGeneratedFrames 在
        [FrameGeneration]。找不到段时退回"不限段"查找，这样老版 INI 也还能改。 */
-    let preset_value = if preset.is_empty() { "Auto".to_owned() } else { preset.to_owned() };
-    let jobs: [(Option<&str>, &str, String, &str); 3] = [
+    let preset_value = preset.to_owned();
+    /* Auto 就是上游 stock 那份 INI 里的值（[DLSSG] Preset=Auto），不是"我们的改动"。
+       用户选「跟随游戏/驱动」时不该往文件里写一行内容相同的 Preset=Auto ——
+       那样文件白改一次、说明里也多一条假改动。 */
+    let mut jobs: Vec<(Option<&str>, &str, String, &str)> = vec![
         (Some("[DLSSG]"), "Optimized", optimized.to_string(), "优化等级"),
         (None, "MaxGeneratedFrames", max_frames.to_string(), "倍率上限"),
-        (Some("[DLSSG]"), "Preset", preset_value, "DLSS-G 预设"),
     ];
+    if preset != "Auto" {
+        jobs.push((Some("[DLSSG]"), "Preset", preset_value, "DLSS-G 预设"));
+    }
     for (section, key, value, what) in jobs {
-        // 预设留空 = 不碰这一项
-        if key == "Preset" && preset.is_empty() {
-            continue;
-        }
+        let section_name = section.unwrap_or("");
         let hit = ini_set_key_in(&out, section, key, &value)
             .or_else(|| ini_set_key_in(&out, None, key, &value));
         match hit {
@@ -1107,8 +1171,16 @@ pub fn prepare_deploy_ini(
                 notes.push(format!("{what} {key}={value}"));
                 out = new;
             }
-            // 上游以后改键名/精简掉这一项时不能报错，照旧部署、说明一句
-            None => notes.push(format!("{what}：这份 INI 里没有 {key} 这一行，保持原样")),
+            // 缺这一行就补上（上游改键名/挪段时最容易踩的坑）
+            None => {
+                out = if section_name.is_empty() {
+                    format!("{out}{key}={value}
+")
+                } else {
+                    ini_insert_key(&out, section_name, key, &value)
+                };
+                notes.push(format!("{what} {key}={value}（这份 INI 里原本没有，已补上）"));
+            }
         }
     }
     let dest = upstream.with_file_name("dlssg_sm86.deploy.ini");

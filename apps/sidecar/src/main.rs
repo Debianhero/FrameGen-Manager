@@ -1518,6 +1518,8 @@ fn get_config() -> Value {
         "optimized": cfg.fg_optimized,
         "frames": cfg.fg_frames,
         "preset": cfg.fg_preset,
+        "defaultPreset": framegen_core::update::DEFAULT_PRESET,
+        "presets": framegen_core::update::PRESETS,
         "optimizedLabel": optimized_label(cfg.fg_optimized),
         "framesLabel": frames_label(cfg.fg_frames),
         "defaultOptimized": framegen_core::update::DEFAULT_OPTIMIZED,
@@ -1547,13 +1549,23 @@ fn set_config(optimized: u8, frames: u8, preset: String) -> Result<Value, String
             framegen_core::update::DEFAULT_MAX_FRAMES
         ));
     }
-    if !matches!(preset.as_str(), "" | "Auto" | "C") {
-        return Err(format!("DLSS-G 预设只支持 Auto / C（收到 {preset}）"));
+    // 空串 = 没选过，按出厂默认处理
+    if !preset.is_empty()
+        && !framegen_core::update::PRESETS.contains(&preset.as_str())
+    {
+        return Err(format!(
+            "DLSS-G 预设只支持 {}（收到 {preset}）",
+            framegen_core::update::PRESETS.join(" / ")
+        ));
     }
     let mut cfg = framegen_core::util::load_config();
     cfg.fg_optimized = optimized;
     cfg.fg_frames = frames;
-    cfg.fg_preset = if preset == "Auto" { String::new() } else { preset };
+    cfg.fg_preset = if preset.is_empty() {
+        framegen_core::update::DEFAULT_PRESET.to_owned()
+    } else {
+        preset
+    };
     framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
     framegen_core::log::line(&format!(
         "部署档位改为：优化等级 {optimized}（{}）、倍率上限 {}",

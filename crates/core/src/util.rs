@@ -384,8 +384,8 @@ pub struct AppConfig {
     #[serde(default = "default_fg_frames")]
     pub fg_frames: u8,
     /// 部署时写进 INI 的 DLSS-G 渲染预设（0.4.0 的 [DLSSG] Preset）。
-    /// 空串 = 不碰这一项，用资产里的出厂值（Auto）；目前界面只给 Auto / C。
-    #[serde(default)]
+    /// 出厂默认 C（FG Lite）；界面给 Auto / A / B / C。空串按出厂默认处理。
+    #[serde(default = "default_fg_preset")]
     pub fg_preset: String,
     /// 上次用的**窗口大小**（逻辑点）。
     ///
@@ -404,6 +404,10 @@ fn default_fg_optimized() -> u8 {
 fn default_fg_frames() -> u8 {
     3
 }
+fn default_fg_preset() -> String {
+    // 见 update::DEFAULT_PRESET：C = FG Lite（生成帧开销明显更低、画质略低）
+    crate::update::DEFAULT_PRESET.to_owned()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -413,7 +417,7 @@ impl Default for AppConfig {
             backup_prefix: String::new(),
             fg_optimized: default_fg_optimized(),
             fg_frames: default_fg_frames(),
-            fg_preset: String::new(),
+            fg_preset: default_fg_preset(),
             window_size: None,
         }
     }
