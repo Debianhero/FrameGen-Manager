@@ -347,6 +347,8 @@ function ensureBundledAssets() {
     try { fs.mkdirSync(dst, { recursive: true }); } catch (e) {}
     let copied = 0;
     const names = [];
+    // 清掉的旧运行库（0.3.x 时代的资产目录顶层文件）
+    const removedLegacy = [];
     const skipMarker = prev && prev.version === app.getVersion();
     /* **必须递归**：0.4.0 起帧生成资产是一整个 dlssg_sm86\ 目录（运行库/后端/内核/超分/XeSS），
        只拷顶层文件的话，资产目录里就没有运行库 —— 用户点部署会直接失败。
@@ -377,6 +379,20 @@ function ensureBundledAssets() {
       }
     };
     copyTree(src, dst, '');
+
+    /* 0.4.0 起运行库搬进了 <资产目录>\dlssg_sm86\runtime\，资产目录顶层那两份
+       （0.3.x 时代铺下的 nvngx_dlssg.dll / nvngx_dlss.dll）**必须清掉**：
+       它们合计 66 MB，而且留着只会让人以为"还在用旧运行库"。
+       只删这两个精确文件名 —— 用户自己往资产目录放的东西一律不碰。 */
+    for (const legacy of ['nvngx_dlssg.dll', 'nvngx_dlss.dll']) {
+      try {
+        const old = path.join(dst, legacy);
+        if (fs.existsSync(old) && fs.statSync(old).isFile()) {
+          fs.rmSync(old, { force: true });
+          removedLegacy.push(legacy);
+        }
+      } catch (e) { /* 被占用就下次再说 */ }
+    }
     // Smooth Motion 的解锁组件（30 系）：放到 <资产目录>\bundled-sm\，
     // core 里按 assets_dir()/bundled-sm/version.dll 取用。
     const smsrc = path.join(exeDir, 'bundled-sm');
@@ -427,7 +443,10 @@ function ensureBundledAssets() {
       fs.writeFileSync(marker, JSON.stringify({ version: app.getVersion(), copied: copied, files: names, at: Date.now() }, null, 2), 'utf8');
     } catch (e) {}
     console.log('[bundled] 铺了 ' + copied + ' 个内置文件 -> ' + dst);
-    return { copied: copied, dir: dst };
+    if (removedLegacy.length) {
+      console.log('[bundled] 已清掉资产目录里的旧运行库：' + removedLegacy.join('、'));
+    }
+    return { copied: copied, files: names, dir: dst, removedLegacy: removedLegacy };
   }).catch(function (e) {
     console.error('[bundled] 跳过：', e.message);
     return { copied: 0, reason: e.message };
