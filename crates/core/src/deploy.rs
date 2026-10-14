@@ -66,13 +66,14 @@ pub enum OrphanAction {
 ///   * 文件已经不在了 -> 不碰
 ///   * 内容不是我们写的那份（用户换过）-> 不碰
 pub fn plan_orphan(
-    is_proxy: bool,
+    is_ours_to_sweep: bool,
     in_payload: bool,
     file_present: bool,
     still_ours: bool,
     existed_before: bool,
 ) -> OrphanAction {
-    if !is_proxy || in_payload || !file_present || !still_ours {
+    // is_ours_to_sweep = 代理入口，或"我们曾经铺在游戏根目录、现在不再需要"的运行库
+    if !is_ours_to_sweep || in_payload || !file_present || !still_ours {
         return OrphanAction::Keep;
     }
     if existed_before {
@@ -442,7 +443,9 @@ pub fn deploy(
         if existed {
             let orig = std::fs::read(&dst).with_context(|| format!("备份 {}", dst.display()))?;
             original_sha256 = Some(util::sha256_hex(&orig));
-            let bn = format!("{}.bak", name);
+            // 备份名要**扁平**：0.4.0 的清单里有 dlssg_sm86\backend\x.dll 这类带子目录的条目，
+            // 直接用路径拼进备份目录会变成嵌套路径，还原读回时也容易踩分隔符的坑。统一换成 '_'。
+            let bn = format!("{}.bak", name.replace(['\\', '/'], "_"));
             std::fs::write(files_dir.join(&bn), &orig)?;
             backup_name = Some(bn);
         }
@@ -503,7 +506,15 @@ pub fn deploy(
     //    显示「已部署」而文件其实是混的。回滚的成败如实写进错误信息。
     for (name, src, _sha) in &payload {
         let dst = target_dir.join(name);
-        let tmp = target_dir.join(format!(".{}.tmp", name));
+        // 目标在子目录里（0.4.0 的 dlssg_sm86\backend\...）时先把目录建出来，
+        // 否则 copy 一步就失败，用户看到的是「写入 dlssg_sm86\backend\x.dll 失败」。
+        if let Some(parent) = dst.parent() {
+            if !parent.is_dir() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("创建目录 {}", parent.display()))?;
+            }
+        }
+        let tmp = target_dir.join(format!(".{}.tmp", name.replace(['\\', '/'], "_")));
         // 报错里用**目标文件名**，不要把 .xxx.tmp 这种内部细节甩给用户
         let step = std::fs::copy(src, &tmp)
             .with_context(|| format!("写入 {}", name))
@@ -544,6 +555,8 @@ pub fn deploy(
     // 移不掉的（被占用 / 只读 / 权限）：必须说出来，而且记录要留着 ——
     // 否则界面显示「已部署」、目录里却还立着本项目的旧代理，「还原」也清不掉。
     let mut failed_remove: Vec<String> = Vec::new();
+    // 被清掉的 0.3.x 遗留运行库（单独列，好在界面上说清楚这是"升级清理"）
+    let mut removed_legacy: Vec<String> = Vec::new();
 
     for name in &extra_removed {
         let p = target_dir.join(name);
@@ -566,6 +579,20 @@ pub fn deploy(
                     .map(|h| h == e.deployed_sha256)
                     .unwrap_or(false);
             let has_backup = e.existed_before && e.backup_name.is_some();
+            // 0.3.x 铺在游戏根目录、0.4.0 不再需要的运行库：只要这份确实是我们当初
+            // 放进去的，就一并清掉 —— 否则游戏可能优先加载根目录那份旧的。
+            // 只清**我们自己放过的**：记录里 existed_before=true 的（游戏原本就有的那份）
+            // 绝不动。
+            if !e.existed_before && LEGACY_ROOT_LIBS.contains(&e.rel_path.as_str()) {
+                if present && still_ours {
+                    if std::fs::remove_file(&p).is_ok() {
+                        removed_legacy.push(e.rel_path.clone());
+                    } else {
+                        failed_remove.push(e.rel_path.clone());
+                    }
+                }
+                continue;
+            }
             let action = plan_orphan(
                 PROXY_ENTRIES.contains(&e.rel_path.as_str()),
                 false,
@@ -610,6 +637,12 @@ pub fn deploy(
         notes.push(format!(
             "已移除上次部署、这次不用的代理入口：{}（避免同时存在两个代理）",
             removed.join("、")
+        ));
+    }
+    if !removed_legacy.is_empty() {
+        notes.push(format!(
+            "已清掉根目录里 0.3.x 时代的运行库：{}（新版运行库在 {RUNTIME_DIR}\\runtime\\，留着旧的会被游戏优先加载）",
+            removed_legacy.join("、")
         ));
     }
     if !kept_record.is_empty() {
@@ -963,13 +996,54 @@ pub fn prepare_deploy(
     let mut files = Vec::new();
     let mut notes = Vec::new();
 
+    /* 部署前先把内置资产按分发表核一遍（0.4.0 起资产是一整个目录，缺一个文件
+       在游戏里的表现都是"没生效"）。核不过就拒绝部署并列出是哪个文件 ——
+       用户看到的是"资产不完整，请重装"，而不是去游戏里反复试。 */
+    let bad_assets = verify_asset_inventory(&crate::update::asset_path(proxy)?);
+    if !bad_assets.is_empty() {
+        anyhow::bail!(
+            "内置资产校验不通过（{} 项）：\n· {}\n\n这通常是安装不完整或被安全软件清掉了，请重新安装本程序（资产随安装包分发）。",
+            bad_assets.len(),
+            bad_assets.join("\n· ")
+        );
+    }
+
     let dll = crate::update::asset_path(proxy)?;
     if !dll.is_file() {
         anyhow::bail!("资产缺失（{proxy}），请先「下载 / 更新资产」");
     }
     files.push(DeployFile::new(proxy, dll));
 
-    let (have, need) = crate::update::runtime_deploy_plan(dir);
+    /* 0.4.0 起运行库不再铺在游戏根目录（搬进 dlssg_sm86\runtime\），所以：
+         * 老用户（0.3.x 我们铺过根目录运行库）—— 那两份**是我们放的**，不能当"游戏自带的"
+           留着：新版会在 dlssg_sm86\runtime\ 里带自己的运行库，根目录再留一份旧的
+           可能被游戏优先加载，表现就是"升级上来了还是旧行为"。这里直接不把它们放进
+           本次负载，交给部署第 8 步的清单比对删掉（记录里 existed_before=false，可以安全删）。
+         * 从没用过本工具、但游戏目录自带运行库的目录 —— 照旧不动（那是游戏自己的东西）。 */
+    /* 0.3.x 时代运行库内嵌在代理里，这里按"已有的不动、缺的才补"把两份 DLSS 运行库
+       铺到游戏目录。**0.4.0 起这条规则失效了**：运行库搬进了 dlssg_sm86\runtime\，
+       再往游戏根目录铺一份 66 MB 的旧库，既浪费又有被优先加载的风险。
+       所以 0.4.0 布局下这一整套直接跳过；根目录残留的旧库由下面那段负责清掉。 */
+    let (have, need) = if RUNTIME_IS_SEPARATE_DIR {
+        (Vec::new(), Vec::new())
+    } else {
+        crate::update::runtime_deploy_plan(dir)
+    };
+    if !RUNTIME_IS_SEPARATE_DIR {
+        let prev = load_manifest(dir);
+        let we_put_it = |n: &str| {
+            prev.as_ref()
+                .map(|m| {
+                    m.files
+                        .iter()
+                        .any(|e| e.rel_path == n && !e.existed_before)
+                })
+                .unwrap_or(false)
+        };
+        // 这两个列表此时恒为空（上面已短路），保留这段只为让"如果哪天又需要往根目录
+        // 铺运行库"的改动有落点；真正的清理在部署第 8 步按记录做。
+        let _ = we_put_it;
+    }
     for name in &have {
         notes.push(format!("游戏目录已有 {name}，用游戏自带的那份（不覆盖）"));
     }
@@ -989,8 +1063,148 @@ pub fn prepare_deploy(
     }
     files.push(DeployFile::new(INI_NAME, ini_path));
 
+    /* 0.4.0 起运行库/后端/内核搬进了 dlssg_sm86\ 目录：只放代理 DLL 什么都不会发生，
+       所以整个目录都要铺进游戏目录，并**逐个文件进清单**（「还原」才收得干净）。
+       代理旁边那个 30 MB 的时代结束了：现在的代理不到 1 MB。 */
+    let runtime_src = crate::update::asset_path(RUNTIME_DIR)?;
+    if runtime_src.is_dir() {
+        let mut count = 0usize;
+        for entry in walkdir::WalkDir::new(&runtime_src).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(&runtime_src)
+                .map(|r| r.to_string_lossy().replace('/', std::path::MAIN_SEPARATOR_STR))
+                .unwrap_or_default();
+            if rel.is_empty() {
+                continue;
+            }
+            files.push(DeployFile::new(
+                &format!("{RUNTIME_DIR}{MAIN_SEP}{rel}"),
+                entry.path().to_path_buf(),
+            ));
+            count += 1;
+        }
+        // 齐不齐要在这里拦住：少一个文件游戏里就是"没生效"，而用户完全看不出为什么。
+        for must in [BACKEND_REL, KERNELS_REL, RUNTIME_LIB_REL] {
+            let want = format!("{RUNTIME_DIR}{MAIN_SEP}{must}");
+            if !files.iter().any(|f| f.dest_name == want) {
+                anyhow::bail!(
+                    "内置资产不完整：缺少 {want}。请重新安装本程序（资产随安装包分发）。"
+                );
+            }
+        }
+        notes.push(format!("已铺入 {RUNTIME_DIR}\\ 运行库目录（{count} 个文件）"));
+    }
+
     Ok(PreparedDeploy { files, notes })
 }
+
+/// 我们**内置**的那一份 0.4.0 资产的分发表：(相对路径, 字节数, sha256)。
+///
+/// 为什么要这张表：资产是随安装包分发的二进制，一旦被安全软件"清理"、被半截下载覆盖、
+/// 或者我们自己打包时缺了一个文件，表现都是**游戏里没生效**，而用户完全看不出原因。
+/// 部署前逐个核对大小与哈希，不符就拒绝部署并说清是哪个文件 —— 宁可现在报错，
+/// 也不要让用户带着一堆文件去游戏里试。
+///
+/// 数值全部来自上游 0.4.0 完整包里的官方 manifest.json（我方已逐字节核对过）。
+/// 上游换版本时这张表要跟着换，否则会拦住正常部署 —— 这是有意的：
+/// 宁可拦住让人改表，也不要放一份来路不明的资产进游戏目录。
+pub const ASSET_INVENTORY: &[(&str, u64, &str)] = &[
+    (
+        "version.dll",
+        853_280,
+        "7b3f90435be4f94348bf8d128c84871c7f904c704f7690601a263277c327a7b2",
+    ),
+    (
+        "dlssg_sm86.ini",
+        6_810,
+        "1f780afbd480e1ec14044e17c37f29c22affaf4cc8da322acde927e987106136",
+    ),
+    (
+        "dlssg_sm86\\backend\\sm86_backend.dll",
+        2_109_728,
+        "30ffc6e09a347ccde87ecc6fa54fd7818f5ed8a9353f5c31c2a90835c7f0ca9b",
+    ),
+    (
+        "dlssg_sm86\\kernels\\fg_kernels.dll",
+        18_318_624,
+        "1394c2d5d9cc8938ba3e52b043048d20d6d4c13a019c161b11a3dfd16343ec24",
+    ),
+    (
+        "dlssg_sm86\\runtime\\nvngx_dlssg.dll",
+        7_506_544,
+        "cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72",
+    ),
+    (
+        "dlssg_sm86\\xefg\\xefg_kernels.dll",
+        5_360_928,
+        "1b354c42596f6fad71dbe6ddd600ad2bf637f906ee6adb3de1b3dad01cd7e3f9",
+    ),
+];
+
+/// 超分（sr\）那两个是**可选**的：上游完整包里才有，我们内置了；缺了不影响帧生成，
+/// 但要在部署备注里如实说一句，免得用户以为"超分开不了是工具的问题"。
+pub const SR_INVENTORY: &[(&str, u64, &str)] = &[
+    (
+        "dlssg_sm86\\sr\\sr_kernels.dll",
+        106_570_528,
+        "d9721fc273fccc1fee95c20dc4aac9c38da18e704bc89ff960357bd531d489f4",
+    ),
+    (
+        "dlssg_sm86\\sr\\nvngx_dlss.dll",
+        74_208_880,
+        "d202b024cf5a809d4f6cb57b698ca61cdf7e7f664915a3794942042066d7cf72",
+    ),
+];
+
+/// 按上面的分发表检查资产目录。返回不合格的说明（空 = 全部合格）。
+///
+/// 只查分发那一套（代理 + INI + dlssg_sm86\ 里必须有那几个）；超分 sr\ 是可选项，
+/// 单独查它在不在、大小对不对，但不因为它缺就拒绝部署。
+pub fn verify_asset_inventory(runtime_src: &Path) -> Vec<String> {
+    let mut bad = Vec::new();
+    let root = runtime_src.parent().unwrap_or(runtime_src);
+    for (rel, size, sha) in ASSET_INVENTORY {
+        let p = root.join(rel);
+        if !p.is_file() {
+            bad.push(format!("{rel}（缺失）"));
+            continue;
+        }
+        let got_size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        if got_size != *size {
+            bad.push(format!("{rel}（大小 {got_size} ≠ {size}）"));
+            continue;
+        }
+        match crate::util::sha256_file(&p) {
+            Ok(h) if h.eq_ignore_ascii_case(sha) => {}
+            Ok(h) => bad.push(format!("{rel}（哈希 {} ≠ {}）", &h[..8.min(h.len())], &sha[..8])),
+            Err(e) => bad.push(format!("{rel}（读不出来：{e}）")),
+        }
+    }
+    bad
+}
+
+/// 0.4.0 起运行库、后端、内核都进了 dlssg_sm86\\ 目录，不再铺在游戏根目录。
+/// 留成常量是为了让"根目录那份旧运行库该不该清"这条判断有个唯一的开关。
+const RUNTIME_IS_SEPARATE_DIR: bool = true;
+
+/// 部署清单里的路径分隔符（Windows 上就是反斜杠，清单里统一按它写）。
+const MAIN_SEP: char = std::path::MAIN_SEPARATOR;
+
+/// 0.4.0 目录里三个**必须有**的文件：缺任何一个，游戏里就是"没生效"。
+const BACKEND_REL: &str = "backend\\sm86_backend.dll";
+const KERNELS_REL: &str = "kernels\\fg_kernels.dll";
+const RUNTIME_LIB_REL: &str = "runtime\\nvngx_dlssg.dll";
+
+/// 0.3.x 曾经铺在游戏根目录、0.4.0 不再需要的运行库。
+///
+/// 为什么必须在部署时清掉：新版把运行库搬进了 dlssg_sm86\runtime\，根目录再留一份旧版
+/// **可能被游戏误加载**（同目录优先）。对老用户来说这就是"升级上来了却还是旧行为"。
+/// 只在我们确认"这份还是当初我们写进去的、或它本来就不存在"时才动（见 plan_orphan）。
+pub const LEGACY_ROOT_LIBS: [&str; 2] = ["nvngx_dlssg.dll", "nvngx_dlss.dll"];
 
 /// 一步到位：准备 + 部署（返回部署说明与备注）。
 pub fn deploy_game(

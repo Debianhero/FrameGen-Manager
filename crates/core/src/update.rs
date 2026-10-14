@@ -1014,8 +1014,8 @@ pub fn clear_download_records() -> usize {
 
 // ------------------------------------------------- 部署用的 INI（只改用户主动选的档位）
 
-/// 出厂默认的「优化等级」（上游 0.3.2 的出厂 INI：Optimized=1）
-pub const DEFAULT_OPTIMIZED: u8 = 1;
+/// 出厂默认的「优化等级」（上游 0.4.0 的出厂 INI：Optimized=2；0.3.x 时期是 1）
+pub const DEFAULT_OPTIMIZED: u8 = 2;
 /// 出厂默认的「倍率上限」（3 = 最高 4X；5 = 最高 6X）
 pub const DEFAULT_MAX_FRAMES: u8 = 3;
 
@@ -1052,7 +1052,7 @@ fn ini_set_key(text: &str, key: &str, value: &str) -> Option<String> {
 /// 出厂 INI 本来就是对的，所以**两个值都是默认值时直接返回资产里那份原文件，一个字都不改**；
 /// 只有用户主动选了别的档位才写一份 dlssg_sm86.deploy.ini（资产里那份原文件始终不动）。
 ///
-/// optimized：0 原厂不加速 / 1 加速且画面与官方逐位一致（出厂默认）/ 2 再加有损图像内核 / 3 全部有损
+/// optimized：0 原厂不加速 / 1 加速且画面与官方逐位一致 / 2 再加有损图像内核（出厂默认）/ 3 全部有损
 /// max_frames：3 = 最高 4X（出厂默认）/ 5 = 最高 6X（仅 310.9 版，且要游戏自带插件支持）
 pub fn prepare_deploy_ini(
     upstream: &Path,

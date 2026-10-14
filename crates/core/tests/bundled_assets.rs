@@ -7,7 +7,7 @@
 //! 第三个小节是行为测试：把 FGM_DATA_DIR 指到临时目录，先验证「空目录会报缺三件套」，
 //! 再把内置的三件套拷进去，验证「齐了就不再报缺」—— 替代随退役界面删掉的那几个资产状态断言。
 
-use framegen_core::{dlss5, scan, update, util};
+use framegen_core::{deploy, dlss5, scan, update, util};
 use std::path::{Path, PathBuf};
 
 fn bundle(sub: &str) -> PathBuf {
@@ -29,37 +29,56 @@ fn names_in(dir: &Path) -> Vec<String> {
     v
 }
 
-/// core 认为帧生成资产目录里应该有哪 9 个文件：6 个代理入口 + INI + 2 个运行库。
+/// 帧生成资产目录里 core 期望的文件名（顶层）：6 个代理入口 + INI。
+/// 0.4.0 起运行库/后端/内核都在 dlssg_sm86\\ 子目录里，由 ASSET_INVENTORY 管。
 fn expected_framegen_assets() -> Vec<String> {
     let mut want: Vec<String> = scan::PROXY_PRIORITY.iter().map(|p| (*p).to_owned()).collect();
     want.push(update::INI_REPO_PATH.to_owned());
-    for (_prefix, _tag, _zip, dll, _label) in update::DLSS_RUNTIME {
-        want.push(dll.to_owned());
-    }
     want.sort();
     want
 }
 
+/// 内置资产必须和 core 的分发表**逐字节**对得上。
+///
+/// 这条以前只比文件名；0.4.0 之后资产变成"一整个目录 + 由清单校验哈希"，
+/// 所以测试也升级成：拿 deploy::ASSET_INVENTORY 挨个核大小与 SHA256。
+/// 上游换版本、或打包时漏了一个文件，这里立刻红 —— 不用等用户在游戏里试。
 #[test]
 fn bundled_framegen_assets_match_core_expectations() {
     let dir = bundle("bundled-assets");
-    let want = expected_framegen_assets();
     let have = names_in(&dir);
+    let want = expected_framegen_assets();
 
     let missing: Vec<&String> = want.iter().filter(|n| !have.contains(n)).collect();
     assert!(
         missing.is_empty(),
-        "bundled-assets 缺少 core 期望的文件 {missing:?}\n实际内容: {have:?}"
+        "bundled-assets 缺少 core 期望的文件 {missing:?}\\n实际内容: {have:?}"
     );
 
-    let extra: Vec<&String> = have.iter().filter(|n| !want.contains(n)).collect();
-    assert!(
-        extra.is_empty(),
-        "bundled-assets 里有 core 不认识的文件 {extra:?}（改名后忘了删旧的？）"
-    );
+    for (rel, size, sha) in deploy::ASSET_INVENTORY {
+        let p = dir.join(rel);
+        assert!(p.is_file(), "分发表里的 {rel} 不在内置资产里");
+        assert_eq!(
+            std::fs::metadata(&p).expect("读元数据").len(),
+            *size,
+            "{rel} 大小与分发表不符"
+        );
+        assert_eq!(
+            util::sha256_file(&p).expect("算哈希"),
+            *sha,
+            "{rel} 的 SHA256 与分发表不符（上游换版本后忘了更新这张表？）"
+        );
+    }
 
-    // 反向确认清单本身没被测试写死：6 代理 + INI + 2 运行库 = 9
-    assert_eq!(want.len(), scan::PROXY_PRIORITY.len() + 1 + update::DLSS_RUNTIME.len());
+    // 顶层不该有运行库了：0.4.0 起它们在 dlssg_sm86\runtime\ 里
+    for n in deploy::LEGACY_ROOT_LIBS {
+        assert!(
+            !have.iter().any(|h| h == n),
+            "顶层还留着 {n} —— 0.4.0 起运行库在 dlssg_sm86\\ 里，顶层这份不该再内置"
+        );
+    }
+    // 反向确认：6 代理 + INI
+    assert_eq!(want.len(), scan::PROXY_PRIORITY.len() + 1);
 }
 
 #[test]

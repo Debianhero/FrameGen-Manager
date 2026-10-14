@@ -375,7 +375,8 @@ pub struct AppConfig {
     /// 用户选定的下载源前缀。留空 = 自动（按测速值挑最快的那个）。
     #[serde(default)]
     pub backup_prefix: String,
-    /// 部署时写进 INI 的「优化等级」（上游 0.3.2 是 0~3 档；出厂默认 1 = 加速且与官方逐位一致）。
+    /// 部署时写进 INI 的「优化等级」（上游 0.4.0 是 0~3 档；出厂默认 **2** = 全部加速
+    /// 再加有损图像内核，并排看与档位 1 没有可见差别）。
     /// 只影响**部署到游戏目录的那一份**，资产目录里的原文件不动。
     #[serde(default = "default_fg_optimized")]
     pub fg_optimized: u8,
@@ -390,10 +391,11 @@ pub struct AppConfig {
     pub window_size: Option<[f32; 2]>,
 }
 
-// 这两个是**业务默认**（1 / 3），不是 u8 的类型默认（0），所以 AppConfig 的 Default
+// 这两个是**业务默认**（2 / 3），不是 u8 的类型默认（0），所以 AppConfig 的 Default
 // 必须手写 —— 否则配置文件丢了或者读坏了，会静默变成「档位 0」（原厂内核不加速）。
 fn default_fg_optimized() -> u8 {
-    1
+    // 与上游 0.4.0 的出厂 INI 保持一致（0.3.x 时期是 1）
+    2
 }
 fn default_fg_frames() -> u8 {
     3
