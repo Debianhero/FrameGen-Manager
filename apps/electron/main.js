@@ -348,22 +348,35 @@ function ensureBundledAssets() {
     let copied = 0;
     const names = [];
     const skipMarker = prev && prev.version === app.getVersion();
-    for (const f of fs.readdirSync(src)) {
-      const s = path.join(src, f);
-      const t = path.join(dst, f);
-      try {
-        const st = fs.statSync(s);
-        if (!st.isFile()) continue;
-        if (skipMarker) {
-          // 这个版本已经铺过：只在文件缺失或大小不符时才重铺（自愈）
-          let ok = false;
-          try { ok = fs.statSync(t).size === st.size; } catch (e) { ok = false; }
-          if (ok) continue;
-        }
-        fs.copyFileSync(s, t);
-        copied++; names.push(f);
-      } catch (e) { console.error('[bundled] 复制失败', f, e.message); }
-    }
+    /* **必须递归**：0.4.0 起帧生成资产是一整个 dlssg_sm86\ 目录（运行库/后端/内核/超分/XeSS），
+       只拷顶层文件的话，资产目录里就没有运行库 —— 用户点部署会直接失败。
+       （1.1.0 那个包就踩了这个坑：标记写着"已铺 12 个文件"，dlssg_sm86\ 却没进去。）
+       每个文件仍然单独判断"在不在、大小对不对"，所以资产被删掉依然能自愈。 */
+    const copyTree = (srcDir, dstDir, relPrefix) => {
+      try { fs.mkdirSync(dstDir, { recursive: true }); } catch (e) {}
+      for (const f of fs.readdirSync(srcDir)) {
+        const s = path.join(srcDir, f);
+        const t = path.join(dstDir, f);
+        const rel = relPrefix ? relPrefix + '/' + f : f;
+        try {
+          const st = fs.statSync(s);
+          if (st.isDirectory()) {
+            copyTree(s, t, rel);
+            continue;
+          }
+          if (!st.isFile()) continue;
+          if (skipMarker) {
+            // 这个版本已经铺过：只在文件缺失或大小不符时才重铺（自愈）
+            let ok = false;
+            try { ok = fs.statSync(t).size === st.size; } catch (e) { ok = false; }
+            if (ok) continue;
+          }
+          fs.copyFileSync(s, t);
+          copied++; names.push(rel);
+        } catch (e) { console.error('[bundled] 复制失败', rel, e.message); }
+      }
+    };
+    copyTree(src, dst, '');
     // Smooth Motion 的解锁组件（30 系）：放到 <资产目录>\bundled-sm\，
     // core 里按 assets_dir()/bundled-sm/version.dll 取用。
     const smsrc = path.join(exeDir, 'bundled-sm');
