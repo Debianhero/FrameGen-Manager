@@ -1237,6 +1237,81 @@ pub fn restore_game_sm(
     })
 }
 
+/// 【关闭】把 SM 这一项**写成 0**（本游戏强制关闭）。
+///
+/// 和 restore_game_sm 的区别：restore 是"把我们的改动收回去"（旧值是开就回开），
+/// 这个是"关掉"。界面按钮上写的是「关闭 Smooth Motion」，那它就必须真的关掉 ——
+/// 无论之前有没有我们的记录、旧值是几。关掉后这次操作不再是"待还原"，记录一并清掉。
+pub fn turn_off_game_sm(game: &str, game_dir: &std::path::Path, exe: &std::path::Path) -> Result<String, String> {
+    let before;
+    let profile_name;
+    {
+        // 句柄只在它自己那次会话里有效，所以查找 / 读旧值 / 写 / 保存都在这一个会话里做完。
+        let sess = nv::Session::open()?;
+        let prof = match sess.find_profile_for_exe(exe)? {
+            Some(p) => p,
+            None => {
+                // 没挂这个 EXE 就没什么可关的；直说，别报"成功关闭"让人误会。
+                return Ok(format!(
+                    "驱动里没有挂这个 EXE 的配置，Smooth Motion 本来就没为它开过（{game}）"
+                ));
+            }
+        };
+        if sess.is_base_profile(prof) {
+            return Err("拒绝：不允许写全局/基础 profile。".to_owned());
+        }
+        profile_name = sess.profile_name(prof);
+        before = read_current(&sess, prof)?;
+        sess.set_dword(prof, SM_SETTING_ID, 0)?;
+        sess.save()?;
+    }
+    // 复核换一个**全新会话**：同一个会话里读回来的可能只是内存那份。复核按 profile 名字找。
+    let after = match nv::Session::open() {
+        Ok(s) => match handle_by_name(&s, &profile_name) {
+            Ok(Some(h)) => s.read(h, SM_SETTING_ID).ok(),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    if after != Some(0) {
+        return Err(format!(
+            "关闭后复核不符：期望 0，实际读到 {after:?}（配置「{profile_name}」）"
+        ));
+    }
+    drop_game_sm_record(game, game_dir, exe);
+    crate::log::line(&format!(
+        "[sm] turn_off_game_sm game={game} profile={profile_name} before={before:?} after={after:?}"
+    ));
+    Ok(match before {
+        Some(1) => format!("已关闭（配置「{profile_name}」里的 Smooth Motion 由开改为关）"),
+        Some(v) => format!("已关闭（配置「{profile_name}」里原本是 {v}，现在写成 0）"),
+        None => format!("已关闭（在配置「{profile_name}」里写入 0，不再跟随全局）"),
+    })
+}
+
+/// 删掉某个游戏的那条备份记录（按目录 / EXE / 游戏名找）。返回是否删了东西。
+pub fn drop_game_sm_record(game: &str, game_dir: &std::path::Path, exe: &std::path::Path) -> bool {
+    let mut dropped = false;
+    // 目录对得上就直接删
+    if !game_dir.as_os_str().is_empty() {
+        if let Ok(p) = record_path(game_dir) {
+            if std::fs::remove_file(&p).is_ok() {
+                dropped = true;
+            }
+        }
+    }
+    // 再按内容兜底（记录名是目录哈希，只有内容能可靠匹配）
+    let exe_s = exe.display().to_string();
+    for (f, r) in all_records() {
+        let hit = (!exe_s.is_empty() && !r.exe.is_empty() && r.exe.eq_ignore_ascii_case(&exe_s))
+            || (!game.is_empty() && !r.game.is_empty() && r.game == game);
+        if hit && std::fs::remove_file(&f).is_ok() {
+            dropped = true;
+        }
+    }
+    dropped
+}
+
 /// 把备份记录里所有游戏都还原一遍（界面上的"全部还原"）。
 /// 返回 (成功数, 记录总数, 失败说明)。
 pub fn restore_all_game_sm() -> (usize, usize, Vec<String>) {
@@ -1487,10 +1562,119 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
     ))
 }
 
+/// 在"这个游戏可能把组件放在哪"的几个目录里挨个找我们的解锁组件，找到就取回。
+///
+/// 为什么需要它：同一个游戏在库里可能出现两条，目录不一样 —— 自动扫描得到的是安装根目录，
+/// 手动选 exe 得到的是 exe 所在的那一层（例如 HogwartsLegacy 与 ...\Binaries\Win64）。
+/// 用户在扫出来的那条卡片上点「关闭」，组件却躺在子目录里，就会既关不掉、
+/// 卡片上的徽章又一直显示「已被 Smooth Motion 占用」。这里把 exe 目录、游戏目录、
+/// 以及它的上一层都搜一遍，谁有就取回谁。
+pub fn asset_restore_searching(
+    game_dir: &std::path::Path,
+    exe: &std::path::Path,
+) -> Result<String, String> {
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    let mut push = |d: &std::path::Path| {
+        if d.as_os_str().is_empty() {
+            return;
+        }
+        let key = d.display().to_string().to_lowercase();
+        if !cands.iter().any(|c| c.display().to_string().to_lowercase() == key) {
+            cands.push(d.to_path_buf());
+        }
+    };
+    // 顺序：先看卡片自己那两个目录（最可能），再往上看一层
+    if let Some(p) = exe.parent() {
+        push(p);
+    }
+    push(game_dir);
+    if let Some(p) = game_dir.parent() {
+        push(p);
+    }
+    if let Some(p) = exe.parent().and_then(|p| p.parent()) {
+        push(p);
+    }
+    for d in &cands {
+        // 用指纹判断（就是徽章用的那一条），**不要**用 asset_restore 里的"记录+指纹都匹配"，
+        // 否则纯手动加进来的目录（没有部署记录）会被它拒掉，组件永远留在盘上。
+        if !has_our_asset(d) {
+            continue;
+        }
+        let msg = match asset_restore(d) {
+            Ok(m) => m,
+            Err(e) => {
+                // 记录对不上（或压根没有）时直接删 —— 到这里已经确认它就是我们的组件了
+                let f = d.join(SM_ASSET_FILE);
+                remove_with_retry(&f)?;
+                crate::log::line(&format!(
+                    "[sm] 按指纹直接删除组件 dir={} （asset_restore 说：{e}）",
+                    d.display()
+                ));
+                "已取回解锁组件（按文件指纹确认后删除）".to_owned()
+            }
+        };
+        return Ok(if d == game_dir {
+            msg
+        } else {
+            format!("{msg}（组件原本在 {}）", d.display())
+        });
+    }
+    crate::log::line(&format!(
+        "[sm] 附近几个目录都没有我们的组件：{}",
+        cands.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(" | ")
+    ));
+    // 一个都没有：可能是别的 Mod；也可能这里从没放过，那就别报错说"取回失败"。
+    Ok("这几个目录里没有本工具的解锁组件（可能已经取回过了）".to_owned())
+}
+
+/// 删一个文件，失败时重试几次；还是不行就把**为什么**说清楚。
+///
+/// 为什么值得重试：游戏刚退出时进程可能还没完全走完（或杀毒/同步软件正握着文件），
+/// 隔一下再删往往就成了。真删不掉时，用户看到的现象是「关闭成功、徽章却还写着
+/// 已被 Smooth Motion 占用」—— 那句话必须能直接告诉他去关掉谁。
+fn remove_with_retry(path: &std::path::Path) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..3 {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = e.to_string();
+                // 文件已经不在也算成功（并发/别的东西先删了）
+                if !path.exists() {
+                    return Ok(());
+                }
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+            }
+        }
+    }
+    // 把现状写进日志：远程排查时这就是唯一线索
+    crate::log::line(&format!(
+        "[sm] 取回组件失败 path={} err={} still_exists={} readonly={}",
+        path.display(),
+        last,
+        path.exists(),
+        std::fs::metadata(path).map(|m| m.permissions().readonly()).unwrap_or(false)
+    ));
+    Err(format!(
+        "解锁组件还留在游戏目录里（{}）：{last}。\n\n请把游戏（包括它的启动器）完全退出后，再点一次「关闭 Smooth Motion」；\n如果还不行，多半是杀毒软件/同步盘正占着这个文件，可以手动删掉它，或者告诉我。",
+        path.display()
+    ))
+}
+
 /// 取回内置解锁组件：有备份就还原原文件，没有就删掉我们放的那份。
 pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
     let rec = asset_record_path(game_dir)?;
     let dst = game_dir.join(SM_ASSET_FILE);
+    let has_component = has_our_asset(game_dir);
+    let has_record = rec.is_file();
+    crate::log::line(&format!(
+        "[sm] 取回组件开始 dir={} 组件在={} 部署记录={}",
+        game_dir.display(),
+        has_component,
+        has_record
+    ));
     if !rec.is_file() {
         // 没有记录：如果这个文件正好是我们的组件，就把它清掉；否则不动
         let mine = dst.is_file()
@@ -1501,9 +1685,15 @@ pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
                 .map(|(a, b)| a == b)
                 .unwrap_or(false);
         if mine {
-            std::fs::remove_file(&dst).map_err(|e| format!("删除失败：{e}"))?;
+            remove_with_retry(&dst)?;
+            crate::log::line(&format!("[sm] 取回组件完成（无记录、按指纹删除）dir={}", game_dir.display()));
             return Ok("已取回解锁组件（没有部署记录，按文件指纹确认后清理）".to_owned());
         }
+        crate::log::line(&format!(
+            "[sm] 取回组件：没有记录、指纹也不匹配，未改动 dir={} 组件在={}",
+            game_dir.display(),
+            has_component
+        ));
         return Err("没有本工具的部署记录，未做任何改动".to_owned());
     }
     let text = std::fs::read_to_string(&rec).map_err(|e| format!("{e}"))?;
@@ -1529,9 +1719,14 @@ pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
         }
     }
     if dst.is_file() {
-        std::fs::remove_file(&dst).map_err(|e| format!("删除失败：{e}"))?;
+        remove_with_retry(&dst)?;
     }
     let _ = std::fs::remove_file(&rec);
+    crate::log::line(&format!(
+        "[sm] 取回组件完成（删除）dir={} 现在组件在={}",
+        game_dir.display(),
+        has_our_asset(game_dir)
+    ));
     Ok("已取回解锁组件（原本没有同名文件，直接删除）".to_owned())
 }
 

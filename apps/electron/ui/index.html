@@ -131,7 +131,9 @@
         </div>
         <div class="lh-actions">
           <button class="btn primary" id="btn-sm-scan" type="button" title="扫描 Steam / Epic / WeGame 的游戏库（只读）">扫描游戏库</button>
-          <button class="btn" id="btn-sm-clean" type="button" title="清掉本工具以前建的、已经没挂任何游戏的驱动配置">清理残留配置</button>
+          <!-- 有些游戏扫不出来：直接指它的启动 exe，写入的驱动配置就落在 exe 所在那一层。
+               手动指定后，Smooth Motion 的开关和 Profile Inspector 认的是同一个 EXE。 -->
+          <button class="btn" id="btn-sm-pick" type="button" title="有些游戏扫不出来：直接指它的启动 exe，Smooth Motion 就作用在它身上">手动选择游戏根目录exe启动文件</button>
         </div>
       </div>
       <div class="liblist" id="sm-list"></div>

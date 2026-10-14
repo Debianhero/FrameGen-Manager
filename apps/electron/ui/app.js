@@ -1827,12 +1827,12 @@
   /* DLSS5 页的【手动选择游戏根目录exe启动文件】：有些游戏扫不出来（或扫出来的目录不对），
      直接把它的启动 exe 指出来，目录就取 exe 所在那一层。入库逻辑和「添加目录」是同一份
      （core 的 add_library_dir），所以两种加法的结果不会有第二套行为。 */
-  function pickGameExeNow(btn) {
+  function pickGameExeNow(btn, andThen) {
     busy(btn, '选择中…', function () {
       return invoke('pick_game_exe').then(function (r) {
         if (!r || r.canceled) return;
         toast((r.updated ? '已更新游戏库条目：' : '已加入游戏库：') + (r.name || '') + '\n' + (r.exe || r.dir || ''), 'ok', 10000);
-        return refreshLibrary();
+        return refreshLibrary().then(function () { return andThen ? andThen() : null; });
       });
     });
   }
@@ -2038,29 +2038,43 @@
     }).then(function (o) {
       var r = o.r;
       var extra = on ? ((o.asset && o.asset.message) || '') : '';
-      // 关闭 = ①把驱动里那一项写回本工具改它之前的值（本来没设置就删掉这一项）
-      //        ②取回游戏目录里的解锁组件。两步的说明拼在一起给用户看。
+      // 关闭 = ①把驱动里那一项关掉（写 0）②取回游戏目录里的解锁组件。
+      // 两步各自报结果；**哪一步失败都要说出来** —— 尤其是组件没取回：
+      // 那种情况下驱动已经关了，但徽章还写着「已被 Smooth Motion 占用」，
+      // 不告诉用户原因的话，看起来就像"关闭没生效"。
       var tail = !on
-        ? invoke('sm_restore_game', { name: g.name, dir: dir }).then(function (m) {
-            return invoke('sm_asset_restore', { dir: dir }).then(function (a) {
-              return [m && m.message, a && a.message].filter(Boolean).join('；');
-            }).catch(function () { return (m && m.message) || ''; });
-          }).catch(function (e) {
-            return invoke('sm_asset_restore', { dir: dir }).then(function (a) {
-              return [(a && a.message) || '', '驱动设置还原失败：' + errText(e)].filter(Boolean).join('；');
-            }).catch(function () { return '驱动设置还原失败：' + errText(e); });
-          })
-        : Promise.resolve(extra);
+        ? invoke('sm_turn_off_game', { name: g.name, dir: dir, exe: exe })
+            .then(function (m) { return (m && m.message) || '已关闭'; },
+                  function (e) { return { text: '驱动设置关闭失败：' + errText(e), bad: true }; })
+            .then(function (off) {
+              // 带上 exe：同一个游戏可能以"根目录"和"exe 所在子目录"两条存在，
+              // 组件放在哪一条都能被找到并取回（否则徽章会一直显示已被占用）。
+              return invoke('sm_asset_restore', { dir: dir, exe: exe }).then(function (a) {
+                var offText = typeof off === 'string' ? off : off.text;
+                var offBad = typeof off === 'string' ? false : !!off.bad;
+                return { text: [offText, a && a.message].filter(Boolean).join('；'), bad: offBad };
+              }, function (e) {
+                var offText = typeof off === 'string' ? off : off.text;
+                var offBad = typeof off === 'string' ? false : !!off.bad;
+                return { text: [offText, '解锁组件没取回：' + errText(e)].filter(Boolean).join('；'), bad: true };
+              });
+            })
+        : Promise.resolve({ text: extra, bad: false });
       return tail.then(function (t) {
         hideBarLater(1200);
-        var ok = r && r.ok;
-        var msg = ((r && r.message) || (on ? '已开启' : '已关闭')) + (t ? '；' + t : '');
-        toast((ok ? '' : '未生效：') + msg, ok ? 'ok' : 'warn', 9000);
-        // 列表必须立刻反映刚做完的操作。这里**等重画跑完**再拉游戏库：
-        // paintSmList 里那次状态查询是异步的，不等它的话界面会先停在旧状态
-        // （用户看到的就是"提示成功、按钮还是关闭 Smooth Motion"）。
-        var repaint = paintSmList() || Promise.resolve();
-        if (ok) repaint.then(function () { return refreshLibrary(); }).catch(function () { });
+        var tailText = (t && t.text) || '';
+        var tailBad = !!(t && t.bad);
+        var ok = r && r.ok && !tailBad;
+        var msg = ((r && r.message) || (on ? '已开启' : '已关闭')) + (tailText ? '；' + tailText : '');
+        toast((ok ? '' : '未生效：') + msg, ok ? 'ok' : 'warn', ok ? 9000 : 14000);
+        /* 重画顺序**不能反**（这里踩过两次，徽章显示慢一步）：
+           paintSmList 渲染的是 GAMES 里的 deployed —— 那是游戏库的扫描结果。
+           徽章（未部署 / 已被 Smooth Motion 占用）取决于游戏目录里 version.dll 的状态，
+           而改这个文件的正是刚才那两个命令。所以必须**先把游戏库拉新的**、再画列表；
+           反过来先画就会拿到改动前的 deployed，看起来就是徽章慢一步：
+           刚开好显示"未部署"、关掉之后反而显示"已被占用"。 */
+        var done = ok ? refreshLibrary().catch(function () { }) : Promise.resolve();
+        done.then(function () { return paintSmList(); }).catch(function () { });
         return r;
       });
     }).catch(function (e) {
@@ -2189,26 +2203,14 @@ if ($('sel-proxy')) {
     // Smooth Motion 页的两个按钮：重新检测（只读）与扫描游戏库（复用同一个动作）
     if ($('btn-sm-refresh')) $('btn-sm-refresh').addEventListener('click', function () { renderSm().catch(function () { }); });
     if ($('btn-sm-scan') && $('btn-scan')) $('btn-sm-scan').addEventListener('click', function () { $('btn-scan').click(); });
-    // 清掉本工具建的、但没挂任何应用的驱动配置（以前那版写进自建 profile 留下的残余）
-    if ($('btn-sm-clean')) $('btn-sm-clean').addEventListener('click', function () {
-      var me = this;
-      uiConfirm({
-        title: '清理残留配置',
-        body: '只清理名字以「FrameGen Manager - 」开头、而且没有挂任何游戏的驱动配置。\n\nNVIDIA 自带的配置一个都不会动。继续吗？',
-      }).then(function (yes) {
-        if (!yes) return;
-        busy(me, '正在清理…', function () {
-          return invoke('sm_clean_orphans').then(function (r) {
-            var n = (r && r.removed) || 0;
-            var errs = (r && r.errors) || [];
-            if (n === 0 && !errs.length) toast('没有需要清理的残留配置。', 'info', 6000);
-            else if (n === 0) toast('清理失败：' + errs.join('；'), 'warn', 12000);
-            else toast('已清掉 ' + n + ' 条残留配置' + (errs.length ? '（' + errs.length + ' 条失败：' + errs.join('；') + '）' : '') + '。', errs.length ? 'warn' : 'ok', 10000);
-            renderSm().catch(function () { });
-          });
-        });
-      });
+    // 手动指定启动 exe：入库用的是和 DLSS5 页/主页同一份逻辑（add_library_dir）。
+    // 入库后帧生成页与 SM 页都要重画，否则 SM 列表里看不到这个新加的游戏。
+    if ($('btn-sm-pick')) $('btn-sm-pick').addEventListener('click', function () {
+      pickGameExeNow(this, function () { return paintSmList(); });
     });
+    /* 这里原来还有一个「清理残留配置」按钮（清掉旧版自建、没挂游戏的驱动配置）。
+       用户要求去掉。core/sidecar 的 sm_clean_orphans 命令**保留**着：发行版里没有入口，
+       真要排查时用命令行调它即可，不必为了一个按钮把逻辑删掉。 */
     if ($('btn-clean-backups')) $('btn-clean-backups').addEventListener('click', function () {
       var me = this;
       invoke('backups_info').then(function (info) {

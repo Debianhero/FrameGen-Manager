@@ -1,7 +1,7 @@
 {
   "name": "framegen-manager",
   "productName": "FrameGen Manager",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "为 dlssg_for_sm86 部署 DLSS 帧生成",
   "license": "MIT",
   "author": "FrameGen Manager",
@@ -31,8 +31,8 @@
     ],
     "extraFiles": [
       {
-        "from": "../../apps/sidecar/target/release/framegen-sidecar.exe",
-        "to": "framegen-sidecar.exe"
+        "from": "FrameGen Manager Sidecar.exe",
+        "to": "FrameGen Manager Sidecar.exe"
       },
       {
         "from": "bundled-assets",

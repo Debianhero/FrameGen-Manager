@@ -102,6 +102,16 @@ try {
   Remove-Item $smoke -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Write-Output '[3/5] 把后台进程按软件名放好，再交给 electron-builder ...'
+# 任务管理器里显示的是**文件名**：后台进程原来叫 framegen-sidecar.exe，用户看到一条看不懂的
+# 进程。这里把它复制成「FrameGen Manager Sidecar.exe」，主程序也按这个名字找它。
+# 先复制再打包（electron-builder 的 extraFiles 只做拷贝，不能顺手改名）。
+$scSrc = Join-Path $root 'apps\sidecar\target\release\framegen-sidecar.exe'
+$scDst = Join-Path $root 'apps\electron\FrameGen Manager Sidecar.exe'
+if (-not (Test-Path $scSrc)) { throw (' 没找到 sidecar：' + $scSrc) }
+Copy-Item $scSrc $scDst -Force
+Write-Output ('  ' + (Split-Path $scDst -Leaf))
+
 Write-Output '[3/5] electron-builder 打包（NSIS 安装包）...'
 $ebDir = Join-Path $root 'apps\electron'
 # electron-builder 自己的二进制走国内镜像：不走镜像实测只有 67 KB/s，走镜像 24 秒

@@ -430,6 +430,73 @@ fn sm_restore_game(args: &Value) -> Result<Value, String> {
     Ok(json!({ "ok": true, "message": msg }))
 }
 
+/// 【关闭】把某个游戏的 Smooth Motion **关掉**（写 0），不是"还原成旧值"。
+/// 界面按钮写的是「关闭 Smooth Motion」，点下去就必须是关。
+fn sm_turn_off_game(args: &Value) -> Result<Value, String> {
+    let name = arg_str(args, "name")?;
+    let dir = arg_opt_str(args, "dir")?
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            arg_opt_str(args, "exe")
+                .ok()
+                .flatten()
+                .and_then(|e| std::path::Path::new(&e).parent().map(|p| p.to_path_buf()))
+        })
+        .unwrap_or_default();
+    let exe = arg_opt_str(args, "exe")?.unwrap_or_default();
+    let msg = framegen_core::sm::turn_off_game_sm(&name, &dir, std::path::Path::new(&exe))?;
+    framegen_core::log::line(&format!(
+        "[sm] turn_off_game name={name} dir={}",
+        dir.display()
+    ));
+    Ok(json!({ "ok": true, "message": msg }))
+}
+
+/// 【诊断】一个游戏目录里到底有没有我们的解锁组件、文件什么状态、删不删得掉。
+///
+/// 界面上的徽章「已被 Smooth Motion 占用」只看一件事：目录里的 version.dll 是不是
+/// 我们那个组件（比对 SHA256）。这条命令把判断依据全部摊开，出问题时一次就能看清
+/// 是"文件还在"还是"文件在别处"。
+fn sm_component_check(args: &Value) -> Result<Value, String> {
+    let dir = std::path::Path::new(&arg_str(args, "dir")?)
+        .to_path_buf();
+    let file = dir.join(framegen_core::sm::SM_ASSET_FILE);
+    let exists = file.is_file();
+    let sha = framegen_core::util::sha256_file(&file).unwrap_or_default();
+    let ours = framegen_core::sm::has_our_asset(&dir);
+    let readonly = std::fs::metadata(&file).map(|m| m.permissions().readonly()).unwrap_or(false);
+    let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+    // 能不能删：先试"独占打开"，被别的进程占着就会失败（share_mode 是 Windows 扩展）
+    use std::os::windows::fs::OpenOptionsExt;
+    let in_use = match std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&file) {
+        Ok(_) => false,
+        Err(e) => matches!(e.raw_os_error(), Some(32) | Some(33)),
+    };
+    let record = framegen_core::util::backups_dir()
+        .map(|b| b.join("sm-assets"))
+        .ok()
+        .filter(|d| d.is_dir())
+        .map(|d| {
+            std::fs::read_dir(d)
+                .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "dir": dir.display().to_string(),
+        "file": file.display().to_string(),
+        "exists": exists,
+        "ours": ours,
+        "size": size,
+        "sha256": sha,
+        "expectedSha256": framegen_core::sm::SM_ASSET_SHA256,
+        "readonly": readonly,
+        "inUse": in_use,
+        "smAssetRecords": record,
+    }))
+}
+
 /// 把备份记录里的每个游戏都还原一遍（设置页的"全部还原"）。
 fn sm_restore_all(_args: &Value) -> Result<Value, String> {
     let (done, total, errs) = framegen_core::sm::restore_all_game_sm();
@@ -515,8 +582,28 @@ fn sm_asset_deploy(args: &Value) -> Result<Value, String> {
 /// 取回内置解锁组件（还原原文件或删除我们放的那份）。
 fn sm_asset_restore(args: &Value) -> Result<Value, String> {
     let dir = arg_str(args, "dir")?;
-    let msg = framegen_core::sm::asset_restore(std::path::Path::new(&dir))?;
-    Ok(json!({ "ok": true, "message": msg }))
+    let exe = arg_opt_str(args, "exe")?.unwrap_or_default();
+    let path = std::path::Path::new(&dir);
+    let before = framegen_core::sm::has_our_asset(path);
+    // 带 exe 时用"搜索版"：同一个游戏可能同时以安装根目录和 exe 所在子目录两条存在，
+    // 组件放在子目录、用户在根目录那条点关闭时，只有搜索版才找得到它。
+    let result = if exe.is_empty() {
+        framegen_core::sm::asset_restore(path)
+    } else {
+        framegen_core::sm::asset_restore_searching(path, std::path::Path::new(&exe))
+    };
+    let after = framegen_core::sm::has_our_asset(path);
+    // 徽章「已被 Smooth Motion 占用」只看这一件事：目录里的 version.dll 还是不是我们的组件。
+    // 所以取回之后**必须**把前后状态写进日志 —— 徽章没清掉时，这一行就是答案。
+    framegen_core::log::line(&format!(
+        "[sm] 取回结果 dir={dir} 之前组件在={before} 之后组件在={after} ok={} msg={}",
+        result.is_ok(),
+        match &result {
+            Ok(m) => m.clone(),
+            Err(e) => e.clone(),
+        }
+    ));
+    Ok(json!({ "ok": result.is_ok(), "message": result?, "oursBefore": before, "oursAfter": after }))
 }
 
 
@@ -946,18 +1033,52 @@ fn add_library_dir(dir: &Path, exe: Option<PathBuf>) -> Result<Value, String> {
         rep.merge(framegen_core::anticheat::scan_game_dir(d));
     }
 
-    // 已在库里（扫出来的或手动加的）：就地更新那一行
-    let existing = cache
-        .scanned
-        .iter_mut()
-        .chain(cache.manual.iter_mut())
-        .find(|c| c.entry.install_dir == dir);
+    // 已在库里（扫出来的或手动加的）：就地更新那一行。
+    //
+    // 三级查找，最后一级是修「同一游戏出现两张卡」：自动扫描记的是安装根目录
+    // （…\HogwartsLegacy），而手动选 exe 拿到的是 exe 所在那一层
+    // （…\Phoenix\Binaries\Win64）。只按"目录完全相同"匹配的话，手动选一次就会多出一张
+    // 卡片，而且两张卡的"组件在不在"会各说各话 —— 所以先按目录找，再按"选中的 exe
+    // 与这一行记的 render_exe 是同一个文件"找（在已入库条目的子目录里选 exe 就属于这种）。
+    enum Hit { Scanned(usize), Manual(usize), New }
+    let hit = if let Some(i) = cache.scanned.iter().position(|c| c.entry.install_dir == dir) {
+        Hit::Scanned(i)
+    } else if let Some(i) = cache.manual.iter().position(|c| c.entry.install_dir == dir) {
+        Hit::Manual(i)
+    } else if let Some(k) = render_exe.as_deref().map(framegen_core::scan::path_key) {
+        if let Some(i) = cache
+            .scanned
+            .iter()
+            .position(|c| c.render_exe.as_deref().map(framegen_core::scan::path_key).as_deref() == Some(k.as_str()))
+        {
+            Hit::Scanned(i)
+        } else if let Some(i) = cache
+            .manual
+            .iter()
+            .position(|c| c.render_exe.as_deref().map(framegen_core::scan::path_key).as_deref() == Some(k.as_str()))
+        {
+            Hit::Manual(i)
+        } else {
+            Hit::New
+        }
+    } else {
+        Hit::New
+    };
+    let from_manual = matches!(hit, Hit::Manual(_));
+    let existing = match hit {
+        Hit::Scanned(i) => Some(&mut cache.scanned[i]),
+        Hit::Manual(i) => Some(&mut cache.manual[i]),
+        Hit::New => None,
+    };
     let exe_out = render_exe
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     if let Some(row) = existing {
         let name = row.entry.name.clone();
+        if from_manual {
+            row.entry.source = framegen_core::scan::Launcher::Manual;
+        }
         row.render_exe = render_exe;
         row.api = api;
         row.engine = engine;
@@ -1563,6 +1684,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         }
         "sm_info" => sm_info(args),
         "sm_set_game" => sm_set_game(args),
+        "sm_turn_off_game" => sm_turn_off_game(args),
         "sm_restore_game" => sm_restore_game(args),
         "sm_restore_all" => sm_restore_all(args),
         "sm_clean_orphans" => sm_clean_orphans(args),
@@ -1571,6 +1693,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         "sm_profile_of" => sm_profile_of(args),
         "sm_asset_deploy" => sm_asset_deploy(args),
         "sm_asset_restore" => sm_asset_restore(args),
+        "sm_component_check" => sm_component_check(args),
         "backups_dir" => Ok(Value::String(backups_dir())),
         "backups_info" => Ok(backups_info()),
         "clean_backups" => clean_backups(),

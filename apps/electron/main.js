@@ -94,7 +94,14 @@ function migrateDataIfNeeded() {
   if (copied.length) console.log('[migrate] 数据已搬到 ' + dataDir + '：' + copied.join('、'));
 }
 
-const SIDECAR = path.join(exeDir, 'framegen-sidecar.exe');
+/* 后台进程的文件名就是任务管理器里显示的名字，所以用软件名。
+   老名字保留一个回退：开发目录里可能只有 framegen-sidecar.exe（那是仓库里编出来的原始产物）。 */
+const SIDECAR = (function () {
+  const named = path.join(exeDir, 'FrameGen Manager Sidecar.exe');
+  if (fs.existsSync(named)) return named;
+  const legacy = path.join(exeDir, 'framegen-sidecar.exe');
+  return fs.existsSync(legacy) ? legacy : named;
+})();
 
 /* ---------------------------------------------------------------- 诊断日志
    侧车（后台进程）出问题时，以前只有 console.error —— 用户看不到，我们也没法查
@@ -271,7 +278,7 @@ function callSidecar(cmd, args, isRetry) {
    把这个软件的进程优先级压到「低」（任务管理器里就显示"低"）：它是后台辅助工具，
    不该和游戏抢 CPU。Electron 的主进程、渲染进程、GPU 进程、工具进程是分开的，
    所以从 app.getAppMetrics() 拿到全部 PID 逐个设。
-   注意 Node 的 setPriority 在 Windows 上映射到进程优先级类，19（PRIORITY_LOW）= IDLE = 任务管理器的「低」。 */
+   注意 Node 的 setPriority 在 Windows 上映射到进程优先级类：用户要求保持「正常」。 */
 function lowerProcessPriority() {
   try {
     const os = require('node:os');
@@ -281,7 +288,7 @@ function lowerProcessPriority() {
     } catch (e) { /* 拿不到就只设自己 */ }
     let ok = 0;
     for (const pid of pids) {
-      try { os.setPriority(pid, os.constants.priority.PRIORITY_LOW); ok++; } catch (e) {}
+      try { os.setPriority(pid, os.constants.priority.PRIORITY_NORMAL); ok++; } catch (e) {}
     }
     console.log('[prio] 已把 ' + ok + '/' + pids.length + ' 个进程设为低优先级');
     // 再让 sidecar 给这些进程打开 Windows「效率模式」（EcoQoS，一直开、不分前后台）
@@ -296,6 +303,18 @@ function lowerProcessPriority() {
    安装目录里**不再放**「使用说明.txt」（用户要求删除）。但升级安装不会自动删掉旧版本的
    文件，所以每次启动顺手清一次 —— 放在主进程做是因为它是 UTF-8，文件名不会像 NSIS 脚本
    那样受当前代码页影响。使用说明以界面里的「使用说明」页 + README.md 为准。 */
+/* 老版本的后台进程叫 framegen-sidecar.exe，升级安装会把它留下。
+   它当时可能还开着（正在被使用），删不掉就算了 —— 下次启动会再试。 */
+function dropLegacySidecarName() {
+  try {
+    const old = path.join(exeDir, 'framegen-sidecar.exe');
+    if (fs.existsSync(old) && old !== SIDECAR) {
+      fs.rmSync(old, { force: true });
+      console.log('[cleanup] 已删除旧版后台进程名 framegen-sidecar.exe');
+    }
+  } catch (e) { /* 占用中，下次再说 */ }
+}
+
 function dropLegacyDocs() {
   for (const n of ['使用说明.txt']) {
     try {
@@ -645,6 +664,7 @@ if (!app.requestSingleInstanceLock()) {
     ensureSidecar().catch(function (e) { shellLog('启动后台进程失败：' + e.message); });
     // 先把内置资产铺好再开窗口：首启要拷 ~92MB（1~2 秒），之后每个版本只做一次
     dropLegacyDocs();
+    dropLegacySidecarName();
 ensureBundledAssets().then(function () {
       createWindow();
       // 窗口起来后（渲染/GPU 进程已存在）再压优先级；稍后再补一次，覆盖后起的进程
