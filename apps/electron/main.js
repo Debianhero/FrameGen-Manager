@@ -667,9 +667,13 @@ if (!app.requestSingleInstanceLock()) {
     dropLegacySidecarName();
 ensureBundledAssets().then(function () {
       createWindow();
-      // 窗口起来后（渲染/GPU 进程已存在）再压优先级；稍后再补一次，覆盖后起的进程
+      /* 窗口起来后（渲染/GPU 进程已存在）再设优先级。**要多补几次**：
+         Electron 的渲染 / GPU / 工具进程是陆续起来的，而 Windows 也会给刚拿到前台焦点的
+         进程临时提权（"高于正常"）—— 实测刚启动那几秒能抓到 higher-than-normal 的子进程。
+         启动后 20 秒内补几轮，之后交给下面那个 30 秒的看门狗。 */
       lowerProcessPriority();
-      setTimeout(lowerProcessPriority, 4000);
+      [1000, 3000, 6000, 10000, 20000].forEach(function (ms) { setTimeout(lowerProcessPriority, ms); });
+      setInterval(lowerProcessPriority, 30000);
       /* 每次启动自动检查一次更新（用户要求）：延迟几秒让界面先起来，
          失败就静默忽略 —— 启动路径上不该因为网络问题弹任何东西。 */
       setTimeout(function () {
