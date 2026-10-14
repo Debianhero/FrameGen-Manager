@@ -365,6 +365,8 @@ pub fn deploy(
     }
 
     let mut notes: Vec<String> = Vec::new();
+    // 认出来"本来就是我们自己的文件"（所以不备份、只覆盖）的条目
+    let mut ours_overwritten: Vec<String> = Vec::new();
     if !overwrite_own.is_empty() {
         notes.push(format!("已覆盖本项目的旧文件：{}", overwrite_own.join("、")));
     }
@@ -459,7 +461,19 @@ pub fn deploy(
         }
 
         let dst = target_dir.join(name);
-        let existed = dst.is_file();
+        let present = dst.is_file();
+        /* 这个位置的东西如果是**我们自己放进去的**（老版本铺的、或用户手动装的），
+           就不能记成"游戏原件" —— 见 is_our_artifact 的说明。
+           注意：有部署记录的那条路在上面已经沿用旧备份了，走到这里说明**没有记录**
+           （手动装的目录、或记录被清过），正是最容易误判成游戏原件的情况。 */
+        let ours_here = present
+            && std::fs::read(&dst)
+                .map(|b| is_our_artifact(&dst, name, &b))
+                .unwrap_or(false);
+        if ours_here {
+            ours_overwritten.push(name.clone());
+        }
+        let existed = present && !ours_here;
         let mut backup_name = None;
         let mut original_sha256 = None;
         if existed {
@@ -478,6 +492,15 @@ pub fn deploy(
             original_sha256,
             deployed_sha256: sha.clone(),
         });
+    }
+
+    /* 这里才轮到说这句话：ours_overwritten 是上面那个循环填的。
+       放早了会说空话（曾经就是这样，提示根本没出现过）。 */
+    if !ours_overwritten.is_empty() {
+        notes.push(format!(
+            "已是本项目文件，已直接覆盖、没有当成游戏原件备份：{}",
+            ours_overwritten.join("、")
+        ));
     }
 
     // 4b. 用户确认要移除的「另一个本项目代理」也必须先备份。
@@ -821,6 +844,8 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
     //    以前是先无条件删掉部署文件、再逐个读备份：备份坏掉时游戏目录已经被删了
     //    一半，原件又没放回去，留下一个半残的游戏目录。
     let mut plan: Vec<(&BackupEntry, Vec<u8>)> = Vec::new();
+    // 记录说"这个位置原本就有文件"，但那份"原件"其实是我们自己放进去的 —— 不能写回
+    let mut healed: Vec<String> = Vec::new();
     for e in &manifest.files {
         if !e.existed_before {
             continue;
@@ -832,6 +857,15 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
             if util::sha256_hex(&bytes) != *orig {
                 bail!("备份 {bn} 自身已损坏，中止还原（游戏目录一个字都没动）");
             }
+        }
+        /* 那份"游戏原件"本身如果是本项目放的文件（按签名或 0.3.x 指纹认），就**不写回**：
+           写回去等于把我们自己的 mod 文件当成游戏原件塞进游戏目录，而且从此被当成
+           游戏文件、本工具再也清不掉 —— 实测复现过的恶性 bug（手动装过 0.3.x 的目录，
+           老版本会把我们自己的代理备份成"游戏原件"）。这份备份留在备份目录里不动，
+           用户想核对还能找到。 */
+        if is_our_artifact(&src, &e.rel_path, &bytes) {
+            healed.push(e.rel_path.clone());
+            continue;
         }
         plan.push((e, bytes));
     }
@@ -883,19 +917,40 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
         Vec::new()
     };
 
-    // 4) 有文件被改过就保留备份目录、如实说明：别把「原件还在」这一点也弄丢
+    /* 4) 两种情况都要保留备份目录并如实说明，别把「原件还在」这一点弄丢：
+          · 有文件被用户改过（skipped）：不能删，否则原件跟着没了
+          · 记下的"游戏原件"其实是我们自己的文件（healed）：那份备份也不能删 ——
+            用户可能想核对它到底是不是游戏自带的 */
+    let keep_backups = !skipped.is_empty() || !healed.is_empty();
+    let mut msg = if keep_backups {
+        format!("部分还原：恢复 {restored} 个原始文件")
+    } else {
+        format!("已还原：恢复 {restored} 个原始文件")
+    };
     if !skipped.is_empty() {
-        return Ok(format!(
-            "部分还原：恢复 {restored} 个原始文件；{} 个文件的内容已不是本工具部署的那份，为避免误删已跳过（{}）。备份保留在 {}，确认不需要了可以手动删除。",
+        msg.push_str(&format!(
+            "；{} 个文件的内容已不是本工具部署的那份，为避免误删已跳过（{}）",
             skipped.len(),
-            skipped.join("、"),
-            base.display()
+            skipped.join("、")
         ));
     }
-    let _ = std::fs::remove_dir_all(&base);
-    let mut msg = format!("已还原：恢复 {restored} 个原始文件");
+    if !healed.is_empty() {
+        // 括号里的文件名去掉（用户要求）：数量已经说明问题，名字在这一屏是噪音
+        msg.push_str(&format!(
+            "；另有 {} 个位置当年记下的「游戏原件」其实是本项目自己放的文件，没有写回游戏目录",
+            healed.len()
+        ));
+    }
     if !swept.is_empty() {
         msg.push_str(&format!("；另清理插件运行时留下的目录：{}", swept.join("、")));
+    }
+    if keep_backups {
+        msg.push_str(&format!(
+            "。备份保留在 {}，确认不需要了可以手动删除。",
+            base.display()
+        ));
+    } else {
+        let _ = std::fs::remove_dir_all(&base);
     }
     Ok(msg)
 }
@@ -1254,6 +1309,271 @@ pub fn verify_asset_inventory(runtime_src: &Path) -> Vec<String> {
         }
     }
     bad
+}
+
+/// 0.3.x 那一套（我们 1.0.x 版本发布时内置的资产）的精确内容指纹：(文件名, 字节数, sha256)。
+///
+/// 为什么需要它：**那两份 NVIDIA 运行库没法按签名认** —— 它们是 NVIDIA 官方签名的，
+/// 游戏自己带的也是同一份签名，光看签名分不出是谁放的。只能按内容认。
+///
+/// 数据来源：直接从我们 1.0.7 安装包里的资产算出来的；其中 nvngx_dlssg.dll 的哈希
+/// 与上游发行包 THIRD_PARTY_NOTICES.txt 里记的 310.9.1 哈希逐字一致，可交叉印证。
+pub const LEGACY_ARTIFACTS: &[(&str, u64, &str)] = &[
+    (
+        "version.dll",
+        30_021_920,
+        "c3934a09399f022504227c72df0bf8c0de55f9a08880dddde898c5262cefa838",
+    ),
+    (
+        "winmm.dll",
+        30_033_184,
+        "bc3cef25c1ccbbdccdd93db9fae845104bb6c71fd433240e26641881a7e46658",
+    ),
+    (
+        "dbghelp.dll",
+        30_039_840,
+        "dfe7f44baa68d237dfe040d4b4cfc9bd44b01e661f3051996db1144e6bb388cb",
+    ),
+    (
+        "dinput8.dll",
+        30_021_408,
+        "4fbad08bb9360a1cd1309a82586353484fe64b7220199344ab83fae308176c6b",
+    ),
+    (
+        "dxgi.dll",
+        30_021_920,
+        "52e67020a725c74d5dee62aee4dc166a2f4e5c3adabf04ecab3005ab968fc24d",
+    ),
+    (
+        "d3d12.dll",
+        30_021_920,
+        "64b7ecc3f6d70011feed8dfaa20ce500522e8b04170142e2a2000146b4d7ac71",
+    ),
+    (
+        "nvngx_dlssg.dll",
+        7_460_976,
+        "ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82",
+    ),
+    (
+        "nvngx_dlss.dll",
+        58_956_912,
+        "3975567b8943c53acce397f2b72380092f84f162d00b0d2c7d08a1025c563983",
+    ),
+    (
+        "dlssg_sm86.ini",
+        3_548,
+        "2616857ee29ec61e33c8b52e1b50f4c93cb5339adbb13b73f0ae71a722427a43",
+    ),
+];
+
+/// 这份内容是不是"我们 0.3.x 时代发布过的那个文件"（按 文件名+大小+哈希 精确判定）。
+///
+/// 先比大小再算哈希：老代理 28.6 MB、超分运行库 56 MB，算哈希不便宜，
+/// 大小不符的文件在第一步就被挡掉了。
+fn is_legacy_artifact(name: &str, bytes: &[u8]) -> bool {
+    let short = name.rsplit(['\\', '/']).next().unwrap_or(name);
+    for (n, size, sha) in LEGACY_ARTIFACTS {
+        if *n == short && bytes.len() as u64 == *size && crate::util::sha256_hex(bytes) == *sha {
+            return true;
+        }
+    }
+    false
+}
+
+/// 测试入口：按 文件名 + 内容 判断是不是 0.3.x 那一套里的文件。
+/// （给自测用；生产代码走 is_our_artifact。）
+pub fn is_legacy_artifact_like(name: &str, bytes: &[u8]) -> bool {
+    is_legacy_artifact(name, bytes)
+}
+
+/// 这个游戏目录里部署的帧生成资产"是哪一套"。
+///
+/// 只做**廉价判定**（stat + 读 PE 证书表，不算哈希）：这个函数会被游戏库每次刷新时
+/// 对每个游戏调用一次，30 MB 的哈希是不能放在这里的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetFamily {
+    /// 0.4.0 那一套：代理由 dlssg_sm86\ 目录 + INI 组成，代理不到 1 MB
+    V040,
+    /// 0.3.x 那一套：代理 28.6 MB，运行库铺在游戏根目录
+    Legacy03x,
+}
+
+impl AssetFamily {
+    pub fn version(self) -> &'static str {
+        match self {
+            AssetFamily::V040 => "0.4.0",
+            AssetFamily::Legacy03x => "0.3.x",
+        }
+    }
+    /// 这一套是不是"旧的那一套"（界面上要用黄色提醒重新部署）
+    pub fn is_legacy(self) -> bool {
+        matches!(self, AssetFamily::Legacy03x)
+    }
+}
+
+/// 一个游戏目录里"帧生成资产"的样子 —— 徽章、批量重新部署、清理入口都用它。
+#[derive(Debug, Clone)]
+pub struct DeployedAssets {
+    pub family: AssetFamily,
+    /// 部署用的代理入口名（界面拿它去重新部署，不用去解析状态字符串）
+    pub proxy: String,
+    /// 随包运行库的版本号；读不出来就是空串
+    pub runtime_version: String,
+    /// 本工具**没有**这个目录的部署记录（用户自己手动装的）
+    pub manual: bool,
+    /// 还留在目录里的 0.3.x 文件（名字 + 字节数，只按 名字+大小 判，不算哈希）
+    pub leftovers: Vec<(String, u64)>,
+}
+
+/// 随包运行库的字节数 -> 版本号。两份我们发布过的运行库大小完全不同，stat 就够。
+const RUNTIME_BY_SIZE: [(u64, &str); 2] = [(7_506_544, "310.9.16"), (7_460_976, "310.9.1")];
+
+/// 读出这个游戏目录里帧生成资产的版本信息。没有帧生成文件时返回 None。
+///
+/// 判据按可靠性排序，全部是廉价操作：
+///   1. 部署记录（manifest）里有 dlssg_sm86\ 条目 -> 0.4.0；只有代理+INI -> 0.3.x
+///   2. 目录里有没有 dlssg_sm86\ 子目录
+///   3. 在位的代理（按签名认）的字节数：不到 1 MB -> 0.4.0，否则 0.3.x
+pub fn deployed_assets(dir: &Path) -> Option<DeployedAssets> {
+    let manifest = load_manifest(dir);
+    // 在位的、属于本项目的代理入口
+    let ours_proxy = PROXY_ENTRIES
+        .iter()
+        .find(|n| {
+            let p = dir.join(n);
+            p.is_file() && crate::scan::identify_dll(&p).is_ours()
+        })
+        .map(|n| (*n).to_owned());
+
+    let proxy = manifest
+        .as_ref()
+        .map(|m| m.proxy_name.clone())
+        .or_else(|| ours_proxy.clone());
+    // 一份帧生成文件都没有 -> 不是"部署过的目录"
+    let proxy = proxy?;
+
+    let has_runtime_dir = dir.join(RUNTIME_DIR).is_dir();
+    let from_manifest = manifest.as_ref().and_then(|m| {
+        if m.files
+            .iter()
+            .any(|e| e.rel_path.starts_with(RUNTIME_DIR))
+        {
+            Some(AssetFamily::V040)
+        } else if !m.files.is_empty() {
+            Some(AssetFamily::Legacy03x)
+        } else {
+            None
+        }
+    });
+    let family = from_manifest.unwrap_or({
+        if has_runtime_dir {
+            AssetFamily::V040
+        } else {
+            // 没有记录、也没有新目录：看代理多大。0.4.0 的代理不到 1 MB，
+            // 0.3.x 的是 28.6 MB —— 差两个数量级，不会认错。
+            let small = ours_proxy
+                .as_ref()
+                .and_then(|n| std::fs::metadata(dir.join(n)).ok())
+                .map(|m| m.len() < 1_000_000)
+                .unwrap_or(false);
+            if small {
+                AssetFamily::V040
+            } else {
+                AssetFamily::Legacy03x
+            }
+        }
+    });
+
+    // 运行库版本：先看新版位置，再看游戏根目录
+    let runtime_version = [
+        dir.join(RUNTIME_DIR).join("runtime").join("nvngx_dlssg.dll"),
+        dir.join("nvngx_dlssg.dll"),
+    ]
+    .iter()
+    .find_map(|p| {
+        let len = std::fs::metadata(p).ok()?.len();
+        RUNTIME_BY_SIZE
+            .iter()
+            .find(|(size, _)| *size == len)
+            .map(|(_, v)| (*v).to_owned())
+    })
+    .unwrap_or_default();
+
+    Some(DeployedAssets {
+        family,
+        proxy,
+        runtime_version,
+        manual: manifest.is_none(),
+        leftovers: legacy_leftover_candidates(dir),
+    })
+}
+
+/// 目录里还留着的 0.3.x 文件 —— **只按 名字 + 大小** 判（不算哈希，供每次刷新调用）。
+///
+/// 名字和大小两个条件同时命中才算：我们发布过的那几个文件大小都很特别
+/// （28.6 MB 的代理、7.46 MB / 54.9 MB 的运行库），游戏自带的文件几乎不可能同时撞上。
+/// 真正删除之前会再按哈希核一遍（见 clean_legacy_leftovers）。
+pub fn legacy_leftover_candidates(dir: &Path) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    for (name, size, _sha) in LEGACY_ARTIFACTS {
+        let p = dir.join(name);
+        if let Ok(m) = std::fs::metadata(&p) {
+            if m.is_file() && m.len() == *size {
+                out.push(((*name).to_owned(), m.len()));
+            }
+        }
+    }
+    out
+}
+
+/// 删掉目录里 0.3.x 的遗留文件，返回（删掉的, 没删掉的）。
+///
+/// 和上面那个"候选"函数的区别：这里**逐字节核对哈希**才删 —— 这是用户点按钮的
+/// 一次性动作，慢一点没关系，但绝不能删错（游戏自带的运行库也不能碰）。
+///
+/// 这是给"我们清不掉"的情况兜底的：用户手动装过 0.3.x、之后又用新版部署过一次，
+/// 于是那些运行库既不在新清单里、也无法从签名上认出来。
+pub fn clean_legacy_leftovers(dir: &Path) -> (Vec<String>, Vec<String>) {
+    let mut deleted = Vec::new();
+    let mut failed = Vec::new();
+    for (name, size) in legacy_leftover_candidates(dir) {
+        let p = dir.join(&name);
+        let Ok(bytes) = std::fs::read(&p) else {
+            failed.push(format!("{name}（读不出来）"));
+            continue;
+        };
+        if bytes.len() as u64 != size || !is_legacy_artifact(&name, &bytes) {
+            // 大小对上了但内容不是我们那份 -> 是别人的文件，绝不碰
+            continue;
+        }
+        match std::fs::remove_file(&p) {
+            Ok(_) => deleted.push(name),
+            Err(e) => failed.push(format!("{name}（{e}）")),
+        }
+    }
+    (deleted, failed)
+}
+
+/// 这个位置躺着的东西**是不是我们自己放进去的**（与有没有部署记录无关）。
+///
+/// 为什么必须能在没有记录时也认出来：真实场景是老用户**手动装过 0.3.x** —— 游戏目录里
+/// 有我们的代理和运行库，但本工具没有任何记录。这种文件**绝不能当成"游戏原件"备份**：
+/// 一旦记成原件，「还原」就会把我们自己的 mod 文件写回游戏目录，而且从此被当成游戏文件、
+/// 再也清不掉（实测复现过的恶性 bug）。
+///
+/// 两条判据，按可靠性排序：
+///   1. DLL：Authenticode 签名主体是本项目的自签证书 —— 任何版本、任何文件名都认得出，
+///      而且绝不会误判（真正的 Windows version.dll 是微软签名的）；
+///   2. 其它文件（INI 之类）：按内容指纹认。
+///
+/// name = 这个文件**在游戏目录里的名字**。
+///
+/// 不要用备份文件的文件名去比指纹：备份名带 .bak 后缀，比不出东西。
+pub fn is_our_artifact(path: &Path, name: &str, bytes: &[u8]) -> bool {
+    if crate::scan::identify_dll(path).is_ours() {
+        return true;
+    }
+    is_legacy_artifact(name, bytes)
 }
 
 /// 0.4.0 起运行库、后端、内核都进了 dlssg_sm86\\ 目录，不再铺在游戏根目录。

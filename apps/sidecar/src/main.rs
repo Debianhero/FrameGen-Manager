@@ -773,8 +773,47 @@ fn game_row(c: &framegen_core::scan::CachedRow, manual: bool) -> Value {
         // DLSS5 那一套的状态与它要用的启动 exe：部署对话框直接把这两项显示出来，
         // 免得再单独发一条命令去问（每行多读一个小 JSON，可以忽略）。
         "dlss5": framegen_core::dlss5::state_label(&target),
+        // 帧生成资产版本（徽章用）：哪一套 + 运行库版本 + 还留着哪些旧文件。
+        // 一次 stat 级别的判定，跟着游戏库一起返回，界面不用再单独问一遍。
+        "fgAssets": fg_assets_json(&target),
         "targetExe": c.render_exe.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
     })
+}
+
+/// 帧生成资产版本的 JSON 形态（界面的徽章、重新部署、清理入口都用它）。
+fn fg_assets_json(dir: &std::path::Path) -> Value {
+    match framegen_core::deploy::deployed_assets(dir) {
+        None => Value::Null,
+        Some(a) => json!({
+            "version": a.family.version(),
+            "legacy": a.family.is_legacy(),
+            "runtime": a.runtime_version,
+            "proxy": a.proxy,
+            "manual": a.manual,
+            "leftovers": a.leftovers.iter().map(|(n, s)| json!({ "name": n, "size": s })).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+/// 清掉目录里 0.3.x 的遗留文件（用户点按钮时才走这里，逐个核对哈希再删）。
+fn clean_legacy(dir: String) -> Result<Value, String> {
+    let p = std::path::Path::new(&dir);
+    let (deleted, failed) = framegen_core::deploy::clean_legacy_leftovers(p);
+    framegen_core::log::line(&format!(
+        "[清理旧版] {} -> 删掉 {} 项，失败 {} 项",
+        p.display(),
+        deleted.len(),
+        failed.len()
+    ));
+    let mut msg = if deleted.is_empty() {
+        "没有可清理的旧版文件（都已经干净了）".to_owned()
+    } else {
+        format!("已清理 {} 项旧版文件：{}", deleted.len(), deleted.join("、"))
+    };
+    if !failed.is_empty() {
+        msg.push_str(&format!("\n· 没删掉的：{}", failed.join("、")));
+    }
+    Ok(json!({ "msg": msg, "deleted": deleted, "failed": failed }))
 }
 
 /// 真实游戏库：scanned + manual 合并，去掉用户移除过的，算好部署目标与状态。
@@ -1518,6 +1557,7 @@ fn get_config() -> Value {
         "optimized": cfg.fg_optimized,
         "frames": cfg.fg_frames,
         "preset": cfg.fg_preset,
+        "legacyPrompted": cfg.legacy_prompt_version,
         "defaultPreset": framegen_core::update::DEFAULT_PRESET,
         "presets": framegen_core::update::PRESETS,
         "optimizedLabel": optimized_label(cfg.fg_optimized),
@@ -1539,7 +1579,12 @@ fn get_config() -> Value {
 
 /// 改部署档位：只接受上游真正支持的取值 —— 别让前端传进来的怪数字写进配置
 /// （0~3 是已知四档；倍率上限只有 3=4X 和 5=6X 两种）
-fn set_config(optimized: u8, frames: u8, preset: String) -> Result<Value, String> {
+fn set_config(
+    optimized: u8,
+    frames: u8,
+    preset: String,
+    legacy_prompted: Option<String>,
+) -> Result<Value, String> {
     if optimized > 3 {
         return Err(format!("优化等级只能是 0~3（收到 {optimized}）"));
     }
@@ -1566,6 +1611,10 @@ fn set_config(optimized: u8, frames: u8, preset: String) -> Result<Value, String
     } else {
         preset
     };
+    // 可选：界面记下"已经提示过某个版本"，下次启动就不再弹
+    if let Some(v) = legacy_prompted {
+        cfg.legacy_prompt_version = v;
+    }
     framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
     framegen_core::log::line(&format!(
         "部署档位改为：优化等级 {optimized}（{}）、倍率上限 {}",
@@ -1772,6 +1821,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         "restore_removed" => restore_removed(arg_str(args, "key")?),
 
         "deploy_state" => Ok(Value::String(deploy_state(arg_str(args, "dir")?))),
+        "clean_legacy" => clean_legacy(arg_str(args, "dir")?),
         "proxy_advice" => proxy_advice(arg_str(args, "dir")?),
         "deploy_game" => deploy_game(
             arg_str(args, "dir")?,
@@ -1814,6 +1864,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             arg_u8(args, "optimized")?,
             arg_u8(args, "frames")?,
             arg_opt_str(args, "preset")?.unwrap_or_default(),
+            arg_opt_str(args, "legacyPrompted")?,
         ),
         "check_self_update" => check_self_update(),
         "self_update_download" => self_update_download(id, args),

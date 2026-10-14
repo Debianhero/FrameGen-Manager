@@ -865,6 +865,19 @@
   /* 游戏库的一张卡片。可选参数 back = { label, onClick } 时，操作行换成"放回"
      （「已被移除的游戏」用）—— 同一个渲染器，其余页面不受影响。 */
   function gameCard(g, idx, back) {
+    /* 帧生成资产版本徽章：哪一套资产 + 随包运行库版本。
+       为什么给用户看这个：老用户升级上来后，游戏目录里可能还是 0.3.x 那一套 ——
+       帧生成照常能用，但拿不到 0.4.0 的新运行库（310.9.16）和新内核，
+       而光看"已部署"三个字完全看不出来（用户要求显示出来）。 */
+    var fga = g.fgAssets;
+    var assetBadge = fga
+      ? badge(
+          '资产 ' + fga.version +
+          (fga.runtime ? ' · 运行库 ' + fga.runtime : '') +
+          (fga.manual ? '（手动）' : ''),
+          fga.legacy ? 'warn' : (fga.manual ? 'dim' : 'ok')
+        )
+      : null;
     var dlss = g.streamline
       ? badge('自带 DLSS', 'acc')
       : badge(g.techScanned ? '未检出 DLSS' : '未检测 DLSS', 'dim');
@@ -876,6 +889,7 @@
       badge('API：' + (g.api || '未知'), 'dim'),
       badge('引擎：' + (g.engine || '未知'), 'dim'),
       badge(g.deployed || '未部署', stateCls(g.deployed)),
+      assetBadge,
       g.exists ? null : badge('目录不存在', 'err')
     ]);
     return h('div', { class: 'gcard', style: 'animation-delay:' + Math.min(idx * 35, 350) + 'ms' }, [
@@ -918,12 +932,130 @@
         GAMES.forEach(function (g, i) { box.appendChild(gameCard(g, i)); });
       }
     }
+    /* 批量按钮只在真的有旧版游戏时出现（平时不占地方） */
+    var legacyGames = GAMES.filter(function (g) { return g.fgAssets && g.fgAssets.legacy; });
+    var reBtn = $('btn-redeploy-legacy');
+    if (reBtn) {
+      if (legacyGames.length) {
+        reBtn.classList.remove('hidden');
+        reBtn.textContent = '重新部署旧版游戏（' + legacyGames.length + '）';
+        reBtn.title = '这些游戏还在用旧版（0.3.x）帧生成资产：' +
+          legacyGames.map(function (g) { return g.name; }).join('、');
+      } else {
+        reBtn.classList.add('hidden');
+      }
+    }
     if ($('lib-sub')) {
       var s = GAMES.length + ' 个游戏';
       if (SCANNED_AT) s += ' · 上次扫描 ' + SCANNED_AT;
       $('lib-sub').textContent = s;
     }
     refreshWall();
+  }
+
+  /** 把一批"还在用旧版资产"的游戏统一重做成当前版本。
+   *
+   *  顺序有讲究：先 clean_legacy 清掉认得出的 0.3.x 遗留文件，再走正常部署 ——
+   *  部署本身只清得掉"记录里记过"的旧运行库，手动装过的那份没有记录，
+   *  只能靠 clean_legacy 按哈希逐个核对后删除（别人放的文件一律不碰）。
+   *  这一步必须由用户点（我们不会背着他删游戏目录里的东西）。 */
+  function redeployLegacy(list, optimized, frames, preset) {
+    var ok = [], bad = [];
+    var chain = Promise.resolve();
+    list.forEach(function (g, i) {
+      chain = chain.then(function () {
+        showBar('正在重新部署：' + g.name + '（' + (i + 1) + '/' + list.length + '）', (i + 1) / list.length);
+        var dir = g.target || g.dir;
+        // 清理失败不算致命：部署那一步还会清记录里的旧文件
+        return invoke('clean_legacy', { dir: dir })
+          .catch(function () { return null; })
+          .then(function () {
+            var proxy = (g.fgAssets && g.fgAssets.proxy) || PROXY;
+            return invoke('deploy_game', {
+              dir: dir, proxy: proxy, optimized: optimized, frames: frames, preset: preset
+            });
+          })
+          .then(function () { ok.push(g.name); })
+          .catch(function (e) { bad.push(g.name + '（' + errText(e) + '）'); });
+      });
+    });
+    return chain.then(function () {
+      hideBarLater(1200);
+      var msg = '重新部署完成：成功 ' + ok.length + ' 个';
+      if (bad.length) msg += '\n失败 ' + bad.length + ' 个：\n· ' + bad.join('\n· ');
+      toast(msg, bad.length ? 'warn' : 'ok', bad.length ? 20000 : 8000);
+      return refreshLibrary();
+    });
+  }
+
+  function legacyGamesNow() {
+    return GAMES.filter(function (g) { return g.fgAssets && g.fgAssets.legacy; });
+  }
+
+  /** 用户点「重新部署旧版游戏」：先确认（列出是哪些游戏），再干。 */
+  function redeployLegacyAll() {
+    var list = legacyGamesNow();
+    if (!list.length) { toast('没有还在用旧版资产的游戏', 'info', 5000); return Promise.resolve(); }
+    var optimized = CFG ? CFG.optimized : 2;
+    var frames = CFG ? CFG.frames : 3;
+    var preset = (CFG && CFG.preset) || (CFG && CFG.defaultPreset) || 'C';
+    return uiConfirm({
+      title: '重新部署 ' + list.length + ' 个游戏',
+      ok: '全部重新部署',
+      rows: [
+        ['游戏', list.map(function (g) { return g.name; }).join('、')],
+        ['优化等级', optLabelOf(optimized)],
+        ['倍率上限', frmLabelOf(frames)],
+        ['DLSS-G 预设', presetLabelOf(preset)]
+      ],
+      body: '会先清掉这些游戏目录里认得出的旧版（0.3.x）帧生成文件，再部署当前版本（0.4.0）。\n' +
+            '删除前逐个核对内容，不是你那份就不会动；游戏原件有备份的照常保留，之后仍可单独「还原」。\n\n' +
+            '请先完全退出这些游戏 —— 文件被占用会失败。'
+    }).then(function (yes) {
+      if (!yes) return;
+      return redeployLegacy(list, optimized, frames, preset);
+    });
+  }
+
+  /* 本次运行已经弹过提示了。
+     为什么需要它：启动时 refreshLibrary 会被调用好几次（初次加载、扫描完、封面下完），
+     每次都会排一个延时调用 —— 两个定时器可能在 set_config 的回包回来之前**同时**触发，
+     于是用户看到两个一模一样的提示叠在一起（实测复现）。这个标志是同步置位的，挡得住。 */
+  var LEGACY_PROMPT_DONE = false;
+
+  /** 升级后第一次打开：库里还有游戏在用旧版资产时问一句（每个程序版本只问一次）。 */
+  function maybePromptLegacyUpgrade() {
+    if (!CFG || LEGACY_PROMPT_DONE) return Promise.resolve();
+    var ver = CFG.version || '';
+    if (!ver || CFG.legacyPrompted === ver) return Promise.resolve();
+    var list = legacyGamesNow();
+    if (!list.length) return Promise.resolve();
+    // 同步置位：后面全是异步，不先挡住就会出现重复提示
+    LEGACY_PROMPT_DONE = true;
+    var optimized = CFG.optimized;
+    var frames = CFG.frames;
+    var preset = CFG.preset || CFG.defaultPreset || 'C';
+    /* 先记下"问过了"再弹：用户点「稍后」也算问过，否则每次启动都弹一次。 */
+    return invoke('set_config', {
+      optimized: optimized, frames: frames, preset: preset, legacyPrompted: ver
+    }).then(function (c) { CFG = c; }).catch(function () { /* 记不住就下次再问，不致命 */ })
+      .then(function () {
+        return uiConfirm({
+          title: '检测到还在用旧版帧生成的游戏',
+          ok: '全部清理并重新部署',
+          cancel: '稍后再说',
+          rows: [
+            ['游戏', list.map(function (g) { return g.name; }).join('、')],
+            ['当前资产', '0.3.x（代理 28.6 MB，运行库铺在游戏根目录）'],
+            ['新版资产', '0.4.0（运行库进 dlssg_sm86\\ 目录，附 310.9.16 运行库）']
+          ],
+          body: '新版把运行库和后端搬进了 dlssg_sm86\\ 目录，旧版那几份留在游戏目录里可能被游戏优先加载。\n' +
+                '点「全部清理并重新部署」会：先按内容核对删掉旧的 0.3.x 文件，再把新版铺上去。\n\n' +
+                '想自己逐个处理就点「稍后再说」：在游戏卡片上能看到「资产 0.3.x」徽章，进去单独部署即可。'
+        }).then(function (yes) {
+          if (yes) return redeployLegacy(list, optimized, frames, preset);
+        });
+      });
   }
 
   function refreshLibrary() {
@@ -933,6 +1065,9 @@
       SCANNED_AT = (data && data.scannedAt) || '';
       LIB_PATH = (data && data.libraryPath) || '';
       paintLibrary();
+      /* 升级后第一次打开时问一句（库里还有旧版部署的话）。
+         延迟一点：先让用户看到列表，别一进来就被弹窗糊脸。 */
+      setTimeout(function () { maybePromptLegacyUpgrade(); }, 1500);
       // 列表先出来，图标随后到（拉不到就保持封面/首字，不挡列表）
       loadGameIcons();
       // 封面也随后补：本地没有的才去网上下，下完自动重画卡片墙
@@ -1222,6 +1357,51 @@
 
     var stateLabel = g.deployed || '未部署';
     var stateEl = h('b', { text: stateLabel, class: stateCls(stateLabel) });
+    /* 旧版（0.3.x）遗留文件：列出来 + 一个清理按钮。
+       为什么要单独一个按钮：那两份 NVIDIA 运行库既不在新清单里、也无法从签名上认出来
+       （NVIDIA 自己签的，游戏自带的也是同一份签名），所以「部署」清不掉它们 ——
+       只能由用户点一下，我们逐个核对哈希再删（别人放的文件一律不碰）。 */
+    var legacyBox = null;
+    (function () {
+      var fga = g.fgAssets;
+      if (!fga || !fga.legacy || !fga.leftovers || !fga.leftovers.length) return;
+      var mb = function (x) { return (x / 1048576).toFixed(1) + ' MB'; };
+      var total = fga.leftovers.reduce(function (a, x) { return a + x.size; }, 0);
+      var names = fga.leftovers.map(function (x) { return x.name; }).join('、');
+      var cleanBtn = h('button', { class: 'btn small', type: 'button', text: '清理旧版文件' });
+      cleanBtn.addEventListener('click', function () {
+        uiConfirm({
+          title: '清理旧版（0.3.x）文件',
+          ok: '清理',
+          rows: [
+            ['目录', targetDir],
+            ['要删的文件', fga.leftovers.map(function (x) { return x.name + '（' + mb(x.size) + '）'; }).join('、')]
+          ],
+          body: '这些是本项目 0.3.x 时代铺进游戏目录、新版已经不需要的文件。\n' +
+                '删除前会逐个核对内容（哈希）—— 不是你那份就不会动。\n' +
+                '删完记得再点一次「部署」，游戏目录才不会缺文件。'
+        }).then(function (yes) {
+          if (!yes) return;
+          cleanBtn.disabled = true;
+          invoke('clean_legacy', { dir: targetDir }).then(function (r) {
+            cleanBtn.disabled = false;
+            toast((r && r.msg) || '已清理', 'ok', 12000);
+            return refreshLibrary();
+          }).catch(function (e) {
+            cleanBtn.disabled = false;
+            toast('清理失败：' + errText(e), 'warn', 14000);
+          });
+        });
+      });
+      legacyBox = h('div', { class: 'kv kvtop' }, [
+        h('span', { text: '旧版文件' }),
+        h('div', {}, [
+          h('div', { class: 'hint err', text: '还留着 0.3.x 的 ' + fga.leftovers.length + ' 个文件（' + mb(total) + '）：' + names }),
+          h('p', { class: 'hint', text: '这些不会被「部署」自动清掉（无法确认是不是游戏自带的），点下面的按钮由你确认后清理。' }),
+          h('div', { class: 'row' }, [cleanBtn])
+        ])
+      ]);
+    })();
     var deployBtn = h('button', { class: 'btn primary', type: 'button', text: '部署' });
     var restoreBtn = h('button', { class: 'btn', type: 'button', text: '还原' });
     /* 没部署过就没有东西可还原 —— 灰掉，不要让人点了才发现没意义（用户要求）。
@@ -1353,6 +1533,7 @@
         h('div', { class: 'kv' }, [h('span', { text: '倍率上限' }), frmSel]),
         h('div', { class: 'kv' }, [h('span', { text: 'DLSS-G 预设' }), preSel]),
         h('div', { class: 'kv' }, [h('span', { text: '部署状态' }), stateEl]),
+        legacyBox,
         adviceBox,
         readiness
       ]),
@@ -1379,6 +1560,10 @@
     var dfltPreset = (CFG && CFG.defaultPreset) || 'C';
     if (!(optimized === (CFG ? CFG.defaultOptimized : 2) && frames === (CFG ? CFG.defaultFrames : 3) && preset === dfltPreset)) {
       body += '\n这几个档位会被写进游戏目录那份 dlssg_sm86.ini（资产里的原文件不动）。';
+    }
+    if (g.fgAssets && g.fgAssets.leftovers && g.fgAssets.leftovers.length) {
+      body += '\n\n这个目录里还留着旧版（0.3.x）的 ' + g.fgAssets.leftovers.length +
+        ' 个文件，它们不会被自动清理（无法确认是不是游戏自带的）—— 部署完可以用详情里的「清理旧版文件」处理。';
     }
     if (g.acAny) body += '\n\n注意：这个游戏有反作弊（' + g.ac + '）。';
     uiConfirm({
@@ -2187,6 +2372,9 @@
        所以窗口重新获得焦点时主动刷一次资产状态 —— 否则卡片会一直显示旧数据。 */
     window.addEventListener('focus', function () { if (ASSETS_DIR !== null) refreshAssets().catch(function () { }); });
     if ($('btn-scan')) $('btn-scan').addEventListener('click', scanLibrary);
+    if ($('btn-redeploy-legacy')) {
+      $('btn-redeploy-legacy').addEventListener('click', function () { redeployLegacyAll(); });
+    }
     /* 右上角那个「检查更新」是**软件版本**检查（用户要求）；上游资产检查在左侧「检查更新」。 */
     if ($('btn-check')) $('btn-check').addEventListener('click', function () { busy(this, '检查中…', function () { return checkSelfUpdate(); }); });
 

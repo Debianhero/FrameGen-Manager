@@ -387,6 +387,10 @@ pub struct AppConfig {
     /// 出厂默认 C（FG Lite）；界面给 Auto / A / B / C。空串按出厂默认处理。
     #[serde(default = "default_fg_preset")]
     pub fg_preset: String,
+    /// 上次"检测到旧版帧生成、要不要统一重做"这个提示是按哪个程序版本弹的。
+    /// 记版本号而不是布尔值：升级到下一个版本时应该再问一次。
+    #[serde(default)]
+    pub legacy_prompt_version: String,
     /// 上次用的**窗口大小**（逻辑点）。
     ///
     /// 以前窗口大小是写死的：用户嫌右侧游戏名/路径被挤掉、手动拉宽，下次启动又回到
@@ -418,6 +422,7 @@ impl Default for AppConfig {
             fg_optimized: default_fg_optimized(),
             fg_frames: default_fg_frames(),
             fg_preset: default_fg_preset(),
+            legacy_prompt_version: String::new(),
             window_size: None,
         }
     }

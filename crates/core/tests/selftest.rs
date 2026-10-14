@@ -474,6 +474,40 @@ fn selftest() -> usize {
     // 上游 0.3.0 换过文件名、路径和 README 写法，下面这两组断言就是防它再改一次
     let mut fails: Vec<String> = Vec::new();
 
+    println!("\n--- 旧版（0.3.x）资产指纹表 ---");
+    {
+        use framegen_core::deploy::LEGACY_ARTIFACTS;
+        // 这张表是手抄的（从 1.0.7 安装包的资产算出来），抄错一个字符就会静默失效：
+        // 该认出来的旧文件认不出来 → 又会被当成"游戏原件"备份 → 还原时塞回游戏目录。
+        // 所以这里钉住几条能机械检查的性质。
+        let mut names: Vec<&str> = Vec::new();
+        let mut ok = !LEGACY_ARTIFACTS.is_empty();
+        for (n, size, sha) in LEGACY_ARTIFACTS {
+            if names.contains(n) {
+                ok = false;
+                println!("    [FAIL] 指纹表里有重名：{n}");
+            }
+            names.push(n);
+            if *size == 0 || sha.len() != 64 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+                ok = false;
+                println!("    [FAIL] 指纹表条目格式不对：{n} size={size} sha={sha}");
+            }
+        }
+        ck(&mut fails, ok, "指纹表：无重名、大小非零、哈希都是 64 位十六进制");
+        // 9 个文件：6 个代理入口 + 两份运行库 + 一份 INI
+        ck(
+            &mut fails,
+            LEGACY_ARTIFACTS.len() == 9,
+            "指纹表应当覆盖 0.3.x 那一套的 9 个文件",
+        );
+        // 长度不符的内容必须立刻被判否（先比大小的短路不能漏）
+        ck(
+            &mut fails,
+            !framegen_core::deploy::is_legacy_artifact_like("version.dll", &[0u8; 16]),
+            "内容明显不符时不能误判成旧版文件",
+        );
+    }
+
     println!("\n--- 部署用的 INI 档位改写 ---");
     {
         let dir = std::env::temp_dir().join("fgm-ini-tiers");

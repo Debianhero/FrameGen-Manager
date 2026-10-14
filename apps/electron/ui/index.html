@@ -91,6 +91,9 @@
           <!-- 「已被移除的游戏」：原来这里是左栏一块常驻面板（一串路径），现在和 DLSS5 页
                统一成同一个入口 —— 按钮 + 和游戏库一样的卡片（用户要求）。 -->
           <button class="btn" id="btn-removed-games" type="button" title="看看从游戏库里移除过哪些游戏，可以放回来">已被移除的游戏</button>
+          <!-- 只在库里真有旧版（0.3.x）部署时出现：统一清掉旧文件再重新部署一遍。
+               平时 hidden，不占地方（用户要求：升级后能一次性把旧的换掉）。 -->
+          <button class="btn hidden" id="btn-redeploy-legacy" type="button">重新部署旧版游戏</button>
           <button class="btn primary" id="btn-scan" type="button" title="扫描 Steam / Epic / WeGame 的游戏库（只读）">扫描游戏库</button>
         </div>
       </div>
