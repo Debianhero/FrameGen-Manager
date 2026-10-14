@@ -485,10 +485,11 @@ fn selftest() -> usize {
             &src,
             framegen_core::update::DEFAULT_OPTIMIZED,
             framegen_core::update::DEFAULT_MAX_FRAMES,
+            "",
         )
         .unwrap();
         ck(&mut fails, p == src && n.is_empty(), "默认档位：直接用上游原文件，不做任何改写");
-        let (p2, n2) = framegen_core::update::prepare_deploy_ini(&src, 2, 5).unwrap();
+        let (p2, n2) = framegen_core::update::prepare_deploy_ini(&src, 2, 5, "").unwrap();
         let txt = std::fs::read_to_string(&p2).unwrap_or_default();
         ck(
             &mut fails,
@@ -510,7 +511,7 @@ fn selftest() -> usize {
         std::fs::write(&slim, "; slim\n[General]\nEnabled=1\n").unwrap();
         ck(
             &mut fails,
-            framegen_core::update::prepare_deploy_ini(&slim, 3, 5).is_ok(),
+            framegen_core::update::prepare_deploy_ini(&slim, 3, 5, "").is_ok(),
             "INI 里没有那两个键也不报错（照旧部署）",
         );
         let _ = std::fs::remove_dir_all(&dir);

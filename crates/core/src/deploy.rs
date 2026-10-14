@@ -992,6 +992,7 @@ pub fn prepare_deploy(
     proxy: &str,
     fg_optimized: u8,
     fg_frames: u8,
+    fg_preset: &str,
 ) -> Result<PreparedDeploy> {
     let mut files = Vec::new();
     let mut notes = Vec::new();
@@ -1057,7 +1058,7 @@ pub fn prepare_deploy(
 
     let asset_ini = crate::update::asset_path(crate::update::INI_REPO_PATH).unwrap_or_default();
     let (ini_path, ini_notes) =
-        crate::update::prepare_deploy_ini(&asset_ini, fg_optimized, fg_frames)?;
+        crate::update::prepare_deploy_ini(&asset_ini, fg_optimized, fg_frames, fg_preset)?;
     for n in ini_notes {
         notes.push(n);
     }
@@ -1160,6 +1161,46 @@ pub const SR_INVENTORY: &[(&str, u64, &str)] = &[
     ),
 ];
 
+/// 按分发表检查资产（**只看在不在、大小对不对**，不算哈希）。
+///
+/// 和 verify_asset_inventory 的分工：这个给界面用，每次聚焦窗口都会调，
+/// 所以必须是纯 stat 的廉价操作；哈希校验留在部署前做（那时一次就够，慢一点无妨）。
+pub fn asset_inventory_gaps(root: &Path) -> Vec<String> {
+    let mut bad = Vec::new();
+    for (rel, size, _sha) in ASSET_INVENTORY.iter().chain(SR_INVENTORY.iter()) {
+        let p = root.join(rel);
+        match std::fs::metadata(&p) {
+            Ok(m) if m.len() == *size => {}
+            Ok(m) => bad.push(format!("{rel}（大小 {} ≠ {}）", m.len(), size)),
+            Err(_) => bad.push(format!("{rel}（缺失）")),
+        }
+    }
+    bad
+}
+
+/// 列出 dlssg_sm86\\ 运行库目录里的文件（相对该目录的路径 + 字节数），按路径排序。
+/// 界面用它把"新版资产到底铺了哪些文件"摊开给人看。
+pub fn runtime_dir_files(root: &Path) -> Vec<(String, u64)> {
+    let dir = root.join(RUNTIME_DIR);
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(&dir)
+            .map(|r| r.to_string_lossy().replace('/', std::path::MAIN_SEPARATOR_STR))
+            .unwrap_or_default();
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if !rel.is_empty() {
+            out.push((rel, size));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// 按上面的分发表检查资产目录。返回不合格的说明（空 = 全部合格）。
 ///
 /// 只查分发那一套（代理 + INI + dlssg_sm86\ 里必须有那几个）；超分 sr\ 是可选项，
@@ -1212,8 +1253,9 @@ pub fn deploy_game(
     proxy: &str,
     fg_optimized: u8,
     fg_frames: u8,
+    fg_preset: &str,
 ) -> Result<(String, Vec<String>)> {
-    let prep = prepare_deploy(dir, proxy, fg_optimized, fg_frames)?;
+    let prep = prepare_deploy(dir, proxy, fg_optimized, fg_frames, fg_preset)?;
     let msg = deploy(dir, proxy, &prep.files, &[])?;
     Ok((msg, prep.notes))
 }

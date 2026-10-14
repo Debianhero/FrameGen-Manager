@@ -383,6 +383,10 @@ pub struct AppConfig {
     /// 部署时写进 INI 的「倍率上限」（3 = 最高 4X 出厂默认；5 = 最高 6X）。
     #[serde(default = "default_fg_frames")]
     pub fg_frames: u8,
+    /// 部署时写进 INI 的 DLSS-G 渲染预设（0.4.0 的 [DLSSG] Preset）。
+    /// 空串 = 不碰这一项，用资产里的出厂值（Auto）；目前界面只给 Auto / C。
+    #[serde(default)]
+    pub fg_preset: String,
     /// 上次用的**窗口大小**（逻辑点）。
     ///
     /// 以前窗口大小是写死的：用户嫌右侧游戏名/路径被挤掉、手动拉宽，下次启动又回到
@@ -409,6 +413,7 @@ impl Default for AppConfig {
             backup_prefix: String::new(),
             fg_optimized: default_fg_optimized(),
             fg_frames: default_fg_frames(),
+            fg_preset: String::new(),
             window_size: None,
         }
     }

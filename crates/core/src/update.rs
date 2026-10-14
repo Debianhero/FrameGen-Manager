@@ -1021,20 +1021,38 @@ pub const DEFAULT_MAX_FRAMES: u8 = 3;
 
 /// 把「键=值」这一行改掉，其它内容（包括注释和顺序）原样保留。
 /// 找不到这个键就返回 None —— 调用方保持原样并说明一句，而不是报错。
-fn ini_set_key(text: &str, key: &str, value: &str) -> Option<String> {
+/// 改 INI 里某一项的值。section = Some("[DLSSG]") 时只改那一段里的；None 时不限段（老行为）。
+///
+/// 为什么必须分段：上游 0.4.0 把 Optimized / Preset 从别的段挪进了 [DLSSG]，
+/// 而 Preset 这种键名很容易在别的段里也有，不分段就会改错地方。
+fn ini_set_key_in(
+    text: &str,
+    section: Option<&str>,
+    key: &str,
+    value: &str,
+) -> Option<String> {
+    let mut cur_section = String::new();
     let mut found = false;
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
         let t = line.trim();
-        if !t.starts_with(';') && !t.starts_with('#') {
-            if let Some(rest) = t.strip_prefix(key) {
-                if rest.strip_prefix('=').is_some() {
-                    out.push_str(&format!("{key}={value}"));
-                    if line.ends_with('\n') {
-                        out.push('\n');
+        if t.starts_with('[') && t.ends_with(']') {
+            cur_section = t.to_owned();
+        } else if !t.starts_with(';') && !t.starts_with('#') {
+            let in_wanted = match section {
+                Some(want) => cur_section == want,
+                None => true,
+            };
+            if in_wanted {
+                if let Some(rest) = t.strip_prefix(key) {
+                    if rest.starts_with('=') {
+                        out.push_str(&format!("{key}={value}"));
+                        if line.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        found = true;
+                        continue;
                     }
-                    found = true;
-                    continue;
                 }
             }
         }
@@ -1058,20 +1076,33 @@ pub fn prepare_deploy_ini(
     upstream: &Path,
     optimized: u8,
     max_frames: u8,
+    preset: &str,
 ) -> Result<(PathBuf, Vec<String>)> {
     if !upstream.is_file() {
         bail!("还没有下载 {INI_REPO_PATH}, 请先点「下载 / 更新资产」");
     }
-    if optimized == DEFAULT_OPTIMIZED && max_frames == DEFAULT_MAX_FRAMES {
+    // preset 留空 = 用资产里的出厂值（Auto），不用生成部署用 INI
+    if optimized == DEFAULT_OPTIMIZED && max_frames == DEFAULT_MAX_FRAMES && preset.is_empty() {
         return Ok((upstream.to_path_buf(), Vec::new()));
     }
     let mut out = std::fs::read_to_string(upstream).context("读取 INI 失败")?;
     let mut notes: Vec<String> = Vec::new();
-    for (key, value, what) in [
-        ("Optimized", optimized.to_string(), "优化等级"),
-        ("MaxGeneratedFrames", max_frames.to_string(), "倍率上限"),
-    ] {
-        match ini_set_key(&out, key, &value) {
+    /* 段名跟着上游 0.4.0：Optimized 与 Preset 在 [DLSSG]，MaxGeneratedFrames 在
+       [FrameGeneration]。找不到段时退回"不限段"查找，这样老版 INI 也还能改。 */
+    let preset_value = if preset.is_empty() { "Auto".to_owned() } else { preset.to_owned() };
+    let jobs: [(Option<&str>, &str, String, &str); 3] = [
+        (Some("[DLSSG]"), "Optimized", optimized.to_string(), "优化等级"),
+        (None, "MaxGeneratedFrames", max_frames.to_string(), "倍率上限"),
+        (Some("[DLSSG]"), "Preset", preset_value, "DLSS-G 预设"),
+    ];
+    for (section, key, value, what) in jobs {
+        // 预设留空 = 不碰这一项
+        if key == "Preset" && preset.is_empty() {
+            continue;
+        }
+        let hit = ini_set_key_in(&out, section, key, &value)
+            .or_else(|| ini_set_key_in(&out, None, key, &value));
+        match hit {
             Some(new) => {
                 notes.push(format!("{what} {key}={value}"));
                 out = new;

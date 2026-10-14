@@ -293,28 +293,44 @@ fn assets_status() -> Value {
         missing += 1;
     }
 
-    let mut fg_files: Vec<Value> = Vec::new();
+    /* 0.4.0 起运行库/后端/内核都在 <资产目录>\dlssg_sm86\ 里，**不在资产目录顶层**。
+       以前这里是"在顶层找 nvngx_dlssg.dll / nvngx_dlss.dll"，于是新版资产一装上来
+       卡片就报「缺 2 个运行库」——用户在界面上看到的是"资产不完整"，其实好好的。
+       现在按分发表检查（只看在不在、大小对不对），并把整个目录摊开列给人看。 */
+    let mut runtime_files: Vec<Value> = Vec::new();
     let mut sr_files: Vec<Value> = Vec::new();
-    for (_prefix, _tag, _zip, dll, _label) in framegen_core::update::DLSS_RUNTIME {
-        let present = dir.join(dll).is_file();
-        if !present {
-            missing += 1;
-        }
-        let item = json!({ "name": dll, "present": present, "size": size_of(dll), "hint": "" });
-        // nvngx_dlssg = 帧生成，nvngx_dlss = 超分
-        if dll.contains("dlssg") {
-            fg_files.push(item);
-        } else {
+    for (rel, size) in framegen_core::deploy::runtime_dir_files(&dir) {
+        let item = json!({
+            "name": rel,
+            "present": true,
+            "size": size,
+            "hint": if rel.starts_with("sr\\") { "超分（可选，出厂关闭）" }
+                    else if rel.starts_with("xefg\\") { "XeSS-FG（可选，出厂关闭）" }
+                    else { "" },
+        });
+        if rel.starts_with("sr\\") {
             sr_files.push(item);
+        } else {
+            runtime_files.push(item);
         }
     }
-
-    let groups = json!([
-        { "title": "帧生成配置", "files": [ json!({ "name": ini, "present": ini_present, "size": size_of(ini), "hint": "" }) ] },
-        { "title": "帧生成 Mod 代理入口", "files": proxy_files },
-        { "title": "DLSS 帧生成运行库", "files": fg_files },
-        { "title": "DLSS 超分运行库", "files": sr_files },
-    ]);
+    // 缺什么按分发表算：必备的进 missing，可选的（超分那两个）只列出来不报警
+    let gaps = framegen_core::deploy::asset_inventory_gaps(&dir);
+    missing += gaps.len();
+    let mut groups: Vec<Value> = vec![
+        json!({ "title": "帧生成配置", "files": [ json!({ "name": ini, "present": ini_present, "size": size_of(ini), "hint": "" }) ] }),
+        json!({ "title": "帧生成 Mod 代理入口", "files": proxy_files }),
+    ];
+    if !runtime_files.is_empty() {
+        groups.push(json!({
+            "title": format!("运行库目录 {}\\", framegen_core::deploy::RUNTIME_DIR),
+            "files": runtime_files,
+        }));
+    }
+    if !sr_files.is_empty() {
+        groups.push(json!({ "title": "超分文件（可选）", "files": sr_files }));
+    }
+    let groups = Value::Array(groups);
 
     json!({
         "dir": dir.display().to_string(),
@@ -1403,7 +1419,7 @@ fn proxy_advice(dir: String) -> Result<Value, String> {
 ///
 /// 抽出来是为了让**命令行自测**（--deploytest）和界面走的是同一段代码 ——
 /// 否则「自测过了」和「界面上能用」是两件事。sidecar 里这条同样成立。
-fn deploy_impl(dir: &str, proxy: &str, optimized: u8, frames: u8) -> Result<(String, Vec<String>), String> {
+fn deploy_impl(dir: &str, proxy: &str, optimized: u8, frames: u8, preset: &str) -> Result<(String, Vec<String>), String> {
     let gpu = framegen_core::scan::detect_gpu().unwrap_or_default();
     let route = framegen_core::scan::classify_gpu(&gpu);
     if let Some(why) = route.gate() {
@@ -1426,11 +1442,13 @@ fn deploy_impl(dir: &str, proxy: &str, optimized: u8, frames: u8) -> Result<(Str
     framegen_core::log::line(&format!(
         "部署档位：优化等级 {optimized}、倍率上限 {frames} ｜ {dir} ｜ 入口 {proxy}"
     ));
-    framegen_core::deploy::deploy_game(Path::new(dir), proxy, optimized, frames).map_err(|e| format!("{e:#}"))
+    framegen_core::deploy::deploy_game(Path::new(dir), proxy, optimized, frames, preset)
+        .map_err(|e| format!("{e:#}"))
 }
 
-fn deploy_game(dir: String, proxy: String, optimized: u8, frames: u8) -> Result<Value, String> {
-    let (msg, notes) = deploy_impl(&dir, &proxy, optimized, frames)?;
+fn deploy_game(dir: String, proxy: String, optimized: u8, frames: u8, preset: Option<String>) -> Result<Value, String> {
+    let preset = preset.unwrap_or_default();
+    let (msg, notes) = deploy_impl(&dir, &proxy, optimized, frames, &preset)?;
     Ok(json!({ "msg": msg, "notes": notes }))
 }
 
@@ -1494,10 +1512,12 @@ fn frames_label(v: u8) -> &'static str {
 fn get_config() -> Value {
     let cfg = framegen_core::util::load_config();
     let is_default = cfg.fg_optimized == framegen_core::update::DEFAULT_OPTIMIZED
-        && cfg.fg_frames == framegen_core::update::DEFAULT_MAX_FRAMES;
+        && cfg.fg_frames == framegen_core::update::DEFAULT_MAX_FRAMES
+        && cfg.fg_preset.is_empty();
     json!({
         "optimized": cfg.fg_optimized,
         "frames": cfg.fg_frames,
+        "preset": cfg.fg_preset,
         "optimizedLabel": optimized_label(cfg.fg_optimized),
         "framesLabel": frames_label(cfg.fg_frames),
         "defaultOptimized": framegen_core::update::DEFAULT_OPTIMIZED,
@@ -1517,7 +1537,7 @@ fn get_config() -> Value {
 
 /// 改部署档位：只接受上游真正支持的取值 —— 别让前端传进来的怪数字写进配置
 /// （0~3 是已知四档；倍率上限只有 3=4X 和 5=6X 两种）
-fn set_config(optimized: u8, frames: u8) -> Result<Value, String> {
+fn set_config(optimized: u8, frames: u8, preset: String) -> Result<Value, String> {
     if optimized > 3 {
         return Err(format!("优化等级只能是 0~3（收到 {optimized}）"));
     }
@@ -1527,9 +1547,13 @@ fn set_config(optimized: u8, frames: u8) -> Result<Value, String> {
             framegen_core::update::DEFAULT_MAX_FRAMES
         ));
     }
+    if !matches!(preset.as_str(), "" | "Auto" | "C") {
+        return Err(format!("DLSS-G 预设只支持 Auto / C（收到 {preset}）"));
+    }
     let mut cfg = framegen_core::util::load_config();
     cfg.fg_optimized = optimized;
     cfg.fg_frames = frames;
+    cfg.fg_preset = if preset == "Auto" { String::new() } else { preset };
     framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
     framegen_core::log::line(&format!(
         "部署档位改为：优化等级 {optimized}（{}）、倍率上限 {}",
@@ -1742,6 +1766,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             arg_str(args, "proxy")?,
             arg_u8(args, "optimized")?,
             arg_u8(args, "frames")?,
+            arg_opt_str(args, "preset")?,
         ),
         "restore" => Ok(Value::String(restore(arg_str(args, "dir")?)?)),
 
@@ -1773,7 +1798,11 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
 
 
         "get_config" => Ok(get_config()),
-        "set_config" => set_config(arg_u8(args, "optimized")?, arg_u8(args, "frames")?),
+        "set_config" => set_config(
+            arg_u8(args, "optimized")?,
+            arg_u8(args, "frames")?,
+            arg_opt_str(args, "preset")?.unwrap_or_default(),
+        ),
         "check_self_update" => check_self_update(),
         "self_update_download" => self_update_download(id, args),
 
@@ -1966,7 +1995,7 @@ fn gpu_spoof_state() -> Result<Value, String> {
 fn selftest(argv: &[String]) -> bool {
     if let Some(i) = argv.iter().position(|a| a == "--deploytest") {
         if let Some(dir) = argv.get(i + 1) {
-            match deploy_impl(dir, "version.dll", 1, framegen_core::update::DEFAULT_MAX_FRAMES) {
+            match deploy_impl(dir, "version.dll", 1, framegen_core::update::DEFAULT_MAX_FRAMES, "") {
                 Ok((msg, notes)) => {
                     framegen_core::log::line(&format!("[deploytest] 部署成功：{msg}"));
                     for n in &notes {

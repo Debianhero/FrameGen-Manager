@@ -609,6 +609,13 @@
     [3, '4X（出厂默认）'],
     [5, '6X（要游戏自带的插件也支持）']
   ];
+  /* DLSS-G 渲染预设（0.4.0 的 [DLSSG] Preset）。空串 = 不写这一项，用资产里的出厂值。
+   * preset C（FG Lite）是 0.4.0 新给的档：每生成帧的 GPU 时间明显更低，画质略低
+   * （主要影响 HUD 与遮挡边缘）。*/
+  var PRESET_LABELS = [
+    ['', '跟随出厂（Auto）'],
+    ['C', 'C · FG Lite：开销更低，画质略低']
+  ];
 
   function fillSelect(sel, pairs, value) {
     if (!sel) return;
@@ -636,11 +643,20 @@
     return String(v);
   }
   function frmLabelOf(v) { return Number(v) >= 5 ? '6X' : '4X'; }
+  function presetLabelOf(v) {
+    for (var i = 0; i < PRESET_LABELS.length; i++) {
+      if (String(PRESET_LABELS[i][0]) === String(v || '')) return PRESET_LABELS[i][1];
+    }
+    return v ? String(v) : '跟随出厂（Auto）';
+  }
 
   /** 把这次用的档位记下来当默认值（下次打开详情就是上次的选择） */
-  function rememberDeployLevels(optimized, frames) {
-    if (CFG && CFG.optimized === optimized && CFG.frames === frames) return Promise.resolve();
-    return invoke('set_config', { optimized: optimized, frames: frames })
+  function rememberDeployLevels(optimized, frames, preset) {
+    var p = preset || '';
+    if (CFG && CFG.optimized === optimized && CFG.frames === frames && (CFG.preset || '') === p) {
+      return Promise.resolve();
+    }
+    return invoke('set_config', { optimized: optimized, frames: frames, preset: p })
       .then(function (c) { CFG = c; return c; })
       .catch(function (e) {
         // 记不住不影响这次部署（值已经在 deploy_game 里传过去了）
@@ -1191,7 +1207,15 @@
     OPT_LABELS.forEach(function (p) { optSel.appendChild(h('option', { value: p[0], text: p[1] })); });
     var frmSel = h('select', { class: 'input' });
     FRAME_LABELS.forEach(function (p) { frmSel.appendChild(h('option', { value: p[0], text: p[1] })); });
-    if (CFG) { optSel.value = String(CFG.optimized); frmSel.value = String(CFG.frames); }
+    /* DLSS-G 渲染预设（0.4.0 的 [DLSSG] Preset）：跟随出厂 / C（FG Lite）。
+       C 是上游 0.4.0 新给的档：生成帧的开销明显更低、画质略低。 */
+    var preSel = h('select', { class: 'input' });
+    PRESET_LABELS.forEach(function (p) { preSel.appendChild(h('option', { value: p[0], text: p[1] })); });
+    if (CFG) {
+      optSel.value = String(CFG.optimized);
+      frmSel.value = String(CFG.frames);
+      preSel.value = String(CFG.preset || '');
+    }
 
     var stateLabel = g.deployed || '未部署';
     var stateEl = h('b', { text: stateLabel, class: stateCls(stateLabel) });
@@ -1324,6 +1348,7 @@
         h('div', { class: 'kv' }, [h('span', { text: '代理入口' }), sel]),
         h('div', { class: 'kv' }, [h('span', { text: '优化等级' }), optSel]),
         h('div', { class: 'kv' }, [h('span', { text: '倍率上限' }), frmSel]),
+        h('div', { class: 'kv' }, [h('span', { text: 'DLSS-G 预设' }), preSel]),
         h('div', { class: 'kv' }, [h('span', { text: '部署状态' }), stateEl]),
         adviceBox,
         readiness
@@ -1341,15 +1366,15 @@
     var ov = openOverlay(dialog);
     closeBtn.addEventListener('click', function () { ov.close(); });
     deployBtn.addEventListener('click', function () {
-      doDeploy(g, targetDir, sel.value, stateEl, deployBtn, ov, Number(optSel.value), Number(frmSel.value));
+      doDeploy(g, targetDir, sel.value, stateEl, deployBtn, ov, Number(optSel.value), Number(frmSel.value), String(preSel.value || ''));
     });
     restoreBtn.addEventListener('click', function () { doRestore(g, targetDir, stateEl, ov); });
   }
 
-  function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames) {
+  function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset) {
     var body = '会先备份被覆盖的原件，之后可以一键还原。';
-    if (!(optimized === 1 && frames === 3)) {
-      body += '\n这两个档位会被写进游戏目录那份 dlssg_sm86.ini（资产里的原文件不动）。';
+    if (!(optimized === 2 && frames === 3 && !preset)) {
+      body += '\n这几个档位会被写进游戏目录那份 dlssg_sm86.ini（资产里的原文件不动）。';
     }
     if (g.acAny) body += '\n\n注意：这个游戏有反作弊（' + g.ac + '）。';
     uiConfirm({
@@ -1359,6 +1384,7 @@
         ['代理入口', proxy],
         ['优化等级', optLabelOf(optimized)],
         ['倍率上限', frmLabelOf(frames)],
+        ['DLSS-G 预设', presetLabelOf(preset)],
         ['部署目标', targetDir || '（未指定）']
       ],
       body: body
@@ -1368,11 +1394,12 @@
       stateEl.textContent = '部署中…';
       stateEl.className = '';
       showBar('正在部署…', 0.35);
-      invoke('deploy_game', { dir: targetDir, proxy: proxy, optimized: optimized, frames: frames }).then(function (r) {
-        rememberDeployLevels(optimized, frames);
+      invoke('deploy_game', { dir: targetDir, proxy: proxy, optimized: optimized, frames: frames, preset: preset }).then(function (r) {
+        rememberDeployLevels(optimized, frames, preset);
         stateEl.textContent = '已部署（' + proxy + '）';
         stateEl.className = 'ok';
-        var msg = '部署完成（优化等级 ' + optLabelOf(optimized) + '、倍率上限 ' + frmLabelOf(frames) + '）';
+        var msg = '部署完成（优化等级 ' + optLabelOf(optimized) + '、倍率上限 ' + frmLabelOf(frames) +
+          (preset ? '、DLSS-G 预设 ' + presetLabelOf(preset) : '') + '）';
         if (r && r.msg) msg += '\n' + r.msg;
         if (r && r.notes && r.notes.length) msg += '\n\n' + r.notes.join('\n');
         toast(msg, 'ok', 15000);
