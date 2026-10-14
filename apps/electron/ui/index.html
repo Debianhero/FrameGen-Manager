@@ -183,6 +183,10 @@
       <div class="row">
         <button class="btn primary" id="btn-self-update" type="button">检查新版本</button>
       </div>
+      <!-- 检查结果的说明。**这个元素以前漏了**：js 里一直在往 #self-note 写文字，
+           但 HTML 里没有它 —— 于是"已是最新（当前 v1.0.7）"这句话从来没显示过，
+           用户只看到上面那行「最新版本 1.1.2」，读成"有 1.1.2 更新但你们没发"（真实反馈）。 -->
+      <div class="hint" id="self-note">还没检查过。点上面的按钮看一眼。</div>
     </section>
 
     <section class="panel">

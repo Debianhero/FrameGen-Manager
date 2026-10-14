@@ -816,15 +816,32 @@
     busy($('btn-self-update'), '检查中…', function () {
       return invoke('check_self_update').then(function (r) {
         SELF = r;
+        /* 「最新版本」这一行必须区分三种情况。
+           以前的写法是"不管有没有更新都把 latest 显示出来"，于是用户看到
+           「最新版本 1.1.2」配一句「已是最新（当前 v1.0.7）」——
+           读起来就是"有 1.1.2 更新但你们没发"（真实反馈）。
+           根因：开发期间版本号先写进 main 分支，安装包还没发布。 */
         var el = $('ver-latest');
         if (el) {
-          el.textContent = r.latest || '读不到';
-          el.className = r.hasUpdate ? 'warn' : 'ok';
+          if (r.hasUpdate) {
+            el.textContent = r.latest;
+            el.className = 'warn';
+          } else if (r.unpublished) {
+            // 代码里有更大的版本号，但没有对应的安装包：明确标出来，别让人以为能升
+            el.textContent = r.latest + '（未发布）';
+            el.className = 'ok';
+          } else {
+            el.textContent = r.latest || '读不到';
+            el.className = 'ok';
+          }
         }
         if ($('self-note')) {
           $('self-note').textContent = r.hasUpdate
             ? ('有新版本 ' + r.latest + '（当前 v' + r.current + '）—— 会弹窗问你是否现在下载安装；也可以点「打开发布页」自己去下。')
-            : ('已是最新（当前 v' + r.current + '）。');
+            : (r.unpublished
+                ? ('已是最新（当前 v' + r.current + '）。开发中的版本号 ' + r.latest +
+                   ' 已经写进代码，但安装包还没发布，所以不提示更新、也下载不到。')
+                : ('已是最新（当前 v' + r.current + '）。'));
         }
         // 有新版本时，把「本次更新内容」显示在卡片里（可滚动；长文由 core 截断）
         var old = $('self-notes');
@@ -837,7 +854,15 @@
           pre.textContent = r.notes;
           $('self-note').parentNode.appendChild(pre);
         }
-        toast(r.hasUpdate ? ('发现新版本：' + r.latest) : ('已是最新：v' + r.current), r.hasUpdate ? 'info' : 'ok', 9000);
+        toast(
+          r.hasUpdate
+            ? ('发现新版本：' + r.latest)
+            : (r.unpublished
+                ? ('已是最新：v' + r.current + '（' + r.latest + ' 尚未发布）')
+                : ('已是最新：v' + r.current)),
+          r.hasUpdate ? 'info' : 'ok',
+          9000
+        );
       });
     });
   }

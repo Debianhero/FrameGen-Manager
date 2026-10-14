@@ -1655,6 +1655,10 @@ fn check_self_update() -> Result<Value, String> {
         "notes": if has_update { framegen_core::update::fetch_release_notes(&client) } else { None },
         "latest": latest,
         "hasUpdate": has_update,
+        /* 代码里已经写了更大的版本号、但 release 里还没有安装包。
+           单独给界面一个字段：设置页要把这种情况显示成"1.1.2（未发布）"，
+           否则用户会看到"最新版本 1.1.2"配一句"已是最新"，读成"有更新但你们没发"（真实反馈）。 */
+        "unpublished": newer && !has_update,
         "releasesUrl": framegen_core::update::RELEASES_URL,
     }))
 }

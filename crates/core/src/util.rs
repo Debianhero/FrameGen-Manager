@@ -387,6 +387,13 @@ pub struct AppConfig {
     /// 出厂默认 C（FG Lite）；界面给 Auto / A / B / C。空串按出厂默认处理。
     #[serde(default = "default_fg_preset")]
     pub fg_preset: String,
+    /// 优化等级从 0.3.x 时代的出厂值 1 迁到 0.4.0 的出厂值 2，只做一次。
+    ///
+    /// 为什么要迁移：老用户当年部署时，程序把当时的出厂值 1 记进了配置 —— 哪怕他从没主动选过。
+    /// 于是升级到 0.4.0 之后，对话框还替他选着 1（与官方逐位一致），永远拿不到 0.4.0 的出厂默认 2。
+    /// 这个标志保证只迁一次：用户之后自己改成 0/1/3 都不会再被动。
+    #[serde(default)]
+    pub optimized_migrated_to_2: bool,
     /// 上次"检测到旧版帧生成、要不要统一重做"这个提示是按哪个程序版本弹的。
     /// 记版本号而不是布尔值：升级到下一个版本时应该再问一次。
     #[serde(default)]
@@ -422,6 +429,7 @@ impl Default for AppConfig {
             fg_optimized: default_fg_optimized(),
             fg_frames: default_fg_frames(),
             fg_preset: default_fg_preset(),
+            optimized_migrated_to_2: false,
             legacy_prompt_version: String::new(),
             window_size: None,
         }
@@ -519,8 +527,24 @@ pub fn load_config() -> AppConfig {
     /* 老配置（1.1.2 之前）里没有 fg_preset 这一项：serde 会按默认值给 C，界面也用 C，
        但文件本身不体现 —— 用户打开配置文件看不到这一项，会以为没生效。
        这里补写回去一次，让文件和界面说的是同一件事。 */
+    let mut dirty = false;
     if !text.contains("\"fg_preset\"") {
         cfg.fg_preset = default_fg_preset();
+        dirty = true;
+    }
+    /* 出厂优化等级从 1 换成 2：把"当年那个旧出厂值"迁过来（只迁一次，见字段说明）。
+       只动 1：用户自己选的 0（不加速）或 3（全部有损）是明确的偏好，不能改。 */
+    if !cfg.optimized_migrated_to_2 {
+        if cfg.fg_optimized == 1 {
+            crate::log::line(
+                "优化等级：配置里还是 0.3.x 时代的出厂值 1，按 0.4.0 的出厂默认改成 2（想改回去在部署对话框里选）",
+            );
+            cfg.fg_optimized = 2;
+        }
+        cfg.optimized_migrated_to_2 = true;
+        dirty = true;
+    }
+    if dirty {
         let _ = save_config(&cfg);
     }
     cfg
