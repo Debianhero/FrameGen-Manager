@@ -504,10 +504,21 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn load_config() -> AppConfig {
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    let raw = std::fs::read_to_string(config_path()).ok();
+    let Some(text) = raw else {
+        return AppConfig::default();
+    };
+    let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&text) else {
+        return AppConfig::default();
+    };
+    /* 老配置（1.1.2 之前）里没有 fg_preset 这一项：serde 会按默认值给 C，界面也用 C，
+       但文件本身不体现 —— 用户打开配置文件看不到这一项，会以为没生效。
+       这里补写回去一次，让文件和界面说的是同一件事。 */
+    if !text.contains("\"fg_preset\"") {
+        cfg.fg_preset = default_fg_preset();
+        let _ = save_config(&cfg);
+    }
+    cfg
 }
 
 pub fn save_config(cfg: &AppConfig) -> Result<()> {
