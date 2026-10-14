@@ -87,7 +87,16 @@ pub fn plan_orphan(
 pub enum DeployState {
     NotDeployed,
     /// 本工具部署的（有 manifest，可以一键还原）
-    Deployed { proxy: String, deployed_at: String },
+    Deployed {
+        proxy: String,
+        deployed_at: String,
+        /// 这次部署是 0.3.x 的**旧布局**（运行库还铺在游戏根目录、没有 dlssg_sm86\ 目录）。
+        ///
+        /// 为什么要在界面上说出来：老用户升级到新版后，游戏目录里**还是旧布局** ——
+        /// 帧生成照常能用，但拿不到 0.4.0 的新运行库（310.9.16）和新内核。
+        /// 光看"已部署"三个字，用户根本不知道要再点一次「部署」才会换成新的。
+        legacy_layout: bool,
+    },
     /// 目录里有本项目的文件，但不是本工具部署的（用户之前手动装的）
     ManuallyInstalled { files: Vec<String> },
     /// 目录里有代理 DLL，但不是本项目的 —— 可能是别的 Mod
@@ -100,7 +109,18 @@ impl DeployState {
     pub fn label(&self) -> String {
         match self {
             DeployState::NotDeployed => "未部署".to_owned(),
-            DeployState::Deployed { proxy, .. } => format!("已部署 ({})", proxy),
+            DeployState::Deployed {
+                proxy,
+                legacy_layout,
+                ..
+            } => {
+                if *legacy_layout {
+                    // 前缀必须仍是"已部署"：界面的 stateCls 与还原按钮可用性都按它判断
+                    format!("已部署 ({proxy}) · 旧版资产，建议重新部署")
+                } else {
+                    format!("已部署 ({proxy})")
+                }
+            }
             DeployState::ManuallyInstalled { files } => {
                 // 「非本工具部署」容易被读成「部署失败了」，这里说清是「没有本工具的记录」
                 format!("已安装，本工具无记录（{}）", files.join("、"))
@@ -162,6 +182,8 @@ pub fn state_of(dir: &Path) -> DeployState {
         return DeployState::Deployed {
             proxy: m.proxy_name,
             deployed_at: m.deployed_at,
+            // 0.4.0 起运行库在 dlssg_sm86\ 里；这个目录不在，说明这份部署还是 0.3.x 的布局
+            legacy_layout: !dir.join(RUNTIME_DIR).is_dir(),
         };
     }
     // Smooth Motion 的解锁组件也叫 version.dll —— 先认出它，
@@ -588,7 +610,13 @@ pub fn deploy(
                     if std::fs::remove_file(&p).is_ok() {
                         removed_legacy.push(e.rel_path.clone());
                     } else {
+                        /* 删不掉（游戏正开着、文件被占用）：**记录必须传下去** ——
+                           下面 failed_remove 的说明写着"本次记录已保留，下次点「还原」仍可处理"，
+                           记录一丢那句话就是假的，那个旧运行库再也没人清得掉。
+                           restore 只在"文件仍是 deployed_sha256 那份"时才删（deploy.rs 第 2 步），
+                           所以传下去是安全的。 */
                         failed_remove.push(e.rel_path.clone());
+                        carried.push(e.clone());
                     }
                 }
                 continue;
