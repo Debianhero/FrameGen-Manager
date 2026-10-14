@@ -282,7 +282,9 @@
     });
   }
 
-  // 任何漏网的系统弹窗都拦回页面内；confirm 返回 false 是安全方向（不误触发破坏性操作）
+  // 任何漏网的系统弹窗都拦回页面内；confirm 返回 false 是安全方向（不误触发破坏性操作）。
+  // **注意**：它同步返回 false，所以「把返回值的真假当用户选择」的代码会静默走 false 分支 ——
+  // 需要用户确认的地方一律用 uiConfirm(...)（返回 Promise），不要再调 window.confirm。
   window.alert = function (m) { toast(String(m), 'info', 9000); };
   window.confirm = function (m) { uiConfirm({ title: '请确认', body: String(m) }); return false; };
 
@@ -1946,8 +1948,7 @@
         : '不满足要求时无法部署；原因见上面的提示。');
       var sub = document.getElementById('sm-sub');
       if (sub) sub.textContent = GAMES.length + ' 个游戏 · 一个游戏只能启用一个引擎（帧生成 / DLSS5 / Smooth Motion）';
-      paintSmList();
-      return r;
+      return paintSmList();
     }).catch(function (e) {
       setSmText('sm-note', '检测失败：' + errText(e));
       if (chips) chips.innerHTML = '<span class="chip gray">检测失败</span>';
@@ -1958,14 +1959,14 @@
   // 不是"我们自建的 profile 里有没有值"。写入目标与状态显示用的是同一个 profile。
   function paintSmList() {
     var box = document.getElementById('sm-list');
-    if (!box) return;
+    if (!box) return Promise.resolve();
     if (!GAMES.length) {
       box.textContent = '';
       box.appendChild(h('div', { class: 'empty', text: '游戏库是空的 —— 点右上「扫描游戏库」。扫描只读启动器记录，不改动任何游戏文件。' }));
-      return;
+      return Promise.resolve();
     }
     // 先把状态取回来，再一次性替换内容；否则列表会先空一下再出现（看起来就是闪一下）
-    invoke('sm_game_states', {
+    return invoke('sm_game_states', {
       names: GAMES.map(function (g) { return g.name || ''; }),
       exes: GAMES.map(function (g) { return g.targetExe || g.target || ''; }),
     }).then(function (d) {
@@ -2012,7 +2013,13 @@
       return;
     }
     // 目录里如果立着『不是本工具放』的入口（别人的 Mod），也先说清楚再动
-    if (on && /入口被占用/.test(g.deployed || '') && !window.confirm('这个游戏目录里已经有一个不是本工具放的入口文件（' + g.deployed + '）。\n\n继续会先把它原样备份，再放入 Smooth Motion 的解锁组件；之后可以用关闭或还原取回。\n\n要继续吗？')) {
+    if (on && /入口被占用/.test(g.deployed || '')) {
+      uiConfirm({
+        title: '这个入口文件不是本工具放的',
+        body: '这个游戏目录里已经有一个不是本工具放的入口文件（' + g.deployed + '）。\n\n继续会先把它原样备份，再放入 Smooth Motion 的解锁组件；之后可以用关闭或还原取回。\n\n要继续吗？',
+      }).then(function (yes) {
+        if (yes) doSmWrite(g, exe, on);
+      });
       return;
     }
     doSmWrite(g, exe, on);
@@ -2049,18 +2056,16 @@
         var ok = r && r.ok;
         var msg = ((r && r.message) || (on ? '已开启' : '已关闭')) + (t ? '；' + t : '');
         toast((ok ? '' : '未生效：') + msg, ok ? 'ok' : 'warn', 9000);
-        // 重新拉一次游戏库，再重画两边的列表：
-        // refreshLibrary 只重画帧生成页，SM 页那份得自己再画一次（否则徽章留在旧状态）。
-        if (ok) {
-          refreshLibrary().then(function () { paintSmList(); }).catch(function () { paintSmList(); });
-        } else {
-          paintSmList();
-        }
+        // 列表必须立刻反映刚做完的操作。这里**等重画跑完**再拉游戏库：
+        // paintSmList 里那次状态查询是异步的，不等它的话界面会先停在旧状态
+        // （用户看到的就是"提示成功、按钮还是关闭 Smooth Motion"）。
+        var repaint = paintSmList() || Promise.resolve();
+        if (ok) repaint.then(function () { return refreshLibrary(); }).catch(function () { });
         return r;
       });
     }).catch(function (e) {
       hideBarLater(1200);
-      toast('Smooth Motion 操作中止：' + errText(e), 'error', 10000);
+      toast('Smooth Motion 操作中止：' + errText(e), 'err', 10000);
     });
   }
   // ---------------------------------------------------------------- 页面切换与绑定
@@ -2081,7 +2086,8 @@
         /* 日志已移到主页左栏：进程序实时刷新，切页不再需要读日志。
            进设置页则刷一次备份情况（用户点进来基本就是想知道"有没有东西可以清"）。 */
         if (want === 'settings') refreshBackups().catch(function () { });
-        // 进 Smooth Motion 页就重新检测一次（显卡/驱动/门槛/驱动里的全局现状，全部只读）
+        // 进 Smooth Motion 页就重新检测一次（显卡/驱动/门槛/驱动里的全局现状，全部只读）；
+        // renderSm 结束时会自己重画卡片列表，所以这里不用再调一次 paintSmList。
         if (want === 'sm') renderSm().catch(function () { });
         // 进帧生成页也刷新一次：状态可能被 Smooth Motion 页改过（同一个 version.dll）
         if (want === 'lib') refreshLibrary().catch(function () { });
@@ -2185,15 +2191,21 @@ if ($('sel-proxy')) {
     if ($('btn-sm-scan') && $('btn-scan')) $('btn-sm-scan').addEventListener('click', function () { $('btn-scan').click(); });
     // 清掉本工具建的、但没挂任何应用的驱动配置（以前那版写进自建 profile 留下的残余）
     if ($('btn-sm-clean')) $('btn-sm-clean').addEventListener('click', function () {
-      if (!window.confirm('清理「FrameGen Manager - 」开头、而且没有挂任何游戏的驱动配置。\n\nNVIDIA 自带的配置一个都不会动。继续吗？')) return;
-      busy(this, '正在清理…', function () {
-        return invoke('sm_clean_orphans').then(function (r) {
-          var n = (r && r.removed) || 0;
-          var errs = (r && r.errors) || [];
-          if (n === 0 && !errs.length) toast('没有需要清理的残留配置。', 'info', 6000);
-          else if (n === 0) toast('清理失败：' + errs.join('；'), 'warn', 12000);
-          else toast('已清掉 ' + n + ' 条残留配置' + (errs.length ? '（' + errs.length + ' 条失败：' + errs.join('；') + '）' : '') + '。', errs.length ? 'warn' : 'ok', 10000);
-          renderSm().catch(function () { });
+      var me = this;
+      uiConfirm({
+        title: '清理残留配置',
+        body: '只清理名字以「FrameGen Manager - 」开头、而且没有挂任何游戏的驱动配置。\n\nNVIDIA 自带的配置一个都不会动。继续吗？',
+      }).then(function (yes) {
+        if (!yes) return;
+        busy(me, '正在清理…', function () {
+          return invoke('sm_clean_orphans').then(function (r) {
+            var n = (r && r.removed) || 0;
+            var errs = (r && r.errors) || [];
+            if (n === 0 && !errs.length) toast('没有需要清理的残留配置。', 'info', 6000);
+            else if (n === 0) toast('清理失败：' + errs.join('；'), 'warn', 12000);
+            else toast('已清掉 ' + n + ' 条残留配置' + (errs.length ? '（' + errs.length + ' 条失败：' + errs.join('；') + '）' : '') + '。', errs.length ? 'warn' : 'ok', 10000);
+            renderSm().catch(function () { });
+          });
         });
       });
     });

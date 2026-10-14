@@ -532,6 +532,9 @@ body.ov-open .page{
 .toast.ok::before{background:var(--ok)}
 .toast.err::before{background:var(--err)}
 .toast.info::before{background:var(--info)}
+/* 提醒 / 冲突类提示用**深红**：蓝点看着像"通知"，用户明确要求红色的圆圈
+   （帧生成与 Smooth Motion 互斥那条提示就是走 warn）。 */
+.toast.warn::before{background:#d32f2f;box-shadow:0 0 0 3px rgba(211,47,47,.22)}
 @keyframes toastIn{from{opacity:0;transform:translateX(24px) scale(.97)}to{opacity:1;transform:none}}
 
 /* ---------------------------------------------------------------- 进度条 */
