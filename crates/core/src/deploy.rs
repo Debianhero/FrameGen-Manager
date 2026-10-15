@@ -899,10 +899,15 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
         if !p.is_file() {
             continue;
         }
-        let still_ours = !e.deployed_sha256.is_empty()
-            && util::sha256_file(&p)
-                .map(|h| h == e.deployed_sha256)
-                .unwrap_or(false);
+        let Ok(bytes) = std::fs::read(&p) else {
+            continue;
+        };
+        let same_as_deployed = !e.deployed_sha256.is_empty()
+            && util::sha256_hex(&bytes) == e.deployed_sha256;
+        /* 内容不是这次部署的那份时还有第二种可能：**位置被本工具放的别的东西顶掉了**
+           （最典型的是 Smooth Motion 的解锁组件，它也占 version.dll）。那同样是我们放的，
+           要一并收走 —— 留着会让游戏继续加载到 Smooth Motion 的组件，而用户以为还原干净了。 */
+        let still_ours = same_as_deployed || is_our_artifact(&p, &e.rel_path, &bytes);
         if still_ours {
             ours.push(e.rel_path.clone());
         } else {
@@ -1596,7 +1601,34 @@ pub fn is_our_artifact(path: &Path, name: &str, bytes: &[u8]) -> bool {
     if crate::sm::is_our_asset_file(path) {
         return true;
     }
+    /* dlssg_sm86\ 里的运行库、后端、内核是 NVIDIA 签名的，签名判定认不出"这是我们放的"；
+       但内容就是内置资产里那一份。**重复部署时不能把它们当游戏原件备份** ——
+       否则「还原」会把我们上次部署的旧运行库写回游戏目录（和 0.3.x 时代那个坑同源）。 */
+    if is_our_runtime_file(name, bytes) {
+        return true;
+    }
     is_legacy_artifact(name, bytes)
+}
+
+/// 这个文件是不是「内置资产里 dlssg_sm86\ 目录下的那一份」（按内容哈希比）。
+fn is_our_runtime_file(name: &str, bytes: &[u8]) -> bool {
+    let prefix = format!("{RUNTIME_DIR}\\");
+    let Some(rel) = name.strip_prefix(&prefix) else {
+        return false;
+    };
+    if rel.is_empty() || rel.contains("..") {
+        return false;
+    }
+    let Ok(dir) = crate::update::asset_path(RUNTIME_DIR) else {
+        return false;
+    };
+    let p = dir.join(rel);
+    if !p.is_file() {
+        return false;
+    }
+    crate::util::sha256_file(&p)
+        .map(|h| h == crate::util::sha256_hex(bytes))
+        .unwrap_or(false)
 }
 
 /// 0.4.0 起运行库、后端、内核都进了 dlssg_sm86\\ 目录，不再铺在游戏根目录。

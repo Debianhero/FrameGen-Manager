@@ -1665,6 +1665,87 @@ fn deploytest() -> usize {
         _ => println!("  （本机没有内置的 Smooth Motion 组件，跳过这段）"),
     }
 
+    /* ---- 重复部署：dlssg_sm86\ 里的运行库不能被当成「游戏原件」 ----
+       它们是 NVIDIA 签名的，按签名认不出"这是我们放的"。不按内容再比一遍就会被备份成
+       游戏原件，之后「还原」会把我们上次部署的旧运行库写回游戏目录。 */
+    println!("
+-- 重复部署时运行库不当成游戏原件 --");
+    let runtime_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/electron/bundled-assets")
+        .join(framegen_core::deploy::RUNTIME_DIR);
+    let lib = runtime_src.join("runtime").join("nvngx_dlssg.dll");
+    if lib.is_file() {
+        // 自测的数据目录是空的：先把内置资产摆到它该在的位置，判定才有东西可比
+        if let Ok(asset_dir) = framegen_core::update::asset_path(framegen_core::deploy::RUNTIME_DIR) {
+            let dst = asset_dir.join("runtime");
+            let _ = fs::create_dir_all(&dst);
+            let _ = fs::copy(&lib, dst.join("nvngx_dlssg.dll"));
+        }
+        let rel = format!("{}\\runtime\\nvngx_dlssg.dll", framegen_core::deploy::RUNTIME_DIR);
+        let t8 = root.join("rerun");
+        let _ = fs::create_dir_all(&t8);
+        /* 目录里已经摆着一份我们自己的运行库（别的方式放的：换了程序版本、或记录丢了），
+           而本工具对这个目录**没有部署记录** —— 正是用户遇到的那种情况。
+           这时只能靠内容认出"这也是我们自己放的"，否则会被当成游戏原件备份。 */
+        let sub = t8.join(framegen_core::deploy::RUNTIME_DIR).join("runtime");
+        let _ = fs::create_dir_all(&sub);
+        fs::copy(&lib, sub.join("nvngx_dlssg.dll")).unwrap();
+        let mut payload8 = dep_files.to_vec();
+        payload8.push(framegen_core::deploy::DeployFile::new(&rel, &lib));
+        match framegen_core::deploy::deploy(&t8, "version.dll", &payload8, &[]) {
+            Ok(_) => check!(true, "目录里已有我们的运行库时部署成功"),
+            Err(e) => {
+                println!("  [FAIL] 部署被拒: {e}");
+                fails += 1;
+            }
+        }
+        let as_original = framegen_core::deploy::load_manifest(&t8)
+            .map(|m| {
+                m.files
+                    .iter()
+                    .any(|e| e.rel_path == rel && e.existed_before)
+            })
+            .unwrap_or(false);
+        check!(!as_original, "重复部署时运行库没被当成游戏原件备份");
+    } else {
+        println!("  （找不到内置运行库，跳过这段）");
+    }
+
+    /* ---- 代理位被 Smooth Motion 的解锁组件顶掉之后还原 ----
+       那个组件也是本工具放的（只是换了一个功能），还原时必须一并收走；
+       留着的话游戏还在加载 Smooth Motion 的组件，而用户以为已经还原干净了。 */
+    println!("
+-- 代理位被 Smooth Motion 组件顶掉后还原 --");
+    let sm_dll = framegen_core::sm::asset_path()
+        .ok()
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bundled-sm/version.dll");
+            if p.is_file() { Some(p) } else { None }
+        });
+    match sm_dll {
+        Some(src) => {
+            let t9 = root.join("sm-takeover");
+            let _ = fs::create_dir_all(&t9);
+            let r = framegen_core::deploy::deploy(&t9, "version.dll", &dep_files, &[]);
+            check!(r.is_ok(), "先部署帧生成成功");
+            fs::copy(&src, t9.join("version.dll")).unwrap();
+            match framegen_core::deploy::restore(&t9) {
+                Ok(_) => {
+                    check!(
+                        !t9.join("version.dll").exists(),
+                        "还原后 Smooth Motion 的组件也被收走"
+                    );
+                }
+                Err(e) => {
+                    println!("  [FAIL] 还原报错: {e}");
+                    fails += 1;
+                }
+            }
+        }
+        None => println!("  （没有内置的 Smooth Motion 组件，跳过这段）"),
+    }
+
     let _ = fs::remove_dir_all(&root);
     println!("
 ===== 结果: {fails} 项失败 =====");
