@@ -1452,6 +1452,8 @@ pub struct ProxyAdvice {
     pub own_existing: Vec<ExistingEntry>,
     /// true = 没能自动判定，用的是上游默认
     pub undetermined: bool,
+    /// 这个游戏疑似开着 Smooth Motion（部署帧生成前要提醒一句：两个都是插帧，别一起开）
+    pub sm_likely_on: bool,
     pub scanned: usize,
 }
 
@@ -1479,10 +1481,20 @@ pub fn advise_proxy(target_dir: &Path) -> ProxyAdvice {
         };
         if entry.identity.is_ours() {
             own_existing.push(entry);
+        } else if crate::sm::is_our_asset_file(&p) {
+            /* Smooth Motion 的解锁组件也叫 version.dll，没有我们的签名：按签名判会被
+               当成「别人的文件」，而它其实是本工具放进去的，可以直接覆盖。 */
+            own_existing.push(entry);
         } else {
             occupied.push(entry);
         }
     }
+    // 这个游戏是不是疑似开着 Smooth Motion：两个都是插帧，一起开通常更糟，
+    // 部署帧生成前得提醒一句（不拦，用户可以忽略继续）。
+    let sm_likely_on = crate::sm::looks_enabled_for_dir(
+        target_dir,
+        find_render_exe(target_dir).as_deref(),
+    );
     let is_occupied = |n: &str| occupied.iter().any(|o| o.name == n);
 
     // 已经装过本项目的话，直接复用已有入口 —— 比重新挑一个更合理，
@@ -1497,6 +1509,7 @@ pub fn advise_proxy(target_dir: &Path) -> ProxyAdvice {
             occupied,
             own_existing,
             undetermined: false,
+            sm_likely_on,
             scanned: 0,
         };
     }
@@ -1566,6 +1579,7 @@ pub fn advise_proxy(target_dir: &Path) -> ProxyAdvice {
                 occupied,
                 own_existing: Vec::new(),
                 undetermined: false,
+                sm_likely_on,
                 scanned: files.len(),
             };
         }
@@ -1589,6 +1603,7 @@ pub fn advise_proxy(target_dir: &Path) -> ProxyAdvice {
         occupied,
         own_existing: Vec::new(),
         undetermined: true,
+        sm_likely_on,
         scanned: files.len(),
     }
 }

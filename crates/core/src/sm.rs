@@ -1487,9 +1487,30 @@ pub const SM_ASSET_SHA256: &str =
 
 /// 这个目录里的 version.dll 是不是我们的解锁组件？
 pub fn has_our_asset(dir: &std::path::Path) -> bool {
-    let p = dir.join(SM_ASSET_FILE);
-    p.is_file()
-        && crate::util::sha256_file(&p)
+    is_our_asset_file(&dir.join(SM_ASSET_FILE))
+}
+
+/// 这个游戏「疑似开着 Smooth Motion」吗（给部署帧生成前的那句提醒用）。
+///
+/// 两条判据任一成立就算：驱动里挂在这个 EXE 上的 SM 值非 0；或者游戏目录里还留着
+/// 我们的解锁组件 —— 关闭时没取回成功的话，驱动关了文件还在，同样要提醒。
+pub fn looks_enabled_for_dir(dir: &std::path::Path, exe: Option<&std::path::Path>) -> bool {
+    if has_our_asset(dir) {
+        return true;
+    }
+    match exe {
+        Some(e) => matches!(game_state(e).value, Some(v) if v != 0),
+        None => false,
+    }
+}
+
+/// 这个文件是不是内置解锁组件 —— **按内容哈希认，不认签名**。
+///
+/// 为什么不能靠签名：这个组件是社区打包的，不是我们自签的，按签名判会被当成
+/// 「别人的文件」。而它确实是本工具放进游戏目录的，部署帧生成时该按自己人处理。
+pub fn is_our_asset_file(path: &std::path::Path) -> bool {
+    path.is_file()
+        && crate::util::sha256_file(path)
             .map(|h| h.eq_ignore_ascii_case(SM_ASSET_SHA256))
             .unwrap_or(false)
 }

@@ -68,6 +68,9 @@
   /* DLSS5 那份的选项与资产状态。**列表来自 core 的常量**（dlss5_choices / dlss5_assets），
      界面不抄第二份 —— 以后加了渲染后端或换了资产文件名，只有 core 要改。 */
   var DLSS5 = { apis: [], backends: [], assets: null };
+  /* Smooth Motion 与帧生成同时开时的提醒。两个都是插帧（一个驱动层、一个渲染管线里），
+     同时开通常更糟 —— 但只提醒、不拦，用户可以忽略继续部署。 */
+  var SM_CONFLICT_TEXT = '该游戏疑似已开启Smooth Motion。不建议同时开启Smooth Motion和DLSS-FG。但你可以忽略这条提示继续部署。';
 
   function $(id) { return document.getElementById(id); }
   /* sidecar 的报错会被 Electron 包一层壳：
@@ -1478,6 +1481,10 @@
     var adviceBtn = h('button', { class: 'btn small', type: 'button', text: '重新检测入口' });
     var adviceBusy = false;
 
+    /* 这个游戏疑似开着 Smooth Motion？由 core 的 advise_proxy 判定（驱动里那一项非 0，
+       或者目录里还留着解锁组件）。确认框里要带上那句提醒。 */
+    var smOn = false;
+
     function paintAdvice(a) {
       adviceBox.textContent = '';
       adviceBox.appendChild(h('div', { class: 'kv2' }, [
@@ -1491,6 +1498,10 @@
       (a.occupied || []).forEach(function (x) {
         adviceBox.appendChild(h('div', { class: 'hint warn', text: '! 目录里已有 ' + x.name + '（' + fmtSize(x.bytes) + '，' + x.identity + '）— 不是本项目文件，已跳过' }));
       });
+      if (a.smLikelyOn) {
+        smOn = true;
+        adviceBox.appendChild(h('div', { class: 'hint warn', text: '! ' + SM_CONFLICT_TEXT }));
+      }
       if (a.undetermined) {
         adviceBox.appendChild(h('div', { class: 'hint', text: '用的是上游默认入口。如果游戏里没生效，换个入口重新部署试试。' }));
       }
@@ -1575,13 +1586,14 @@
     var ov = openOverlay(dialog);
     closeBtn.addEventListener('click', function () { ov.close(); });
     deployBtn.addEventListener('click', function () {
-      doDeploy(g, targetDir, sel.value, stateEl, deployBtn, ov, Number(optSel.value), Number(frmSel.value), String(preSel.value || ''));
+      doDeploy(g, targetDir, sel.value, stateEl, deployBtn, ov, Number(optSel.value), Number(frmSel.value), String(preSel.value || ''), smOn);
     });
     restoreBtn.addEventListener('click', function () { doRestore(g, targetDir, stateEl, ov); });
   }
 
-  function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset) {
+  function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset, smOn) {
     var body = '会先备份被覆盖的原件，之后可以一键还原。';
+    if (smOn) body += '\n\n（可以照常继续）' + SM_CONFLICT_TEXT;
     var dfltPreset = (CFG && CFG.defaultPreset) || 'C';
     if (!(optimized === (CFG ? CFG.defaultOptimized : 2) && frames === (CFG ? CFG.defaultFrames : 3) && preset === dfltPreset)) {
       body += '\n这几个档位会被写进游戏目录那份 dlssg_sm86.ini（资产里的原文件不动）。';
@@ -1593,7 +1605,9 @@
     if (g.acAny) body += '\n\n注意：这个游戏有反作弊（' + g.ac + '）。';
     uiConfirm({
       title: '部署到游戏目录',
-      ok: '开始部署',
+      /* 有 Smooth Motion 冲突提醒时，按钮要写成「仍然部署」——
+         否则用户看到那句「不建议」会以为程序不让继续。 */
+      ok: smOn ? '仍然部署' : '开始部署',
       rows: [
         ['代理入口', proxy],
         ['优化等级', optLabelOf(optimized)],
@@ -2254,10 +2268,19 @@
     }
     var deployedFg = /^已部署/.test(g.deployed || '');
     var manualFg = /^已安装/.test(g.deployed || '');
-    // 引擎互斥（硬性）：帧生成和 Smooth Motion 用的是同一个 version.dll，
-    // 所以不许我们替他做决定 —— 让用户自己去帧生成页还原，再回来开 SM。
+    /* 这个游戏已经装了帧生成。两者都是插帧（一个在渲染管线里、一个在驱动层），
+       同时开通常更糟 —— 但**只提醒、不拦**：产品规定是让用户自己决定。
+       开启会把解锁组件放进游戏目录（同名的那份会先备份，关闭 SM 时取回），
+       所以这一步是可逆的。 */
     if (on && (deployedFg || manualFg)) {
-      toast('这个游戏已经装了帧生成（' + g.deployed + '），而帧生成和 Smooth Motion 用的是同一个 version.dll，不能同时开。\n\n请先到「帧生成」页找到这个游戏，点『还原』把它还原成原版，再回来开启 Smooth Motion。', 'warn', 14000);
+      uiConfirm({
+        title: '这个游戏已经装了帧生成',
+        ok: '仍然开启',
+        body: SM_CONFLICT_TEXT + '\n\n（当前状态：' + g.deployed + '）\n\n' +
+          '继续会把 Smooth Motion 的解锁组件放进游戏目录（同名的那份会先备份，关闭时取回）。',
+      }).then(function (yes) {
+        if (yes) doSmWrite(g, exe, on);
+      });
       return;
     }
     // 目录里如果立着『不是本工具放』的入口（别人的 Mod），也先说清楚再动

@@ -1615,6 +1615,56 @@ fn deploytest() -> usize {
         }
     }
 
+    /* ---- 目录里留着 Smooth Motion 的解锁组件 ----
+       它也叫 version.dll，但没有我们的签名。认不出它就会被当成「别人的文件」，
+       于是 Smooth Motion 明明关了、帧生成却部署不了（用户反馈）。 */
+    println!("
+-- 游戏目录里留着 Smooth Motion 的解锁组件 --");
+    // 组件在哪：先是运行时的资产目录，再是本仓库里随包的那一份（自测的数据目录是空的）
+    let sm_src = framegen_core::sm::asset_path()
+        .ok()
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bundled-sm/version.dll");
+            if p.is_file() { Some(p) } else { None }
+        });
+    match sm_src {
+        Some(sm_src) => {
+            let t7 = root.join("sm-leftover");
+            let _ = fs::create_dir_all(&t7);
+            fs::copy(&sm_src, t7.join("version.dll")).unwrap();
+            check!(
+                framegen_core::sm::is_our_asset_file(&t7.join("version.dll")),
+                "按内容哈希认出了 Smooth Motion 的解锁组件"
+            );
+            check!(
+                !framegen_core::scan::identify_dll(&t7.join("version.dll")).is_ours(),
+                "（前提）按签名它认不出来 —— 所以才必须按哈希认"
+            );
+            let advice = framegen_core::scan::advise_proxy(&t7);
+            check!(advice.occupied.is_empty(), "解锁组件不算「被别的东西占用」");
+            let r = framegen_core::deploy::deploy(&t7, "version.dll", &dep_files, &[]);
+            match r {
+                Ok(_) => {
+                    check!(t7.join("version.dll").is_file(), "留着解锁组件时帧生成部署成功");
+                    let kept = framegen_core::deploy::load_manifest(&t7)
+                        .map(|m| {
+                            m.files
+                                .iter()
+                                .any(|e| e.rel_path == "version.dll" && e.existed_before)
+                        })
+                        .unwrap_or(false);
+                    check!(!kept, "解锁组件没被当成「游戏原件」备份");
+                }
+                Err(e) => {
+                    println!("  [FAIL] 留着解锁组件时部署被拒: {e}");
+                    fails += 1;
+                }
+            }
+        }
+        _ => println!("  （本机没有内置的 Smooth Motion 组件，跳过这段）"),
+    }
+
     let _ = fs::remove_dir_all(&root);
     println!("
 ===== 结果: {fails} 项失败 =====");

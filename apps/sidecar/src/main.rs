@@ -1485,6 +1485,8 @@ fn proxy_advice(dir: String) -> Result<Value, String> {
         "reason": a.reason,
         "undetermined": a.undetermined,
         "scanned": a.scanned,
+        // 这个游戏疑似开着 Smooth Motion？帧生成部署前靠它弹那句提醒
+        "smLikelyOn": a.sm_likely_on,
         "occupied": a.occupied.iter().map(|e| json!({
             "name": e.name,
             "bytes": e.bytes,
@@ -1530,8 +1532,15 @@ fn deploy_impl(dir: &str, proxy: &str, optimized: u8, frames: u8, preset: &str) 
 
 fn deploy_game(dir: String, proxy: String, optimized: u8, frames: u8, preset: Option<String>) -> Result<Value, String> {
     let preset = preset.unwrap_or_default();
-    let (msg, notes) = deploy_impl(&dir, &proxy, optimized, frames, &preset)?;
-    Ok(json!({ "msg": msg, "notes": notes }))
+    match deploy_impl(&dir, &proxy, optimized, frames, &preset) {
+        Ok((msg, notes)) => Ok(json!({ "msg": msg, "notes": notes })),
+        Err(e) => {
+            /* 部署被拒的原因一律写进日志：用户报「装不上」时，这一行就是唯一的线索
+               （界面上那句话未必会被完整转述过来）。 */
+            framegen_core::log::line(&format!("部署被拒：{dir} ｜ 入口 {proxy} ｜ {e}"));
+            Err(e)
+        }
+    }
 }
 
 /// 一键还原。

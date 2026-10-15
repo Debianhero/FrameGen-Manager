@@ -323,6 +323,8 @@ pub fn deploy(
     //                                   比如游戏自带的 nvngx_dlssg.dll，那个本来就要升级）
     let mut overwrite_own: Vec<String> = Vec::new();
     let mut overwrite_other: Vec<String> = Vec::new();
+    // 认出来是「Smooth Motion 留下的解锁组件」的入口，单独记账
+    let mut sm_asset_here: Vec<String> = Vec::new();
     for f in files {
         let dst = target_dir.join(&f.dest_name);
         if !dst.is_file() {
@@ -351,6 +353,13 @@ pub fn deploy(
                 overwrite_own.push(f.dest_name.clone());
                 continue;
             }
+            /* Smooth Motion 的解锁组件也叫 version.dll，但它是社区打包的、没有我们的签名，
+               按签名判会被当成「别人的文件」直接拒掉 —— 而它其实是本工具放进去的。
+               按内容哈希认出来，交给下面那段单独处置。 */
+            if crate::sm::is_our_asset_file(&dst) {
+                sm_asset_here.push(f.dest_name.clone());
+                continue;
+            }
             if is_proxy {
                 bail!(
                     "{} 已存在，签名者是「{}」，不是本项目的文件，拒绝覆盖。请换个代理入口，或先手动备份/移除它。",
@@ -365,6 +374,16 @@ pub fn deploy(
     }
 
     let mut notes: Vec<String> = Vec::new();
+    /* Smooth Motion 留下（或正在用）的解锁组件：两个都用 version.dll。
+       覆盖动作照做 —— 用户可以选择忽略冲突提示继续部署 —— 但要把话说清楚：
+       这次覆盖了什么、Smooth Motion 会变成什么样。 */
+    if !sm_asset_here.is_empty() {
+        notes.push(SM_CONFLICT_NOTE.to_owned());
+        notes.push(format!(
+            "已覆盖 Smooth Motion 的解锁组件（原文件已备份）：{}。Smooth Motion 将不再生效",
+            sm_asset_here.join("、")
+        ));
+    }
     // 认出来"本来就是我们自己的文件"（所以不备份、只覆盖）的条目
     let mut ours_overwritten: Vec<String> = Vec::new();
     if !overwrite_own.is_empty() {
@@ -1573,6 +1592,10 @@ pub fn is_our_artifact(path: &Path, name: &str, bytes: &[u8]) -> bool {
     if crate::scan::identify_dll(path).is_ours() {
         return true;
     }
+    // Smooth Motion 的解锁组件没有我们的签名，靠内容哈希认
+    if crate::sm::is_our_asset_file(path) {
+        return true;
+    }
     is_legacy_artifact(name, bytes)
 }
 
@@ -1594,6 +1617,13 @@ const RUNTIME_LIB_REL: &str = "runtime\\nvngx_dlssg.dll";
 /// **可能被游戏误加载**（同目录优先）。对老用户来说这就是"升级上来了却还是旧行为"。
 /// 只在我们确认"这份还是当初我们写进去的、或它本来就不存在"时才动（见 plan_orphan）。
 pub const LEGACY_ROOT_LIBS: [&str; 2] = ["nvngx_dlssg.dll", "nvngx_dlss.dll"];
+
+/// Smooth Motion 与帧生成同时开着时给用户的那句提醒。
+///
+/// 两个都是插帧（一个在驱动层、一个在渲染管线里），同时开通常更糟。
+/// 产品规定是**提醒而不是拦**：用户可以忽略这句继续部署。
+pub const SM_CONFLICT_NOTE: &str =
+    "该游戏疑似已开启Smooth Motion。不建议同时开启Smooth Motion和DLSS-FG。但你可以忽略这条提示继续部署。";
 
 /// 一步到位：准备 + 部署（返回部署说明与备注）。
 pub fn deploy_game(
