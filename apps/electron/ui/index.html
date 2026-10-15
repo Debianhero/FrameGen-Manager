@@ -15,7 +15,7 @@
     <button class="tab active" data-page="lib" type="button">帧生成</button>
     <button class="tab" data-page="sm" type="button">Smooth Motion（实验）</button>
     <button class="tab" data-page="dlss5" type="button">DLSS5（实验性）</button>
-    <button class="tab" data-page="settings" type="button">设置</button>
+    <button class="tab" data-page="settings" type="button">关于</button>
     <button class="tab" data-page="help" type="button">打赏赞助</button>
   </nav>
   <button class="btn" id="btn-check" type="button">检查更新</button>
@@ -168,11 +168,11 @@
   </section>
 </main>
 
-<!-- ------------------------------------------------ 设置页 -->
+<!-- ------------------------------------------------ 关于页（页签原来叫"设置"） -->
 <main class="page hidden" id="page-settings">
   <div class="pagehead">
-    <h1>设置</h1>
-    <div class="sub">路径 · 日志 · 自更新</div>
+    <h1>关于</h1>
+    <div class="sub">版本 · 路径 · 备份 · 反馈</div>
   </div>
 
   <div class="stack">
@@ -203,6 +203,12 @@
       <div class="row">
         <button class="btn" id="btn-clean-backups" type="button">清理旧备份</button>
       </div>
+    </section>
+
+    <!-- 反馈放这一栏最后：关于页的习惯位置（版本 → 路径 → 备份 → 反馈） -->
+    <section class="panel">
+      <div class="ctitle">反馈</div>
+      <p class="fbline">若在使用途中遇到各种问题，或者您有更好的建议欢迎您进群反馈与交流：<b>1125445047</b></p>
     </section>
 
   </div>

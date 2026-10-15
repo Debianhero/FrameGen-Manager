@@ -636,8 +636,8 @@
     sel.value = PROXY;
   }
 
-  /* 部署档位不再放设置页 —— 它是**每个游戏、每次部署**才做的决定。
-     设置页只留路径 / 日志 / 自更新；配置里的那两个值退化成「上次的选择」。*/
+  /* 部署档位不再放「关于」页（页签原来叫「设置」）—— 它是**每个游戏、每次部署**才做的决定。
+     那一页只留版本 / 路径 / 备份 / 反馈；配置里的那两个值退化成「上次的选择」。*/
   function optLabelOf(v) {
     for (var i = 0; i < OPT_LABELS.length; i++) {
       if (String(OPT_LABELS[i][0]) === String(v)) return OPT_LABELS[i][1];
@@ -785,7 +785,7 @@
     });
   }
 
-  /* 备份占用情况：设置页显示「N 项 · X MB」，并提供"清理旧备份"。
+  /* 备份占用情况：「关于」页显示「N 项 · X MB」，并提供"清理旧备份"。
      清理前必须说清代价：备份是游戏原文件，删了就没法还原已部署的模组了。 */
   function refreshBackups() {
     return invoke('backups_info').then(function (r) {
@@ -1892,7 +1892,7 @@
             ? '\n\n（这套是本工具部署的：「还原」能恢复原件。）'
             : '\n\n（没有本工具的部署记录：删掉之后没法自动恢复原件。' +
               '如果你以前用本工具装过、只是记录被清理了，原件可能在：' +
-              (FOUND.backupsDir || '设置页显示的「备份目录」') + '）') +
+              (FOUND.backupsDir || '「关于」页显示的「备份目录」') + '）') +
           '\n\n警告：上述文件将被永久删除！确认后立即执行！'
       }).then(function (yes) {
         if (!yes) return;
@@ -2337,9 +2337,9 @@
           var el = $(PAGES[k]);
           if (el) el.classList.toggle('hidden', k !== want);
         }
-        // 进设置页顺手刷一次日志：用户点进来基本就是想看它
+        // 进「关于」页顺手刷一次日志：用户点进来基本就是想看它
         /* 日志已移到主页左栏：进程序实时刷新，切页不再需要读日志。
-           进设置页则刷一次备份情况（用户点进来基本就是想知道"有没有东西可以清"）。 */
+           进「关于」页则刷一次备份情况（用户点进来基本就是想知道"有没有东西可以清"）。 */
         if (want === 'settings') refreshBackups().catch(function () { });
         // 进 Smooth Motion 页就重新检测一次（显卡/驱动/门槛/驱动里的全局现状，全部只读）；
         // renderSm 结束时会自己重画卡片列表，所以这里不用再调一次 paintSmList。
@@ -2437,7 +2437,7 @@ if ($('sel-proxy')) {
     if ($('btn-dlss5-removed')) $('btn-dlss5-removed').addEventListener('click', function () { openRemovedDialog('dlss5'); });
     if ($('btn-removed-games')) $('btn-removed-games').addEventListener('click', function () { openRemovedDialog('library'); });
 
-    // ---- 设置页
+    // ---- 关于页（页签原来叫「设置」，id 仍是 page-settings）
     if ($('btn-self-update')) $('btn-self-update').addEventListener('click', checkSelfUpdate);
     if ($('btn-releases')) $('btn-releases').addEventListener('click', function () {
       var url = (CFG && CFG.releasesUrl) || (SELF && SELF.releasesUrl);
