@@ -1593,7 +1593,7 @@
 
   function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset, smOn) {
     var body = '会先备份被覆盖的原件，之后可以一键还原。';
-    if (smOn) body += '\n\n（可以照常继续）' + SM_CONFLICT_TEXT;
+    if (smOn) body += '\n\n' + SM_CONFLICT_TEXT;
     var dfltPreset = (CFG && CFG.defaultPreset) || 'C';
     if (!(optimized === (CFG ? CFG.defaultOptimized : 2) && frames === (CFG ? CFG.defaultFrames : 3) && preset === dfltPreset)) {
       body += '\n这几个档位会被写进游戏目录那份 dlssg_sm86.ini（资产里的原文件不动）。';
@@ -2276,8 +2276,7 @@
       uiConfirm({
         title: '这个游戏已经装了帧生成',
         ok: '仍然开启',
-        body: SM_CONFLICT_TEXT + '\n\n（当前状态：' + g.deployed + '）\n\n' +
-          '继续会把 Smooth Motion 的解锁组件放进游戏目录（同名的那份会先备份，关闭时取回）。',
+        body: SM_CONFLICT_TEXT,
       }).then(function (yes) {
         if (yes) doSmWrite(g, exe, on);
       });
