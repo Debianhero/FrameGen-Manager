@@ -70,6 +70,13 @@ pub struct CachedRow {
     /// 图形 API 和引擎，重新扫描也一样（用户看到的就是「功能没生效」）。
     #[serde(default)]
     pub tech_scanned: bool,
+    /// DLSS5 部署时用户手动指定的图形 API（key，如 `dx12`）。
+    ///
+    /// 程序认不出某个游戏用哪个图形 API 时，部署框里会让人手动选一个。那个选择如果只当
+    /// 本次参数用掉，下次打开还是「自动：未知」，用户得再选一遍 —— 所以它要跟着这一行存。
+    /// `None` = 没指定过，界面回落到自动识别的结果（`api`）。
+    #[serde(default)]
+    pub dlss5_api: Option<String>,
 }
 
 fn tier_none() -> crate::anticheat::AcTier {

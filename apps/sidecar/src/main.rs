@@ -773,6 +773,9 @@ fn game_row(c: &framegen_core::scan::CachedRow, manual: bool) -> Value {
         // DLSS5 那一套的状态与它要用的启动 exe：部署对话框直接把这两项显示出来，
         // 免得再单独发一条命令去问（每行多读一个小 JSON，可以忽略）。
         "dlss5": framegen_core::dlss5::state_label(&target),
+        // 用户上次在 DLSS5 部署框里手动选的图形 API（没选过是 null）：
+        // 界面打开对话框时按它预设下拉框。
+        "dlss5Api": c.dlss5_api,
         // 帧生成资产版本（徽章用）：哪一套 + 运行库版本 + 还留着哪些旧文件。
         // 一次 stat 级别的判定，跟着游戏库一起返回，界面不用再单独问一遍。
         "fgAssets": fg_assets_json(&target),
@@ -956,6 +959,7 @@ fn build_cached(entry: framegen_core::scan::GameEntry) -> framegen_core::scan::C
         engine,
         streamline,
         tech_scanned,
+        dlss5_api: None,
     }
 }
 
@@ -967,7 +971,18 @@ fn scan_library(id: u64) -> Result<Value, String> {
     progress(id, "正在扫描游戏库…", 0.0);
     let (entries, notes) = framegen_core::scan::scan_all_notes();
     let old = framegen_core::scan::load_library();
-    let rows: Vec<framegen_core::scan::CachedRow> = entries.into_iter().map(build_cached).collect();
+    let mut rows: Vec<framegen_core::scan::CachedRow> = entries.into_iter().map(build_cached).collect();
+    /* 重新扫描会把 scanned 整批重建，而「用户上次在 DLSS5 部署框里手动选的图形 API」
+       是跟这个游戏走的决定 —— 按安装目录把它带过来，别让一次扫描冲掉。 */
+    for row in rows.iter_mut() {
+        if let Some(prev) = old
+            .scanned
+            .iter()
+            .find(|c| c.entry.install_dir == row.entry.install_dir)
+        {
+            row.dlss5_api = prev.dlss5_api.clone();
+        }
+    }
     let count = rows.len();
     let cache = framegen_core::scan::LibraryCache {
         scanned_at: framegen_core::util::now_utc(),
@@ -1162,6 +1177,7 @@ fn add_library_dir(dir: &Path, exe: Option<PathBuf>) -> Result<Value, String> {
         engine,
         streamline,
         tech_scanned: true,
+        dlss5_api: None,
     });
     framegen_core::scan::save_library(&cache).map_err(|e| format!("{e:#}"))?;
     framegen_core::log::line(&format!("存进游戏库（手动）：{}", dir.display()));
@@ -1327,7 +1343,34 @@ fn dlss5_deploy(id: u64, args: &Value) -> Result<Value, String> {
         &mut |m: String, f: f32| progress(id, &m, f),
     )
     .map_err(|e| format!("{e:#}"))?;
+    /* 用户手动选的图形 API 要跟着这个游戏存下来：只当本次参数用掉的话，下次打开部署框
+       又回到「自动：未知」，得再选一遍。写缓存失败只记日志 —— 部署本身已经完成，
+       不能因为这一步就把结果报成失败。 */
+    if let Err(e) = remember_dlss5_api(&dir_p, &api_key) {
+        framegen_core::log::line(&format!("记下 DLSS5 图形 API 失败：{e}"));
+    }
     Ok(json!({ "msg": msg, "notes": notes }))
+}
+
+/// 把「这次在 DLSS5 部署框里选的图形 API」写进游戏库那一行。
+///
+/// 选「自动」= 回到自动识别，所以那一档是**清空**而不是写入一个 auto 值。
+fn remember_dlss5_api(dir: &Path, api_key: &str) -> Result<(), String> {
+    let mut cache = framegen_core::scan::load_library();
+    let want = if api_key == framegen_core::dlss5::API_AUTO {
+        None
+    } else {
+        Some(api_key.to_owned())
+    };
+    if let Some(c) = cache.scanned.iter_mut().find(|c| c.entry.install_dir == dir) {
+        c.dlss5_api = want;
+    } else if let Some(c) = cache.manual.iter_mut().find(|c| c.entry.install_dir == dir) {
+        c.dlss5_api = want;
+    } else {
+        // 库里没有这一行（比如刚被移除）：不为了记一个选择去凭空造条目
+        return Ok(());
+    }
+    framegen_core::scan::save_library(&cache).map_err(|e| format!("{e:#}"))
 }
 
 /// 探测这个目录里有没有 ReShade / DLSS5。

@@ -1738,6 +1738,11 @@
     (DLSS5.apis || []).forEach(function (a) {
       apiSel.appendChild(h('option', { value: a.key, text: a.label }));
     });
+    /* 上次在这个游戏上手动选过就把下拉框预设回那个值。
+       不记住的话，关掉对话框再打开又回到「自动：未知」，用户每次都得重选一遍。 */
+    if (g.dlss5Api && (DLSS5.apis || []).some(function (a) { return a.key === g.dlss5Api; })) {
+      apiSel.value = g.dlss5Api;
+    }
 
     var beSel = h('select', { class: 'input' });
     (DLSS5.backends || []).forEach(function (b) {
@@ -1773,7 +1778,9 @@
       /* 自动档 = 让 core 去认这个游戏的图形 API。认不出来时**不替用户猜**：
          core 会直接拒绝部署（dlss5.rs 里的硬闸门），这里先提醒一句，
          但按钮**保持可点** —— 用户要求的是「点了要提醒」，不是点不动。 */
-      var apiUnknown = apiSel.value === 'auto' && (!g.api || g.api === '未知' || g.api === 'Unknown');
+      var apiUnknown = apiSel.value === 'auto'
+        && (!g.api || g.api === '未知' || g.api === 'Unknown')
+        && !g.dlss5Api;
       var missing = (DLSS5.assets && DLSS5.assets.missing) || [];
       if (gate) {
         readiness.className = 'risk strong';
@@ -2421,8 +2428,15 @@ if ($('sel-proxy')) {
       busy(this, '选择中…', function () {
         return invoke('add_game').then(function (r) {
           if (r.canceled) return;
-          if (r.added === false) { toast(r.reason || '没有加进去。', 'info', 8000); return; }
-          toast('已加入游戏库：' + (r.name || '') + '\n' + (r.dir || ''), 'ok', 10000);
+          /* 目录本来就在库里时，sidecar 走的是「就地更新」那条路：
+             返回 added=false 但 updated=true（启动 exe 与技术检测都重算了）。
+             这里曾经只看 added，于是明明更新成功了却提示「没有加进去」、还不刷新列表。
+             与 pickGameExeNow（手动选 exe）保持同一套判断。 */
+          if (r.added === false && r.updated !== true) {
+            toast(r.reason || '没有加进去。', 'info', 8000);
+            return;
+          }
+          toast((r.updated ? '已更新游戏库条目：' : '已加入游戏库：') + (r.name || '') + '\n' + (r.dir || ''), 'ok', 10000);
           return refreshLibrary();
         });
       });

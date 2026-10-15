@@ -2588,15 +2588,53 @@ fn fetch_text_one(client: &reqwest::blocking::Client, url: &str) -> Option<Strin
     if t.trim().is_empty() { None } else { Some(t) }
 }
 
-/// 太长就只留开头一段（界面上还要能看，不要糊满整屏）。
+/// 只留**最新那一节**，太长再截断（界面上还要能看，不要糊满整屏）。
+///
+/// 用户点「检查新版本」想看的是「这次更新了什么」。从最新版本一路列到 1.0.4 的话，
+/// 中间那些没单独发布过的版本号（1.1.x 就是）会让人以为自己漏装过什么。
 fn clip_notes(t: String) -> String {
+    // 文件开头是标题行，第一个 "## " 之后才是最新版本那一节
+    let body = match t.split_once("## ") {
+        Some((_, rest)) => rest,
+        None => return clip_len(t),
+    };
+    let section = match body.split_once("\n## ") {
+        Some((head, _)) => format!("## {head}"),
+        None => format!("## {body}"),
+    };
+    clip_len(section)
+}
+
+fn clip_len(s: String) -> String {
     const MAX: usize = 4000;
-    if t.len() <= MAX {
-        return t;
+    if s.len() <= MAX {
+        return s;
     }
     let mut cut = MAX;
-    while cut > 0 && !t.is_char_boundary(cut) {
+    while cut > 0 && !s.is_char_boundary(cut) {
         cut -= 1;
     }
-    format!("{}\n…（完整内容见发布页面）", &t[..cut])
+    format!("{}\n…（完整内容见发布页面）", &s[..cut])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_notes_keep_only_the_newest_section() {
+        let doc = "# 更新日志\n\n## v1.2.2\n\n- 修复 A\n- 修复 B\n\n## v1.2.0\n\n- 更早的内容\n";
+        let out = clip_notes(doc.to_owned());
+        assert!(out.starts_with("## v1.2.2"), "开头就该是最新那一节：{out}");
+        assert!(out.contains("修复 A") && out.contains("修复 B"), "本节的条目要都在：{out}");
+        assert!(!out.contains("更早的内容"), "不该带上更早的版本：{out}");
+    }
+
+    #[test]
+    fn version_compare_reads_three_parts() {
+        assert!(is_newer("1.2.2", "1.2.0"));
+        assert!(!is_newer("1.2.0", "1.2.2"));
+        assert!(!is_newer("1.2.2", "1.2.2"));
+        assert!(is_newer("v1.3.0", "1.2.9"));
+    }
 }

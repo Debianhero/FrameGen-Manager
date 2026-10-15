@@ -1471,6 +1471,9 @@ fn deploytest() -> usize {
             );
             let r = framegen_core::deploy::deploy(&t5, "version.dll", &dep_files, &[]);
             check!(r.is_ok(), "目标已有本项目文件时允许覆盖（不再误拒）");
+            // 这份是本项目自己的文件：按签名认出来之后，它不能记成「游戏原件」——
+            // 一旦记成原件，「还原」就会把我们自己的 mod 文件写回游戏目录，
+            // 从此被当成游戏文件、再也清不掉。
             let recorded_as_existing = framegen_core::deploy::load_manifest(&t5)
                 .map(|m| {
                     m.files
@@ -1478,10 +1481,13 @@ fn deploytest() -> usize {
                         .any(|e| e.rel_path == "version.dll" && e.existed_before)
                 })
                 .unwrap_or(false);
-            check!(recorded_as_existing, "这个位置被记成「原本就有文件」");
+            check!(
+                !recorded_as_existing,
+                "这个位置没有记成「游戏原件」（认出是我们自己的文件）"
+            );
 
-            // 换成别的入口再部署：不处理这一分支的话，两个代理会并存，
-            // 而且原件再也还原不回来。
+            // 换成别的入口再部署：不处理这一分支的话，两个代理会并存。
+            // 旧那份是我们自己的文件：不备份成原件，还原时也不写回。
             let winmm_switch = src.join("winmm_switch.dll");
             fs::write(&winmm_switch, b"FAKE_WINMM_SWITCH").unwrap();
             let switch = [framegen_core::deploy::DeployFile::new("winmm.dll", &winmm_switch)];
@@ -1501,12 +1507,15 @@ fn deploytest() -> usize {
                             })
                         })
                         .unwrap_or(false);
-                    check!(backup_kept, "旧入口的备份记录保留下来了（还原还管得着）");
+                    check!(
+                        !backup_kept,
+                        "旧入口那份是我们自己的文件，没有备份成游戏原件"
+                    );
                     match framegen_core::deploy::restore(&t5) {
                         Ok(_) => {
                             check!(
-                                framegen_core::scan::identify_dll(&t5.join("version.dll")).is_ours(),
-                                "还原后原本那份本项目文件原样回来了"
+                                !t5.join("version.dll").exists(),
+                                "还原后不把我们自己那份写回游戏目录"
                             );
                             check!(
                                 !t5.join("winmm.dll").exists(),
@@ -1587,9 +1596,11 @@ fn deploytest() -> usize {
 
             match framegen_core::deploy::restore(&t6) {
                 Ok(_) => {
+                    /* 手动装的那份也是本项目的文件（签名认得出）：「还原」不把它写回
+                       游戏目录，否则它就变成"游戏自带的文件"，再也清不掉。 */
                     check!(
-                        framegen_core::scan::identify_dll(&t6.join("dinput8.dll")).is_ours(),
-                        "还原后手动装的那份 dinput8.dll 回来了"
+                        !t6.join("dinput8.dll").exists(),
+                        "还原后手动装的本项目代理不写回游戏目录"
                     );
                     check!(
                         !t6.join("version.dll").exists(),

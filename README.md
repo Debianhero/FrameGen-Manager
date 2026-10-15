@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-76b900?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-1.2.0-76b900?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/%E5%85%8D%E5%AE%89%E8%A3%85%E8%BF%90%E8%A1%8C%E5%BA%93-Chromium%20%E5%86%85%E7%BD%AE-4C8BF5?style=flat-square" alt="no-runtime">
@@ -25,7 +25,11 @@ Windows 桌面工具，把 [sdli1995/dlssg_for_sm86](https://github.com/sdli1995
 | <img src="docs/screenshots/04-framegen-deploy.png" alt="帧生成部署"> | <img src="docs/screenshots/03-dlss5-deploy.png" alt="DLSS5 部署"> |
 
 左侧常驻三张卡片：显卡驱动与系统设置、**显卡名称伪装**（可选）、资产文件夹
-右上角四个页签：帧生成 / DLSS5（实验性）/ 设置 
+右上角五个页签：帧生成 / Smooth Motion（实验）/ DLSS5（实验性）/ 关于 / 打赏赞助
+
+- **帧生成**：给不支持 DLSS-FG 的游戏部署上游的插帧（20 / 30 系通用）
+- **Smooth Motion（实验）**：解锁 NVIDIA 驱动自带的平滑运动，**目前仅限 30 系**，要求驱动 >= 616.64
+- **关于**：版本 / 路径 / 备份 / 反馈（QQ 群 1125445047）
 
 ## 下载和使用
 
@@ -59,10 +63,9 @@ ReShade 控制面板（键盘上没有 Home 键的话，按 Win+R 输入 osk，�
 
 | 文件 | 用途 |
 |---|---|
-| version.dll | 代理入口（名字被占用时自动改用 winmm / dbghelp / dinput8 / dxgi / d3d12） |
-| dlssg_sm86.ini | 配置（出厂两个开关：Optimized 优化等级 0~3、MaxGeneratedFrames 倍率上限；20 / 30 系通用） |
-| nvngx_dlssg.dll | DLSS 帧生成运行库 |
-| nvngx_dlss.dll | DLSS 超分运行库 |
+| version.dll | 代理入口（不到 1 MB；名字被占用时自动改用 winmm / dbghelp / dinput8 / dxgi / d3d12） |
+| dlssg_sm86.ini | 配置（优化等级 0~3、倍率上限、DLSS-G 预设；出厂为等级 2、预设 C） |
+| dlssg_sm86\ | 运行库 / 后端 / 内核目录（上游 0.4.0 起从代理 DLL 里搬出来，整目录铺进游戏目录） |
 
 全部放在游戏**实际渲染 EXE 所在目录**（通常是 ...\Binaries\Win64\）
 
@@ -71,9 +74,9 @@ ReShade 控制面板（键盘上没有 Home 键的话，按 Win+R 输入 osk，�
 
 ### RTX 20 和 30 系用的是同一套文件
 
-上游 **0.3.1 起**，根目录那份 version.dll + 出厂 dlssg_sm86.ini 在 RTX 20 系（Turing / SM75）
+上游 **0.4.0 起**，根目录那份 version.dll + 出厂 dlssg_sm86.ini 在 RTX 20 系（Turing / SM75）
 和 RTX 30 系（Ampere / SM86）上都能用：**不需要加任何键**，内核族按物理显卡自动选。
-所以本工具不再区分这两代卡，也没有「切换版本」那一说 —— 点「下载 / 更新资产」再「部署」即可。
+所以本工具不再区分这两代卡，也没有「切换版本」那一说 —— 点「部署」即可（资产随安装包自带）。
 
 （历史：上游 0.3.0 在任何 RTX 20 上都开不了帧生成 —— 它向 NGX 核心报告的架构不是真实架构，
 核心会直接拒绝，对应上游 issue #491 / #492；0.3.1 修好了。）
