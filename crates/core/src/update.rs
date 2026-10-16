@@ -24,7 +24,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::scan;
 use crate::util;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -32,96 +31,12 @@ pub const REPO: &str = "sdli1995/dlssg_for_sm86";
 pub const BRANCH: &str = "main";
 pub const INI_REPO_PATH: &str = "dlssg_sm86.ini";
 
-/// 代理入口 -> 仓库里的路径。
-///
-/// 关键：备用入口不是 version.dll 改个名，而是导出名不同的独立二进制
-/// （体积都不一样），所以必须下载对应那一个，不能拿 version.dll 重命名。
-///
-/// 上游 0.3.0 把它们放在 alternatives/（去掉 winhttp、新增 dbghelp 与 d3d12），0.3.1 不变。
-///
-/// 仓库里还有一个 310.1/ 目录 —— 那是**上游自己的老版本**，我们不再使用：
-/// 0.3.1 起根目录这一套文件 20 系（SM75）和 30 系（SM86）都能用，出厂 INI
-/// 不需要改任何键（内核族按物理显卡自动选，见上游 README「0.3.1」一节）。
-pub fn proxy_repo_path(proxy: &str) -> &'static str {
-    match proxy {
-        "winmm.dll" => "alternatives/winmm.dll",
-        "dbghelp.dll" => "alternatives/dbghelp.dll",
-        "dinput8.dll" => "alternatives/dinput8.dll",
-        "dxgi.dll" => "alternatives/dxgi.dll",
-        "d3d12.dll" => "alternatives/d3d12.dll",
-        _ => "version.dll",
-    }
-}
 
-pub fn local_name(repo_path: &str) -> String {
-    repo_path.rsplit('/').next().unwrap_or(repo_path).to_owned()
-}
 const USER_AGENT: &str = "FrameGen-Manager/0.1 (+https://github.com/sdli1995/dlssg_for_sm86)";
 
 /// GitHub 未登录 API 每分钟/小时的配额用尽时的提示
 const RATE_LIMIT_MSG: &str = "GitHub 接口配额用完了（未登录每小时 60 次）。\
 本地文件状态不受影响，等一会儿再点「检查更新」即可。";
-
-/// 远端文件信息。由 `probe_remote` 用 HEAD 拿到，不消耗任何 API 配额。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteFile {
-    /// 仓库里的路径，如 altnative/winmm.dll
-    pub name: String,
-    pub size: u64,
-    /// 内容的 SHA-256（64 位小写十六进制）。来自响应头的 ETag。
-    pub etag: String,
-    /// 这个指纹**是不是官方源给的**。
-    ///
-    /// 镜像给的指纹和官方对不上（gh-proxy.com 返回的是弱标签
-    /// `W/"11378bae..."`，内容哈希也完全是另一个值）。拿镜像的指纹去比"内容变没变"，
-    /// 就会出现「同一个文件每次都被判定为需要更新」—— 也就是用户报的
-    /// 「不断重复下载、停不下来」。所以指纹只在可信时参与判定。
-    pub etag_trusted: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalFile {
-    /// 本地这份文件的 git blob sha1（显示用，也是老版本判断更新的依据）
-    #[serde(default)]
-    pub blob_sha: String,
-    /// 下载时官方源给的 ETag。判断「有没有更新」就靠它。
-    #[serde(default)]
-    pub etag: String,
-    pub sha256: String,
-    pub bytes: u64,
-    pub downloaded_at: String,
-    /// 是不是用户「手动导入」放进来的（不是下载来的）。
-    /// 这种记录没有官方指纹可比 —— 判定「已就绪」只比文件在不在、大小对不对。
-    #[serde(default)]
-    pub imported: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct UpdateState {
-    pub version: Option<String>,
-    pub files: BTreeMap<String, LocalFile>,
-}
-
-impl UpdateState {
-    /// 远端指纹和本地记录不同 -> 有更新。
-    ///
-    /// 注意要传**本地文件名**（比如 winmm.dll），不是仓库路径
-    /// （altnative/winmm.dll）—— files 表是按本地文件名做 key 的。
-    /// 别拿 remote.name 去查：那是仓库路径，altnative 那四个会被永远判定成「有更新」。
-    ///
-    /// 老版本的记录里没有 etag 字段，这时按「需要更新」处理，
-    /// 重新下载一次就会补上，属于一次性成本。
-    pub fn needs_update(&self, local_name: &str, remote: &RemoteFile) -> bool {
-        let Some(l) = self.files.get(local_name) else {
-            return true;
-        };
-        // 同上：指纹不可信时不凭它说「有更新」
-        if !remote.etag_trusted {
-            return false;
-        }
-        l.etag.is_empty() || !l.etag.eq_ignore_ascii_case(&remote.etag)
-    }
-}
 
 pub fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
@@ -411,36 +326,6 @@ fn content_length_of(resp: &reqwest::blocking::Response) -> u64 {
         .unwrap_or(0)
 }
 
-/// HEAD 一个仓库文件，拿它的内容指纹。**不消耗 API 配额。**
-///
-/// 先问官方 raw，官方不通再问镜像 —— 两边都会返回 ETag，所以走镜像时
-/// 同样能拿到期望哈希，下载完照样能校验。
-pub fn probe_remote(client: &reqwest::blocking::Client, repo_path: &str) -> Result<RemoteFile> {
-    let official = official_url(repo_path);
-    let ms = mirrors("");
-    try_sources(&official, &ms, false, None, |url, prefix| {
-        let resp = client
-            .head(url)
-            // 单个 HEAD 只有 1KB 不到，6 秒足够。raw 现在会间歇性卡十几秒，
-            // 不给单请求超时的话，官方优先反而变成「每次先干等十几秒」。
-            .timeout(Duration::from_secs(6))
-            .send()
-            .map_err(|e| anyhow::anyhow!(friendly_error(&e)))?;
-        if !resp.status().is_success() {
-            bail!("返回 HTTP {}", resp.status().as_u16());
-        }
-        let size = content_length_of(&resp);
-        let etag = etag_of(&resp).ok_or_else(|| anyhow::anyhow!("没返回可用的 ETag"))?;
-        Ok(RemoteFile {
-            name: repo_path.to_owned(),
-            size,
-            etag,
-            // prefix 为空 = 官方源回答的，指纹可信
-            etag_trusted: prefix.is_empty(),
-        })
-    })
-    .map_err(|e| anyhow::anyhow!("拿不到 {repo_path} 的内容指纹（{e}）"))
-}
 
 /// 从仓库文件里抠出上游版本号。
 ///
@@ -494,71 +379,8 @@ fn version_in_line(line: &str) -> Option<String> {
     None
 }
 
-pub fn fetch_version(client: &reqwest::blocking::Client) -> Option<String> {
-    let official = format!("https://raw.githubusercontent.com/{REPO}/{BRANCH}/README.md");
-    let ms = mirrors("");
-    // 这里也要能换源 + 限时：raw 卡十几秒会把整个「检查更新」拖住，
-    // 而它只是用来在界面上显示一个版本号而已。
-    let fetched = try_sources(&official, &ms, false, None, |url, _src| {
-        let resp = client
-            .get(url)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        if !resp.status().is_success() {
-            bail!("HTTP {}", resp.status().as_u16());
-        }
-        resp.text().map_err(|e| anyhow::anyhow!("{e}"))
-    })
-    .ok();
 
-    if let Some(text) = fetched {
-        if let Some(v) = extract_version(&text) {
-            return Some(v);
-        }
-    }
-    // 兜底：本地已下载的 INI 第一行注释里也有版本号，网络抖一下不至于显示「未知」
-    let ini = util::assets_dir().ok()?.join(INI_REPO_PATH);
-    let text = std::fs::read_to_string(ini).ok()?;
-    extract_version(&text)
-}
 
-/// 给「手动导入」用的上游版本探测：**有上限**，不能让网络把导入流程拖住。
-///
-/// 只试官方地址和第一个镜像、每次 5 秒；都不通就返回 None（界面退回到上次检查的缓存值，
-/// 并如实标注「上次检查的结果」）。导入窗口前面已经等了用户几秒，这里再多等半分钟
-/// 去挨个试完所有镜像是不合理的。
-pub fn fetch_version_quick(client: &reqwest::blocking::Client) -> Option<String> {
-    let official = format!("https://raw.githubusercontent.com/{REPO}/{BRANCH}/README.md");
-    let mut urls = vec![official.clone()];
-    if let Some(m) = mirrors("").into_iter().next() {
-        urls.push(format!("{m}{official}"));
-    }
-    for url in urls {
-        let Ok(resp) = client.get(&url).timeout(Duration::from_secs(5)).send() else {
-            continue;
-        };
-        if !resp.status().is_success() {
-            continue;
-        }
-        let Ok(text) = resp.text() else { continue };
-        if let Some(v) = extract_version(&text) {
-            return Some(v);
-        }
-    }
-    None
-}
-
-/// 本机资产目录里那份 mod 的版本号。
-///
-/// 只有 0.2.4 那代在 INI 第一行写了版本（`; Native 0.2.4.`）；0.3.0 起 INI 里不带
-/// 版本号，本地也没有别的可靠来源 —— 所以这里会返回 None。界面要如实显示「未知」，
-/// 不要去猜一个数字挂在那里。
-pub fn local_asset_version() -> Option<String> {
-    let ini = util::assets_dir().ok()?.join(INI_REPO_PATH);
-    let text = std::fs::read_to_string(ini).ok()?;
-    extract_version(&text)
-}
 
 /// 官方下载地址
 pub fn official_url(repo_path: &str) -> String {
@@ -617,37 +439,6 @@ pub fn clean_stale_partials() -> usize {
     n
 }
 
-/// 本地这份文件是不是已经是最新版。
-///
-/// **必须同时满足三条**：下载记录在、指纹和远端一致、而且文件真的还在且大小对得上。
-/// 只看记录会造成「文件被删了却认为无需下载」（asset_state 那边同理）。
-pub fn local_is_current(
-    state: &UpdateState,
-    local_name: &str,
-    dest: &Path,
-    remote: &RemoteFile,
-) -> bool {
-    let Some(r) = state.files.get(local_name) else {
-        return false;
-    };
-    // 手动导入的文件没有官方指纹可比（用户就是下不动才导入的）：
-    // 只要文件还在、大小对，就算已就绪，别动不动又去下一遍。
-    if r.imported {
-        return std::fs::metadata(dest)
-            .map(|m| m.len() == r.bytes)
-            .unwrap_or(false);
-    }
-    // 指纹**只在可信时**才拿来判定。探测落到镜像时指纹和官方对不上，
-    // 用它比对会导致「文件明明在、每次都被判为需要更新」—— 用户看到的就是
-    // 「不断重复下载」。指纹不可信时退化成「记录在 + 文件在且大小对得上」。
-    if remote.etag_trusted && (r.etag.is_empty() || !r.etag.eq_ignore_ascii_case(&remote.etag)) {
-        return false;
-    }
-    // metadata 拿不到（文件不存在）就是 false
-    std::fs::metadata(dest)
-        .map(|m| m.len() == r.bytes)
-        .unwrap_or(false)
-}
 
 /// 校验通过后，把下载好的 .part 落到正式位置。
 ///
@@ -917,102 +708,15 @@ fn record_download_speed(source: &str, bytes: u64, secs: f64) {
     record_speed(source, (bytes as f64 / secs / 1024.0) as u64);
 }
 
-/// 下载记录放在**资产目录里**（`assets\update_state.json`），和资产同一个家。
-///
-/// 老版本固定写在 %APPDATA% 下（程序还叫 DLSSG-Manager 时是那个文件夹，后来是
-/// FrameGen-Manager），和资产分了家：用户把整个文件夹
-/// 拷到另一台机器（或清了 %APPDATA%），文件明明都在，工具却查不到记录，会被判定成
-/// 「需要下载」而白下 17~19 MB 的代理 DLL —— 这正是和「解压即用」冲突的地方。
-/// 现在记录跟着资产走（config / logs / game_library 本来就在程序同级）。
-fn state_path() -> Result<PathBuf> {
-    Ok(util::assets_dir()?.join("update_state.json"))
-}
 
-/// 老位置，只用于一次性的兼容读取（见 load_state）。
-/// 两个都认：改名前后 %APPDATA% 下的文件夹名不一样（FrameGen-Manager / DLSSG-Manager）。
-fn legacy_state_paths() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    if let Ok(d) = util::app_data_dir() {
-        out.push(d.join("update_state.json"));
-    }
-    if let Some(d) = util::legacy_app_data_dir() {
-        out.push(d.join("update_state.json"));
-    }
-    out
-}
 
-/// 读记录。Ok(Some) = 读到了；Ok(None) = 没有这个文件；Err = 文件在但坏了。
-fn read_state(p: &Path) -> std::result::Result<Option<UpdateState>, String> {
-    if !p.is_file() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
-    match serde_json::from_str::<UpdateState>(&text) {
-        Ok(st) => Ok(Some(st)),
-        Err(e) => Err(e.to_string()),
-    }
-}
 
-pub fn load_state() -> UpdateState {
-    if let Ok(p) = state_path() {
-        match read_state(&p) {
-            Ok(Some(st)) => return st,
-            // 记录坏了**不能静默当成「没有记录」**：下一次保存会用空记录把它覆盖掉，
-            // 用户再也查不出「为什么所有资产都被要求重新下载」。留一份 .corrupt 证据。
-            Err(e) => {
-                crate::log::line(&format!(
-                    "下载记录解析失败（{e}）：已留一份 update_state.json.corrupt，本次按空记录处理"
-                ));
-                let _ = std::fs::rename(&p, p.with_extension("json.corrupt"));
-            }
-            Ok(None) => {}
-        }
-    }
-    // 老版本留下的记录：读出来顺手迁到新位置。用户升级上来不该因为「记录换了地方」
-    // 就重新下载一遍资产。老文件不删 —— 万一用户想退回去用老版本，那边还能用。
-    for old in legacy_state_paths() {
-        if let Ok(Some(st)) = read_state(&old) {
-            let _ = save_state(&st);
-            crate::log::line(&format!(
-                "下载记录已从 {} 迁到资产目录（记录跟着资产走，换机器不用重下）",
-                old.display()
-            ));
-            return st;
-        }
-    }
-    UpdateState::default()
-}
 
-pub fn save_state(state: &UpdateState) -> Result<()> {
-    // **原子写。**直接 write 会先把原文件截断：中途断电/被杀就只剩半截 JSON，
-    // 下次启动所有资产都会被判成「需要重新下载」（白下十几 MB）。
-    let p = state_path()?;
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(state)?)?;
-    crate::util::atomic_replace(&tmp, &p).context("保存下载记录失败")
-}
 
 pub fn asset_path(name: &str) -> Result<PathBuf> {
     Ok(util::assets_dir()?.join(name))
 }
 
-/// 清空下载记录（返回清掉了几条）。
-///
-/// 一次性迁移用：老版本可以切到 310.1 版，那些用户本地那份 version.dll 是旧的。
-/// 探测落到镜像时指纹不可信，判定会退化成「记录里的字节数 == 远端字节数」——
-/// 旧记录和旧文件对得上，于是**静默跳过下载**，用户以为升级了其实还是老版本。
-/// 所以启动时把记录清一次，逼它重新下一份正确的。
-pub fn clear_download_records() -> usize {
-    let mut st = load_state();
-    let n = st.files.len();
-    if n > 0 {
-        st.files.clear();
-        let _ = save_state(&st);
-    }
-    n
-}
-
-// ------------------------------------------------- 部署用的 INI（只改用户主动选的档位）
 
 /// 出厂默认的「优化等级」（上游 0.4.0 的出厂 INI：Optimized=2；0.3.x 时期是 1）
 pub const DEFAULT_OPTIMIZED: u8 = 2;
@@ -1133,9 +837,13 @@ pub fn prepare_deploy_ini(
     optimized: u8,
     max_frames: u8,
     preset: &str,
+    sr: bool,
+    engine: &str,
+    xess_flow: &str,
+    xess_hudless: bool,
 ) -> Result<(PathBuf, Vec<String>)> {
     if !upstream.is_file() {
-        bail!("还没有下载 {INI_REPO_PATH}, 请先点「下载 / 更新资产」");
+        bail!("缺少 {INI_REPO_PATH} —— 资产随安装包内置，请检查安装是否完整（或重新安装本程序）");
     }
     /* 空串 = 没选过（老配置），按出厂默认。
        **注意不能"是默认值就跳过写文件"**：资产里那份 dlssg_sm86.ini 是上游 stock，
@@ -1144,7 +852,14 @@ pub fn prepare_deploy_ini(
        所以只有"预设选 Auto（跟随上游）+ 两个档位也是出厂值"时，才原样用 stock 文件；
        其余情况一律生成 deploy.ini。 */
     let preset = if preset.is_empty() { DEFAULT_PRESET } else { preset };
-    if preset == "Auto" && optimized == DEFAULT_OPTIMIZED && max_frames == DEFAULT_MAX_FRAMES {
+    let engine = if engine.is_empty() { "DLSS" } else { engine };
+    let flow = if xess_flow.is_empty() { "Middle" } else { xess_flow };
+    if preset == "Auto"
+        && optimized == DEFAULT_OPTIMIZED
+        && max_frames == DEFAULT_MAX_FRAMES
+        && !sr
+        && engine == "DLSS"
+    {
         return Ok((upstream.to_path_buf(), Vec::new()));
     }
     let mut out = std::fs::read_to_string(upstream).context("读取 INI 失败")?;
@@ -1161,6 +876,23 @@ pub fn prepare_deploy_ini(
     ];
     if preset != "Auto" {
         jobs.push((Some("[DLSSG]"), "Preset", preset_value, "DLSS-G 预设"));
+    }
+    /* 三个进阶开关：只在**与出厂值不同**时才写。deploy.ini 每次都从 stock 重新生成，
+       所以用户改回默认时这些键自然消失，不需要"清除"逻辑。
+       - [SuperResolution] Mode：超分加速（只对游戏用 DLSS Performance/Ultra 档时生效）
+       - [FrameGeneration] Engine：第二引擎 XeSS（本项目自己的运行器，只 2X）
+       - [XeSSFG] FlowResolution / UseHudless：只对 XeSS 引擎有意义 */
+    if sr {
+        jobs.push((Some("[SuperResolution]"), "Mode", "On".to_owned(), "超分加速"));
+    }
+    if engine == "XeSS" {
+        jobs.push((None, "Engine", "XeSS".to_owned(), "帧生成引擎"));
+        if flow != "Middle" {
+            jobs.push((Some("[XeSSFG]"), "FlowResolution", flow.to_owned(), "光流分辨率"));
+        }
+        if !xess_hudless {
+            jobs.push((Some("[XeSSFG]"), "UseHudless", "0".to_owned(), "无 HUD 合成"));
+        }
     }
     for (section, key, value, what) in jobs {
         let section_name = section.unwrap_or("");
@@ -1822,17 +1554,6 @@ pub fn cleanup_self_update_leftovers() -> usize {
 
 // ------------------------------------------------------------------ 测速
 
-/// 一个源的测速结果。
-#[derive(Debug, Clone)]
-pub struct SourceSpeed {
-    /// 镜像前缀。空串 = 官方源（这一行只做展示，不可选）。
-    pub prefix: String,
-    /// 给人看的名字
-    pub label: String,
-    /// 测速值（KB/s）。error 非空时无意义。
-    pub kbps: u64,
-    pub error: Option<String>,
-}
 
 /// 测速时读的样本大小。够判断数量级了，又不会真的把 15 MB 拖下来。
 const SPEED_TEST_BYTES: u64 = 512 * 1024;
@@ -1873,54 +1594,6 @@ fn measure_source(client: &reqwest::blocking::Client, url: &str, cancel: &Atomic
     Ok((got as f64 / el / 1024.0) as u64)
 }
 
-/// 把所有候选源测一遍。顺序：官方 raw、各镜像、官方 Release 直链。
-///
-/// 为什么这件事必须由用户自己的机器来做：镜像快慢是按**用户线路**变的。
-/// 开发者这边 gh-proxy 快，不代表用户的线路也快，反过来也一样。
-pub fn speed_test_all(
-    client: &reqwest::blocking::Client,
-    cancel: &AtomicBool,
-    mut on_progress: impl FnMut(String),
-) -> Vec<SourceSpeed> {
-    let raw = official_url("version.dll");
-    let mut targets: Vec<(String, String, String)> = Vec::new();
-    targets.push(("官方源（raw）".to_owned(), String::new(), raw.clone()));
-    for m in MIRRORS {
-        targets.push((source_label(m), m.to_owned(), format!("{m}{raw}")));
-    }
-    targets.push((
-        "官方源（Release 直链）".to_owned(),
-        String::new(),
-        release_url("dlssg-310.9.1", "nvngx_dlssg_310.9.1.zip"),
-    ));
-
-    let mut out = Vec::new();
-    for (label, prefix, url) in targets {
-        if cancelled(Some(cancel)) {
-            break;
-        }
-        on_progress(format!("正在测速：{label}"));
-        let r = measure_source(client, &url, cancel);
-        let (kbps, error) = match r {
-            Ok(k) => {
-                // 官方源的那两行不记：下载顺序里官方永远排最后，记了也没用
-                if !prefix.is_empty() {
-                    record_speed(&prefix, k);
-                }
-                (k, None)
-            }
-            Err(e) => (0, Some(e.to_string())),
-        };
-        out.push(SourceSpeed { prefix, label, kbps, error });
-    }
-    out
-}
-
-// ---------------------------------------------------------------- ZIP 单文件解压
-//
-// 只需要从 zip 里取出一个 DLL，所以手写一个最小读取器：
-// 尾部找中央目录 -> 选中 .dll 条目 -> 读本地头算数据偏移 -> flate2 解压。
-// 这样就不必引入 zip crate。
 
 fn rd_u16le(d: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([d[o], d[o + 1]])
@@ -2145,188 +1818,9 @@ pub fn zip_extract_dll(zip_path: &Path, out_path: &Path, want: &str) -> Result<S
     Ok(meta.name.clone())
 }
 
-/// 一个待下载的 DLSS 运行库。界面算「总进度」要用到它的 size。
-#[derive(Debug, Clone)]
-pub struct RuntimeStep {
-    pub prefix: &'static str,
-    pub tag: &'static str,
-    pub zip_name: &'static str,
-    pub dll_name: &'static str,
-    pub label: &'static str,
-    pub url: String,
-    pub size: u64,
-}
 
-/// 进度条用的上下文。字节数决定进度条走多远，步数只用来写「第 n/N 步」。
-#[derive(Debug, Clone, Copy)]
-pub struct ProgressCtx {
-    pub base_bytes: u64,
-    pub total_bytes: u64,
-    pub base_step: usize,
-    pub total_steps: usize,
-}
 
-/// 列出**还需要下载**的 DLSS 运行库：本地已有且是 NVIDIA 签名的不列进来。
-/// size 是 HEAD 问来的（失败就是 0，只影响进度条的分母）。
-pub fn dlss_runtime_plan(client: &reqwest::blocking::Client) -> Vec<RuntimeStep> {
-    let mut out = Vec::new();
-    for (prefix, tag, zip_name, dll_name, label) in DLSS_RUNTIME {
-        let have = asset_path(dll_name)
-            .map(|p| p.is_file() && scan::identify_dll(&p) == scan::FileIdentity::Nvidia)
-            .unwrap_or(false);
-        if have {
-            continue;
-        }
-        let url = release_url(tag, zip_name);
-        let size = probe_url(client, &url).map(|(n, _)| n).unwrap_or(0);
-        out.push(RuntimeStep {
-            prefix,
-            tag,
-            zip_name,
-            dll_name,
-            label,
-            url,
-            size,
-        });
-    }
-    out
-}
 
-/// 把 plan 里的运行库逐个下下来：下载 -> 解压 -> 删掉压缩包 -> 校验 NVIDIA 签名。
-/// 返回全部 DLL 的本地路径（包括本来就有的）。
-///
-/// 进度按**全局字节**报：ctx.base_bytes 是这批之前已经下好的字节数。
-/// 这样界面上的进度条是「总进度」，不会每换一个文件就回零。
-pub fn ensure_dlss_runtime(
-    client: &reqwest::blocking::Client,
-    cancel: &AtomicBool,
-    plan: &[RuntimeStep],
-    ctx: ProgressCtx,
-    mut progress: impl FnMut(String, f32),
-) -> Result<Vec<PathBuf>> {
-    let dir = util::assets_dir()?;
-    let mut out = Vec::new();
-
-    // 已经在本地的也一起返回，只是它们不在 plan 里（不用再下）
-    for (_p, _t, _z, dll_name, _l) in DLSS_RUNTIME {
-        let p = dir.join(dll_name);
-        if p.is_file() && scan::identify_dll(&p) == scan::FileIdentity::Nvidia {
-            out.push(p);
-        }
-    }
-
-    let frac = |done: u64| -> f32 {
-        if ctx.total_bytes > 0 {
-            (done as f64 / ctx.total_bytes as f64).min(1.0) as f32
-        } else {
-            0.0
-        }
-    };
-
-    let mut done = ctx.base_bytes;
-    for (i, step) in plan.iter().enumerate() {
-        if cancelled(Some(cancel)) {
-            bail!("{}", CANCELLED_MSG);
-        }
-        let (prefix, tag, zip_name, dll_name, label) =
-            (step.prefix, step.tag, step.zip_name, step.dll_name, step.label);
-        let step_no = ctx.base_step + i + 1;
-        let dest = dir.join(dll_name);
-        let zip_path = dir.join(zip_name);
-        progress(
-            format!("第 {step_no}/{} 步 · 下载 {label}...", ctx.total_steps),
-            frac(done),
-        );
-
-        let direct = {
-            let mut relay = |got: u64, len: u64, src: &str| {
-                let t = if len > 0 { len } else { step.size };
-                progress(
-                    format!(
-                        "第 {step_no}/{} 步 · 下载 {label} {} / {} · {}",
-                        ctx.total_steps,
-                        util::format_bytes(got),
-                        util::format_bytes(t),
-                        src
-                    ),
-                    frac(done + got),
-                );
-            };
-            // 运行库包没有官方指纹可比（发布 API 只给大小），所以这里至少把
-            // 「发布侧报的字节数」当一道闸：内容换了个大小不一样的就直接丢弃换源。
-            download_with_mirror(client, &step.url, &zip_path, cancel, &mut relay, false, Some(step.size))
-        };
-
-        let got_bytes: u64 = match direct {
-            Ok(n) => n,
-            Err(e) => {
-                // 直链彻底失败才回退去问 releases API：作者删包 / 改名时会走到这里
-                let asset = find_release_zip(client, DLSS_REPO, prefix, tag).map_err(|e2| {
-                    anyhow::anyhow!("直链下载失败（{e}）；改用 Releases 接口也没成功：{e2}")
-                })?;
-                progress(
-                    format!(
-                        "第 {step_no}/{} 步 · {label} 改用 Releases 接口重试",
-                        ctx.total_steps
-                    ),
-                    frac(done),
-                );
-                let mut relay = |got: u64, len: u64, src: &str| {
-                    let t = if len > 0 { len } else { asset.size };
-                    progress(
-                        format!(
-                            "第 {step_no}/{} 步 · 下载 {label} {} / {} · {}",
-                            ctx.total_steps,
-                            util::format_bytes(got),
-                            util::format_bytes(t),
-                            src
-                        ),
-                        frac(done + got),
-                    );
-                };
-                download_with_mirror(
-                    client,
-                    &asset.url,
-                    &zip_path,
-                    cancel,
-                    &mut relay,
-                    false,
-                    Some(asset.size),
-                )?
-            }
-        };
-        done += got_bytes;
-
-        progress(
-            format!("第 {step_no}/{} 步 · 解压 {label} ...", ctx.total_steps),
-            frac(done),
-        );
-        // 点名要哪一份：不接受「包里第一个 .dll」，否则塞个别的 NVIDIA 签名 DLL 就能顶替
-        let extracted = zip_extract_dll(&zip_path, &dest, step.dll_name)?;
-        // 按用户要求：解压完就删掉压缩包
-        let _ = std::fs::remove_file(&zip_path);
-
-        let id = scan::identify_dll(&dest);
-        if id != scan::FileIdentity::Nvidia {
-            let _ = std::fs::remove_file(&dest);
-            bail!(
-                "{label} 解出来的 {extracted} 不是 NVIDIA 官方签名（判定为 {}），已丢弃",
-                id.label()
-            );
-        }
-        let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-        progress(
-            format!(
-                "第 {step_no}/{} 步 · {label} 就绪（已校验 NVIDIA 签名，{}）",
-                ctx.total_steps,
-                util::format_bytes(size)
-            ),
-            frac(done),
-        );
-        out.push(dest);
-    }
-    Ok(out)
-}
 
 /// 一个待同步的资产文件（etag 为空表示没有指纹可比）。
 pub struct SyncItem {
@@ -2337,95 +1831,6 @@ pub struct SyncItem {
     pub size: u64,
 }
 
-/// 把一组资产文件同步到本地：下载 -> 校验 -> 记录 state。
-///
-/// 与 egui 版界面里那段内层循环同一套语义：
-///   - DLL 走镜像优先（镜像不转发 ETag，所以必须补签名校验）；
-///   - 非 DLL（如 ini）只允许官方源（有 ETag 才谈得上指纹比对）；
-///   - 进度按「总字节」算，回调交出 (说明文字, 0~1)。
-pub fn sync_assets(
-    client: &reqwest::blocking::Client,
-    items: &[SyncItem],
-    cancel: &AtomicBool,
-    mirror_prefix: &str,
-    total_bytes: u64,
-    mut on_progress: impl FnMut(String, f32),
-) -> Result<usize> {
-    let mut state = load_state();
-    let mut done: u64 = 0;
-    let mut count: usize = 0;
-    let steps = items.len();
-    for (n, it) in items.iter().enumerate() {
-        let is_dll = it.path.to_ascii_lowercase().ends_with(".dll");
-        let verifier = |p: &Path| -> Result<()> {
-            if !is_dll {
-                return Ok(());
-            }
-            let id = crate::scan::identify_dll(p);
-            if id.is_ours() {
-                return Ok(());
-            }
-            anyhow::bail!(
-                "下载到的文件不是本项目的签名版本（判定为「{}」），已丢弃并换源重试",
-                id.label()
-            )
-        };
-        let base = done;
-        let expect = it.size;
-        let label = it.local.clone();
-        let step_text = format!("第 {}/{} 步 ·", n + 1, steps);
-        let mut progress = |got: u64, len: u64, src: &str| {
-            let denom = if len > 0 { len } else { expect };
-            let f = if total_bytes > 0 {
-                ((base + got) as f64 / total_bytes as f64).min(1.0) as f32
-            } else {
-                0.0
-            };
-            on_progress(
-                format!(
-                    "{step_text} 下载 {label} {} / {} · {src}",
-                    crate::util::format_bytes(got),
-                    crate::util::format_bytes(denom)
-                ),
-                f,
-            );
-        };
-        let dl = download_auto(
-            client,
-            &it.path,
-            Sink {
-                dest: &it.dest,
-                cancel,
-                progress: &mut progress,
-            },
-            it.etag.as_deref(),
-            SourcePolicy {
-                prefix: mirror_prefix,
-                prefer_mirror: is_dll,
-                official_only: !is_dll,
-            },
-            &verifier,
-        )?;
-        done += dl.bytes;
-        state.files.insert(
-            it.local.clone(),
-            LocalFile {
-                blob_sha: dl.blob_sha,
-                etag: it.etag.clone().unwrap_or_default(),
-                sha256: dl.sha256,
-                bytes: dl.bytes,
-                downloaded_at: crate::util::now_utc(),
-                imported: false,
-            },
-        );
-        count += 1;
-    }
-    state.version = fetch_version(client);
-    save_state(&state)?;
-    Ok(count)
-}
-
-// ---------------------------------------------------------------- Steam 封面
 
 /// 给这些 appid 拉 Steam 的**竖版**封面（library_600x900，600×900 正好是卡片 .72 的比例）。
 ///
@@ -2521,42 +1926,6 @@ pub struct DownloadPlan {
     pub total: u64,
 }
 
-/// 探明本次要下载的文件（代理 DLL + INI），已是最新的会跳过。
-///
-/// 与 egui 版界面里那段构建 items 的循环逐条对应：
-///   HEAD 探测 -> 拿本地名与落盘位置 -> 判定是否已是最新 -> 不是才入列。
-pub fn plan_download(
-    client: &reqwest::blocking::Client,
-    proxy: &str,
-    state: &UpdateState,
-    mut on_step: impl FnMut(String),
-) -> Result<DownloadPlan> {
-    let specs = [proxy_repo_path(proxy).to_owned(), INI_REPO_PATH.to_owned()];
-    let mut items: Vec<SyncItem> = Vec::new();
-    let mut skipped = 0usize;
-    for path in specs {
-        let remote = probe_remote(client, &path)?;
-        let local = local_name(&path);
-        let dest = asset_path(&local)?;
-        if local_is_current(state, &local, &dest, &remote) {
-            skipped += 1;
-            continue;
-        }
-        on_step(format!(
-            "已获取 {local} 信息（{}）",
-            crate::util::format_bytes(remote.size)
-        ));
-        items.push(SyncItem {
-            local,
-            path,
-            dest,
-            etag: Some(remote.etag.clone()),
-            size: remote.size,
-        });
-    }
-    let total: u64 = items.iter().map(|i| i.size).sum();
-    Ok(DownloadPlan { items, skipped, total })
-}
 
 /// 更新日志在仓库里的路径（走 raw 取，和版本号同一套路：不占 API 配额、镜像也拿得到）。
 pub const RELEASE_NOTES_PATH: &str = "docs/release-notes.md";

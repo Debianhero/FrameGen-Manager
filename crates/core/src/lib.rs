@@ -12,5 +12,4 @@ pub mod scan;
 pub mod deploy;
 pub mod dlss5;
 pub mod sm;
-pub mod importer;
 pub mod icon;

@@ -41,6 +41,13 @@ pub struct BackupManifest {
     pub deployed_at: String,
     pub proxy_name: String,
     pub files: Vec<BackupEntry>,
+    /// 「正在安装」标记：清单**先落盘**（true），文件全部写完并校验通过后再落成 false。
+    ///
+    /// 为什么要有它：进程被硬终止（断电 / 任务管理器结束）时不会走进任何回滚分支，
+    /// 光看清单会以为"已部署"，而文件其实只写了一半。有标记就能如实告诉用户"上次没装完"。
+    /// 老清单里没有这个字段 → serde default 当 false（即"装完了"），行为与从前一致。
+    #[serde(default)]
+    pub installing: bool,
 }
 
 /// 旧记录里的代理入口这次不用了，该怎么处置。
@@ -96,6 +103,12 @@ pub enum DeployState {
         /// 帧生成照常能用，但拿不到 0.4.0 的新运行库（310.9.16）和新内核。
         /// 光看"已部署"三个字，用户根本不知道要再点一次「部署」才会换成新的。
         legacy_layout: bool,
+        /// 代理文件已经被覆盖或丢失（实测最常见的：用户后来又去开了 Smooth Motion，
+        /// 解锁组件也叫 version.dll，把帧生成的代理顶掉了）。
+        /// **记录还在、但帧生成已经失效** —— 不吭声的话界面会一直显示"已部署"。
+        proxy_replaced: bool,
+        /// 上一轮写入没走完（进程被硬终止）。见 BackupManifest.installing。
+        installing: bool,
     },
     /// 目录里有本项目的文件，但不是本工具部署的（用户之前手动装的）
     ManuallyInstalled { files: Vec<String> },
@@ -112,10 +125,16 @@ impl DeployState {
             DeployState::Deployed {
                 proxy,
                 legacy_layout,
+                proxy_replaced,
+                installing,
                 ..
             } => {
-                if *legacy_layout {
-                    // 前缀必须仍是"已部署"：界面的 stateCls 与还原按钮可用性都按它判断
+                // 前缀必须仍是"已部署"：界面的 stateCls 与还原按钮可用性都按它判断
+                if *proxy_replaced {
+                    format!("已部署 ({proxy}) · 代理文件已被覆盖或丢失（帧生成暂时失效）")
+                } else if *installing {
+                    format!("已部署 ({proxy}) · 上次安装未完成（建议重新部署或还原）")
+                } else if *legacy_layout {
                     format!("已部署 ({proxy}) · 旧版资产，建议重新部署")
                 } else {
                     format!("已部署 ({proxy})")
@@ -179,11 +198,19 @@ pub fn load_manifest(dir: &Path) -> Option<BackupManifest> {
 
 pub fn state_of(dir: &Path) -> DeployState {
     if let Some(m) = load_manifest(dir) {
+        // 记录还在 ≠ 文件还在：Smooth Motion 的解锁组件和帧生成的代理同名（version.dll），
+        // 用户后开 SM 就会把代理顶掉。这里如实看一次目录，别让界面报"已部署"骗人。
+        let proxy_path = dir.join(&m.proxy_name);
+        let proxy_replaced = crate::sm::has_our_asset(dir)
+            || !proxy_path.is_file()
+            || !crate::scan::identify_dll(&proxy_path).is_ours();
         return DeployState::Deployed {
             proxy: m.proxy_name,
             deployed_at: m.deployed_at,
             // 0.4.0 起运行库在 dlssg_sm86\ 里；这个目录不在，说明这份部署还是 0.3.x 的布局
             legacy_layout: !dir.join(RUNTIME_DIR).is_dir(),
+            proxy_replaced,
+            installing: m.installing,
         };
     }
     // Smooth Motion 的解锁组件也叫 version.dll —— 先认出它，
@@ -563,6 +590,8 @@ pub fn deploy(
         deployed_at: util::now_utc(),
         proxy_name: proxy.to_owned(),
         files: entries,
+        // 先标「正在安装」：接下来这几十行要是被硬终止，下一次启动能看出来没装完
+        installing: true,
     };
     write_manifest(&base, &manifest)?;
 
@@ -578,9 +607,9 @@ pub fn deploy(
                     .with_context(|| format!("创建目录 {}", parent.display()))?;
             }
         }
-        let tmp = target_dir.join(format!(".{}.tmp", name.replace(['\\', '/'], "_")));
+        let tmp = util::long_path(&target_dir.join(format!(".{}.tmp", name.replace(['\\', '/'], "_"))));
         // 报错里用**目标文件名**，不要把 .xxx.tmp 这种内部细节甩给用户
-        let step = std::fs::copy(src, &tmp)
+        let step = std::fs::copy(util::long_path(src), &tmp)
             .with_context(|| format!("写入 {}", name))
             .and_then(|_| util::atomic_replace(&tmp, &dst));
         if let Err(e) = step {
@@ -736,6 +765,10 @@ pub fn deploy(
         manifest.files.extend(carried);
         write_manifest(&base, &manifest)?;
     }
+
+    // 文件全部写完、校验也过了：把「正在安装」落成「安装完成」。
+    manifest.installing = false;
+    write_manifest(&base, &manifest)?;
 
     let names: Vec<&str> = payload.iter().map(|(n, _, _)| n.as_str()).collect();
     let mut msg = format!(
@@ -1006,11 +1039,16 @@ pub fn manual_files(dir: &Path) -> Vec<String> {
         return out;
     }
     for n in ["nvngx_dlssg.dll", "nvngx_dlss.dll"] {
-        if dir.join(n).is_file() {
+        let p = dir.join(n);
+        // **归属校验**：这两份运行库是 NVIDIA 官方签名的，游戏自带的也是同一份签名 ——
+        // 光看签名分不出是谁放的，只能按内容认（我们发布过的版本有精确指纹）。
+        // 对不上就**不动它**：这里没有备份，宁可留下一个文件，也不能把游戏原件永久删掉。
+        if p.is_file() && std::fs::read(&p).map(|b| is_known_ours(n, &b)).unwrap_or(false) {
             out.push(n.to_owned());
         }
     }
-    if dir.join(INI_NAME).is_file() {
+    let p = dir.join(INI_NAME);
+    if p.is_file() && std::fs::read(&p).map(|b| is_known_ours(INI_NAME, &b)).unwrap_or(false) {
         out.push(INI_NAME.to_owned());
     }
     // 插件运行时建的目录（日志 / bundle 缓存）。同上：只有确实有本项目的代理入口时
@@ -1041,7 +1079,7 @@ pub fn cleanup_manual(dir: &Path) -> Result<String> {
     for n in &files {
         // 清单里可能带「（整个目录）」这种后缀（运行时目录），按实际类型删
         let raw = n.split('（').next().unwrap_or(n).trim_end_matches('\\');
-        let p = dir.join(raw);
+        let p = util::long_path(&dir.join(raw));
         let r = if p.is_dir() {
             std::fs::remove_dir_all(&p)
         } else {
@@ -1052,9 +1090,25 @@ pub fn cleanup_manual(dir: &Path) -> Result<String> {
             Err(e) => failed.push(format!("{n}（{e}）")),
         }
     }
+    // 归属存疑的一律没删（见 manual_files / is_known_ours）。如实说出来：
+    // 既免得用户以为「清理完就干净了」，也免得下次又被当成我们的文件。
+    let kept: Vec<String> = ["nvngx_dlssg.dll", "nvngx_dlss.dll", INI_NAME]
+        .iter()
+        .filter(|n| {
+            let p = dir.join(*n);
+            p.is_file() && std::fs::read(&p).map(|b| !is_known_ours(n, &b)).unwrap_or(false)
+        })
+        .map(|n| (*n).to_owned())
+        .collect();
     let mut msg = format!("已删除 {} 项：{}", deleted.len(), deleted.join("、"));
     if !failed.is_empty() {
         msg.push_str(&format!("\n· 没删掉的：{}", failed.join("、")));
+    }
+    if !kept.is_empty() {
+        msg.push_str(&format!(
+            "\n· 这些同名文件的内容对不上我们发布过的任何一版，无法确认是本工具放的，已保留：{}",
+            kept.join("、")
+        ));
     }
     msg.push_str(&format!(
         "\n· 注意：这个目录**没有找到部署记录**（记录可能已经被清理过），所以只能删掉本工具的文件，游戏原件无法自动恢复。\n· 原件如果还在，可以到备份目录里找：{}",
@@ -1100,6 +1154,10 @@ pub fn prepare_deploy(
     fg_optimized: u8,
     fg_frames: u8,
     fg_preset: &str,
+    fg_sr: bool,
+    fg_engine: &str,
+    fg_xess_flow: &str,
+    fg_xess_hudless: bool,
 ) -> Result<PreparedDeploy> {
     let mut files = Vec::new();
     let mut notes = Vec::new();
@@ -1118,7 +1176,7 @@ pub fn prepare_deploy(
 
     let dll = crate::update::asset_path(proxy)?;
     if !dll.is_file() {
-        anyhow::bail!("资产缺失（{proxy}），请先「下载 / 更新资产」");
+        anyhow::bail!("资产缺失（{proxy}）—— 资产随安装包内置，请检查安装是否完整（或重新安装本程序）");
     }
     files.push(DeployFile::new(proxy, dll));
 
@@ -1158,14 +1216,22 @@ pub fn prepare_deploy(
     for name in &need {
         let p = crate::update::asset_path(name).unwrap_or_default();
         if !p.is_file() {
-            anyhow::bail!("缺少运行库 {name}，请先「下载 / 更新资产」");
+            anyhow::bail!("缺少运行库 {name} —— 资产随安装包内置，请检查安装是否完整（或重新安装本程序）");
         }
         files.push(DeployFile::new(name, p));
     }
 
     let asset_ini = crate::update::asset_path(crate::update::INI_REPO_PATH).unwrap_or_default();
-    let (ini_path, ini_notes) =
-        crate::update::prepare_deploy_ini(&asset_ini, fg_optimized, fg_frames, fg_preset)?;
+    let (ini_path, ini_notes) = crate::update::prepare_deploy_ini(
+        &asset_ini,
+        fg_optimized,
+        fg_frames,
+        fg_preset,
+        fg_sr,
+        fg_engine,
+        fg_xess_flow,
+        fg_xess_hudless,
+    )?;
     for n in ini_notes {
         notes.push(n);
     }
@@ -1402,6 +1468,23 @@ fn is_legacy_artifact(name: &str, bytes: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// 这份文件的内容是不是「我们发布过的某一版」（0.3.x 或 0.4.0 的资产表里能逐字节对上）。
+///
+/// 用途：**没有部署记录**时判断归属。签名只能认代理 DLL（我们自己签的），
+/// 而 NVIDIA 那两份运行库 / 那份 ini 跟游戏自带的无法靠签名区分，只能按内容认。
+/// 对不上 = 我们**不能证明**是自己放的 —— 上层要按「不动它」处理。
+fn is_known_ours(name: &str, bytes: &[u8]) -> bool {
+    if is_legacy_artifact(name, bytes) {
+        return true;
+    }
+    let short = name.rsplit(['\\', '/']).next().unwrap_or(name);
+    ASSET_INVENTORY.iter().any(|(n, size, sha)| {
+        n.rsplit(['\\', '/']).next() == Some(short)
+            && bytes.len() as u64 == *size
+            && crate::util::sha256_hex(bytes) == *sha
+    })
 }
 
 /// 测试入口：按 文件名 + 内容 判断是不是 0.3.x 那一套里的文件。
@@ -1664,8 +1747,22 @@ pub fn deploy_game(
     fg_optimized: u8,
     fg_frames: u8,
     fg_preset: &str,
+    fg_sr: bool,
+    fg_engine: &str,
+    fg_xess_flow: &str,
+    fg_xess_hudless: bool,
 ) -> Result<(String, Vec<String>)> {
-    let prep = prepare_deploy(dir, proxy, fg_optimized, fg_frames, fg_preset)?;
+    let prep = prepare_deploy(
+        dir,
+        proxy,
+        fg_optimized,
+        fg_frames,
+        fg_preset,
+        fg_sr,
+        fg_engine,
+        fg_xess_flow,
+        fg_xess_hudless,
+    )?;
     let msg = deploy(dir, proxy, &prep.files, &[])?;
     Ok((msg, prep.notes))
 }

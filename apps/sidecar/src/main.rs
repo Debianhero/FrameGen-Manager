@@ -66,10 +66,6 @@ fn progress(id: u64, msg: &str, fraction: f32) {
 
 // ---------------------------------------------------------------- 基础信息
 
-fn gpu() -> String {
-    framegen_core::gpu::nvidia_smi_gpu_name().unwrap_or_else(|| "（读不到显卡）".to_string())
-}
-
 /// 显卡 / 驱动 / 硬件加速 GPU 计划 / **路由判定**
 ///
 /// 型号名走 core 的 detect_gpu（先问 nvidia-smi，回退时只用设备树里的适配器）——
@@ -425,26 +421,6 @@ fn sm_set_game(args: &Value) -> Result<Value, String> {
     }))
 }
 
-/// 还原某个游戏：把 SM 那一项写回本工具改它之前的值（本来没设置就删掉这一项）。
-/// **只删我们自建的 profile**，NVIDIA 预置的绝不删。
-fn sm_restore_game(args: &Value) -> Result<Value, String> {
-    let name = arg_str(args, "name")?;
-    // 和 set_game_sm 用同一套推导，记录名才对得上（见那边的注释）。
-    let dir = arg_opt_str(args, "dir")?
-        .filter(|d| !d.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| arg_opt_str(args, "exe").ok().flatten().and_then(|e| {
-            std::path::Path::new(&e).parent().map(|p| p.to_path_buf())
-        }))
-        .unwrap_or_default();
-    let exe = arg_opt_str(args, "exe")?.unwrap_or_default();
-    let msg = framegen_core::sm::restore_game_sm(&name, &dir, std::path::Path::new(&exe))?;
-    framegen_core::log::line(&format!(
-        "[sm] restore_game_sm name={name} dir={}",
-        dir.display()
-    ));
-    Ok(json!({ "ok": true, "message": msg }))
-}
 
 /// 【关闭】把某个游戏的 Smooth Motion **关掉**（写 0），不是"还原成旧值"。
 /// 界面按钮写的是「关闭 Smooth Motion」，点下去就必须是关。
@@ -514,19 +490,6 @@ fn sm_component_check(args: &Value) -> Result<Value, String> {
 }
 
 /// 把备份记录里的每个游戏都还原一遍（设置页的"全部还原"）。
-fn sm_restore_all(_args: &Value) -> Result<Value, String> {
-    let (done, total, errs) = framegen_core::sm::restore_all_game_sm();
-    framegen_core::log::line(&format!("[sm] restore_all done={done} total={total}"));
-    Ok(json!({ "done": done, "total": total, "errors": errs }))
-}
-
-/// 清掉孤儿配置（我们建的、但没挂任何应用的 profile）。
-fn sm_clean_orphans(_args: &Value) -> Result<Value, String> {
-    let (removed, errs) = framegen_core::sm::clean_orphan_profiles()?;
-    framegen_core::log::line(&format!("[sm] clean_orphans removed={removed}"));
-    Ok(json!({ "removed": removed, "errors": errs }))
-}
-
 /// 批量查询多个游戏现在的 SM 状态。
 ///
 /// 状态来自**游戏真正归属的 profile**（NVIDIA 预置的那个也算），不再是"我们自建的
@@ -698,39 +661,7 @@ fn open_path(path: String) -> Result<(), String> {
         .map_err(|e| format!("{e:#}"))
 }
 
-/// 在系统浏览器里打开一个链接（发布页那类）。
-///
-/// **只放行 http/https**：这个命令的入参最终会交给系统去「打开」，
-/// 放行 file: 或自定义协议等于给了一个任意执行的口子。
-/// 用 rundll32 而不是 cmd /c start：后者会把 URL 里的 & 当命令分隔符。
-fn open_url(url: String) -> Result<(), String> {
-    let u = url.trim().to_string();
-    if !(u.starts_with("https://") || u.starts_with("http://")) {
-        return Err(format!("只允许打开 http/https 链接（收到 {u}）"));
-    }
-    std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", &u])
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("{e:#}"))
-}
 
-/// 更换资产目录（自己弹文件框）—— 改完写进配置，core 的缓存立刻失效。
-///
-/// 弹框这条路 Tauri 版是放在 spawn_blocking 里避免冻界面；sidecar 是独立进程，
-/// 弹框期间这个进程本来就在等用户，主循环停在这儿正是我们要的语义。
-fn pick_assets_dir() -> Result<Value, String> {
-    let picked = rfd::FileDialog::new()
-        .set_title("选择资产目录（存放代理 DLL 与配置）")
-        .pick_folder();
-    let Some(dir) = picked else {
-        return Ok(json!({ "canceled": true }));
-    };
-    let mut cfg = framegen_core::util::load_config();
-    cfg.asset_dir = Some(dir.clone());
-    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
-    Ok(json!({ "canceled": false, "dir": dir.display().to_string() }))
-}
 
 // ---------------------------------------------------------------- 游戏库
 
@@ -1030,17 +961,6 @@ fn pick_game_exe_at(exe: String) -> Result<Value, String> {
 }
 
 /// 同上：主进程选好新的资产目录，这里写进配置（core 的缓存随即失效）。
-fn pick_assets_dir_at(dir: String) -> Result<Value, String> {
-    let d = PathBuf::from(dir);
-    if !d.is_dir() {
-        return Err(format!("这个目录不存在：{}", d.display()));
-    }
-    let mut cfg = framegen_core::util::load_config();
-    cfg.asset_dir = Some(d.clone());
-    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
-    Ok(json!({ "canceled": false, "dir": d.display().to_string() }))
-}
-
 /// detect_tech 判图形 API / 引擎 / 自带帧生成 → 反作弊扫一遍 → 存进 cache.manual。
 /// **存 manual 而不是 scanned**：重新扫描不会把用户手动加的条目冲掉。
 fn add_game() -> Result<Value, String> {
@@ -1275,51 +1195,6 @@ fn dlss5_choices() -> Value {
     })
 }
 
-/// DLSS5 的部署状态（对话框里那一行，比 list_games 里那份更详细）。
-fn dlss5_state(dir: String) -> Result<Value, String> {
-    let p = PathBuf::from(&dir);
-    let label = framegen_core::dlss5::state_label(&p);
-    /* 目录里到底有什么 —— 界面靠它决定该给「还原」还是「清理」：
-       有记录（本工具部署的）→ 只给还原；没记录但有 ReShade/DLSS5 文件 → 给清理。 */
-    let f = framegen_core::dlss5::detect(&p);
-    let mut found = serde_json::to_value(&f).map_err(|e| format!("{e:#}"))?;
-    if let Some(o) = found.as_object_mut() {
-        o.insert("label".to_owned(), json!(f.label()));
-        o.insert("anything".to_owned(), json!(f.anything()));
-    }
-    match framegen_core::dlss5::state_of(&p) {
-        framegen_core::dlss5::State::Deployed(m) => Ok(json!({
-            "label": label,
-            "deployed": true,
-            "api": m.api,
-            "backend": m.backend,
-            "module": m.module,
-            "exe": m.exe,
-            "gpu": m.gpu,
-            "deployedAt": m.deployed_at,
-            "files": m.files.iter().map(|e| json!({
-                "name": e.rel_path,
-                "role": e.role,
-                "existedBefore": e.existed_before,
-            })).collect::<Vec<_>>(),
-            "found": found,
-            "backupsDir": backups_dir(),
-        })),
-        framegen_core::dlss5::State::NotDeployed => Ok(json!({
-            "label": label,
-            "deployed": false,
-            "found": found,
-            "backupsDir": backups_dir(),
-        })),
-        framegen_core::dlss5::State::Broken(e) => Ok(json!({
-            "label": label,
-            "deployed": false,
-            "broken": e,
-            "found": found,
-            "backupsDir": backups_dir(),
-        })),
-    }
-}
 
 /// 部署 DLSS5（ReShade + 插件 + 模型）。界面上的「部署」按钮走这里。
 fn dlss5_deploy(id: u64, args: &Value) -> Result<Value, String> {
@@ -1467,12 +1342,6 @@ fn restore_removed(key: String) -> Result<Value, String> {
 // ---------------------------------------------------------------- 部署 / 还原
 
 /// 部署状态（读现有 manifest）
-fn deploy_state(dir: String) -> String {
-    framegen_core::deploy::state_of(Path::new(&dir))
-        .label()
-        .to_string()
-}
-
 /// 入口推荐 —— 界面上的「重新检测入口」就是再调一次它。
 ///
 /// 用的是 core 的 advise_proxy：**按导入表判，不是按游戏名猜**，也不是按目录里
@@ -1503,7 +1372,17 @@ fn proxy_advice(dir: String) -> Result<Value, String> {
 ///
 /// 抽出来是为了让**命令行自测**（--deploytest）和界面走的是同一段代码 ——
 /// 否则「自测过了」和「界面上能用」是两件事。sidecar 里这条同样成立。
-fn deploy_impl(dir: &str, proxy: &str, optimized: u8, frames: u8, preset: &str) -> Result<(String, Vec<String>), String> {
+fn deploy_impl(
+    dir: &str,
+    proxy: &str,
+    optimized: u8,
+    frames: u8,
+    preset: &str,
+    sr: bool,
+    engine: &str,
+    xess_flow: &str,
+    xess_hudless: bool,
+) -> Result<(String, Vec<String>), String> {
     let gpu = framegen_core::scan::detect_gpu().unwrap_or_default();
     let route = framegen_core::scan::classify_gpu(&gpu);
     if let Some(why) = route.gate() {
@@ -1523,16 +1402,56 @@ fn deploy_impl(dir: &str, proxy: &str, optimized: u8, frames: u8, preset: &str) 
             framegen_core::update::DEFAULT_MAX_FRAMES
         ));
     }
+    // 引擎 / 超分 / XeSS 附属键：白名单校验，别让前端传进来的怪值写进游戏 INI
+    let engine = if engine.is_empty() { "DLSS" } else { engine };
+    if engine != "DLSS" && engine != "XeSS" {
+        return Err(format!("帧生成引擎只支持 DLSS / XeSS（收到 {engine}）"));
+    }
+    let flow = if xess_flow.is_empty() { "Middle" } else { xess_flow };
+    if flow != "Coarse" && flow != "Middle" && flow != "Fine" {
+        return Err(format!("光流分辨率只支持 Coarse / Middle / Fine（收到 {flow}）"));
+    }
     framegen_core::log::line(&format!(
-        "部署档位：优化等级 {optimized}、倍率上限 {frames} ｜ {dir} ｜ 入口 {proxy}"
+        "部署档位：优化等级 {optimized}、倍率上限 {frames}、超分 {}、引擎 {engine} ｜ {dir} ｜ 入口 {proxy}",
+        if sr { "开" } else { "关" }
     ));
-    framegen_core::deploy::deploy_game(Path::new(dir), proxy, optimized, frames, preset)
-        .map_err(|e| format!("{e:#}"))
+    framegen_core::deploy::deploy_game(
+        Path::new(dir),
+        proxy,
+        optimized,
+        frames,
+        preset,
+        sr,
+        engine,
+        flow,
+        xess_hudless,
+    )
+    .map_err(|e| format!("{e:#}"))
 }
 
-fn deploy_game(dir: String, proxy: String, optimized: u8, frames: u8, preset: Option<String>) -> Result<Value, String> {
+fn deploy_game(
+    dir: String,
+    proxy: String,
+    optimized: u8,
+    frames: u8,
+    preset: Option<String>,
+    sr: bool,
+    engine: Option<String>,
+    xess_flow: Option<String>,
+    xess_hudless: Option<bool>,
+) -> Result<Value, String> {
     let preset = preset.unwrap_or_default();
-    match deploy_impl(&dir, &proxy, optimized, frames, &preset) {
+    match deploy_impl(
+        &dir,
+        &proxy,
+        optimized,
+        frames,
+        &preset,
+        sr,
+        engine.unwrap_or_default().as_str(),
+        xess_flow.unwrap_or_default().as_str(),
+        xess_hudless.unwrap_or(true),
+    ) {
         Ok((msg, notes)) => Ok(json!({ "msg": msg, "notes": notes })),
         Err(e) => {
             /* 部署被拒的原因一律写进日志：用户报「装不上」时，这一行就是唯一的线索
@@ -1814,7 +1733,6 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         // 健康检查：进程起来了、stdin/stdout 通了
         "ping" => Ok(Value::String("pong".into())),
 
-        "gpu" => Ok(Value::String(gpu())),
         // force=true 时穿透缓存（界面上的手动刷新用得到）
         "gpu_info" => gpu_info(
             args.get("force").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -1840,16 +1758,12 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         "sm_info" => sm_info(args),
         "sm_set_game" => sm_set_game(args),
         "sm_turn_off_game" => sm_turn_off_game(args),
-        "sm_restore_game" => sm_restore_game(args),
-        "sm_restore_all" => sm_restore_all(args),
-        "sm_clean_orphans" => sm_clean_orphans(args),
         "sm_game_states" => sm_game_states(args),
         "sm_game_state" => sm_game_state(args),
         "sm_profile_of" => sm_profile_of(args),
         "sm_asset_deploy" => sm_asset_deploy(args),
         "sm_asset_restore" => sm_asset_restore(args),
         "sm_component_check" => sm_component_check(args),
-        "backups_dir" => Ok(Value::String(backups_dir())),
         "backups_info" => Ok(backups_info()),
         "clean_backups" => clean_backups(),
         "log_tail" => Ok(Value::String(log_tail(arg_usize(args, "lines")?))),
@@ -1857,12 +1771,6 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             open_path(arg_str(args, "path")?)?;
             Ok(Value::Null)
         }
-        "open_url" => {
-            open_url(arg_str(args, "url")?)?;
-            Ok(Value::Null)
-        }
-        "pick_assets_dir" => pick_assets_dir(),
-
         "list_games" => list_games(),
         "scan_library" => scan_library(id),
         "add_game" => add_game(),
@@ -1870,13 +1778,12 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         // 界面走的这三条：主进程弹的框（带父窗口，不会被窗口盖住）
         "add_game_at" => add_game_at(arg_str(args, "dir")?),
         "pick_game_exe_at" => pick_game_exe_at(arg_str(args, "exe")?),
-        "pick_assets_dir_at" => pick_assets_dir_at(arg_str(args, "dir")?),
+
         "game_icons" => game_icons(),
         "open_hags_settings" => open_hags_settings(),
         "remove_game" => remove_game(arg_str(args, "dir")?),
         "restore_removed" => restore_removed(arg_str(args, "key")?),
 
-        "deploy_state" => Ok(Value::String(deploy_state(arg_str(args, "dir")?))),
         "clean_legacy" => clean_legacy(arg_str(args, "dir")?),
         "proxy_advice" => proxy_advice(arg_str(args, "dir")?),
         "deploy_game" => deploy_game(
@@ -1885,6 +1792,10 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             arg_u8(args, "optimized")?,
             arg_u8(args, "frames")?,
             arg_opt_str(args, "preset")?,
+            args.get("sr").and_then(Value::as_bool).unwrap_or(false),
+            arg_opt_str(args, "engine")?,
+            arg_opt_str(args, "flow")?,
+            args.get("hudless").and_then(Value::as_bool),
         ),
         "restore" => Ok(Value::String(restore(arg_str(args, "dir")?)?)),
 
@@ -1908,7 +1819,6 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
 
         "dlss5_assets" => Ok(dlss5_assets()),
         "dlss5_choices" => Ok(dlss5_choices()),
-        "dlss5_state" => dlss5_state(arg_str(args, "dir")?),
         "dlss5_deploy" => dlss5_deploy(id, args),
         "dlss5_restore" => dlss5_restore(arg_str(args, "dir")?),
         "dlss5_detect" => dlss5_detect(arg_str(args, "dir")?),
@@ -2114,7 +2024,7 @@ fn gpu_spoof_state() -> Result<Value, String> {
 fn selftest(argv: &[String]) -> bool {
     if let Some(i) = argv.iter().position(|a| a == "--deploytest") {
         if let Some(dir) = argv.get(i + 1) {
-            match deploy_impl(dir, "version.dll", 1, framegen_core::update::DEFAULT_MAX_FRAMES, "") {
+            match deploy_impl(dir, "version.dll", 1, framegen_core::update::DEFAULT_MAX_FRAMES, "", false, "DLSS", "Middle", true) {
                 Ok((msg, notes)) => {
                     framegen_core::log::line(&format!("[deploytest] 部署成功：{msg}"));
                     for n in &notes {
@@ -2133,67 +2043,6 @@ fn selftest(argv: &[String]) -> bool {
             }
             std::process::exit(0);
         }
-    }
-
-    // --downloadtest：把资产下全（代理入口 + INI + 两个 DLSS 运行库）。
-    if argv.iter().any(|a| a == "--downloadtest") {
-        let work = (|| -> Result<String, String> {
-            let client = framegen_core::update::client().map_err(|e| format!("{e:#}"))?;
-            let state = framegen_core::update::load_state();
-            let plan = framegen_core::update::plan_download(&client, "version.dll", &state, |msg| {
-                framegen_core::log::line(&format!("[downloadtest] {msg}"));
-            })
-            .map_err(|e| format!("{e:#}"))?;
-            let runtime = framegen_core::update::dlss_runtime_plan(&client);
-            let total = plan.total + runtime.iter().map(|s| s.size).sum::<u64>();
-            let cancel = std::sync::atomic::AtomicBool::new(false);
-            let n = framegen_core::update::sync_assets(
-                &client,
-                &plan.items,
-                &cancel,
-                "https://gh-proxy.com/",
-                if total > 0 { total } else { 1 },
-                |msg, f| {
-                    framegen_core::log::line(&format!("[downloadtest] {:>3.0}% {msg}", f * 100.0));
-                },
-            )
-            .map_err(|e| format!("{e:#}"))?;
-            let ctx = framegen_core::update::ProgressCtx {
-                base_bytes: plan.total,
-                total_bytes: if total > 0 { total } else { 1 },
-                base_step: plan.items.len(),
-                total_steps: plan.items.len() + runtime.len(),
-            };
-            let paths = framegen_core::update::ensure_dlss_runtime(&client, &cancel, &runtime, ctx, |msg, f| {
-                framegen_core::log::line(&format!("[downloadtest] {:>3.0}% {msg}", f * 100.0));
-            })
-            .map_err(|e| format!("{e:#}"))?;
-            let names: Vec<String> = paths
-                .iter()
-                .map(|p| {
-                    p.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                })
-                .collect();
-            Ok(format!(
-                "下载 {n} 个文件（跳过 {} 个已是最新）｜运行库：{}",
-                plan.skipped,
-                names.join("、")
-            ))
-        })();
-        match work {
-            Ok(m) => {
-                framegen_core::log::line(&format!("[downloadtest] 成功：{m}"));
-                println!("下载成功：{m}");
-            }
-            Err(e) => {
-                framegen_core::log::line(&format!("[downloadtest] 失败：{e}"));
-                println!("下载失败：{e}");
-                std::process::exit(1);
-            }
-        }
-        std::process::exit(0);
     }
 
     // --dlss5test <目录> [api] [--restore]：DLSS5 的部署 / 还原链路走一遍。

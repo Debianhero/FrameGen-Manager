@@ -13,6 +13,10 @@
   <img src="https://img.shields.io/badge/%E5%85%8D%E5%AE%89%E8%A3%85%E8%BF%90%E8%A1%8C%E5%BA%93-Chromium%20%E5%86%85%E7%BD%AE-4C8BF5?style=flat-square" alt="no-runtime">
 </p>
 
+<p align="center">
+  中文 | <a href="README.en.md">English</a>
+</p>
+
 Windows 桌面工具，把 [sdli1995/dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm86)
 的代理 DLL + 配置部署到游戏渲染 EXE 所在目录，并自动处理 DLSS 运行库、显卡路由和入口冲突。
 
@@ -30,6 +34,11 @@ Windows 桌面工具，把 [sdli1995/dlssg_for_sm86](https://github.com/sdli1995
 - **帧生成**：给不支持 DLSS-FG 的游戏部署上游的插帧（20 / 30 系通用）
 - **Smooth Motion（实验）**：解锁 NVIDIA 驱动自带的平滑运动，**目前仅限 30 系**，要求驱动 >= 616.64
 - **关于**：版本 / 路径 / 备份 / 反馈（QQ 群 1125445047）
+
+> 界面支持**中英文切换**：开关在**顶栏**（页签右边那个下拉框）。首次启动跟随系统语言
+> （Windows 是中文就用中文，否则用英文），选过之后记住你的选择；切换立刻生效，不用重启。
+>
+> 注意：**日志正文不翻译** —— 它由后台进程直接写、原样显示，中英文界面下都是同一份。
 
 ## 下载和使用
 

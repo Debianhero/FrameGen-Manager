@@ -372,63 +372,6 @@ fn selftest() -> usize {
         }
     }
 
-    println!("\n--- 上游更新检查（走 raw 的 HEAD + ETag，完全不占 API 配额） ---");
-    match framegen_core::update::client() {
-        Ok(c) => {
-            println!("  README 版本: {:?}", framegen_core::update::fetch_version(&c));
-            let st = framegen_core::update::load_state();
-            // 和界面里一样：每个文件发一次 HEAD 拿 ETag，一次 API 都不调。
-            // 名单：6 个代理入口 + 出厂 INI，都在仓库根目录那一套里（20/30 系通用）。
-            // 上游 0.3.0 把 altnative/ 改成了 alternatives/，所以路径都从这里取。
-            let mut specs: Vec<String> = framegen_core::scan::PROXY_PRIORITY
-                .iter()
-                .map(|p| framegen_core::update::proxy_repo_path(p).to_owned())
-                .collect();
-            specs.push(framegen_core::update::INI_REPO_PATH.to_owned());
-            println!("  逐个 HEAD 取内容指纹（0 次 API 调用）：");
-            // 直链探测走镜像优先、连接超时 8s，所以这一段很快：若按官方优先，第一次
-            // 探测要先干等 github.com 的连接超时（15s）才轮到镜像。
-            let t_head = std::time::Instant::now();
-            for path in &specs {
-                match framegen_core::update::probe_remote(&c, path) {
-                    Ok(r) => {
-                        let local = framegen_core::update::local_name(path);
-                        println!(
-                            "  {:<22} etag={} size={:>9} 需要下载={}",
-                            local,
-                            &r.etag[..r.etag.len().min(10)],
-                            r.size,
-                            st.needs_update(&local, &r)
-                        );
-                    }
-                    Err(e) => println!("  {:<22} 取指纹失败: {e}", path),
-                }
-            }
-
-            println!("
-  DLSS 运行库（界面里会单独分组显示）：");
-            for (_prefix, tag, zip_name, dll_name, _label) in framegen_core::update::DLSS_RUNTIME {
-                let url = framegen_core::update::release_url(tag, zip_name);
-                let dest = framegen_core::update::asset_path(dll_name).unwrap_or_default();
-                let ready =
-                    dest.is_file() && framegen_core::scan::identify_dll(&dest) == framegen_core::scan::FileIdentity::Nvidia;
-                let size = framegen_core::update::probe_url(&c, &url).map(|(n, _)| n).unwrap_or(0);
-                println!(
-                    "  {:<22} {}  直链大小 {}  本地={}",
-                    dll_name,
-                    tag,
-                    framegen_core::util::format_bytes(size),
-                    if ready { "已就绪(NVIDIA 签名)" } else { "未下载" }
-                );
-            }
-            println!(
-                "  取指纹总耗时 {:.1}s（以前光等 github.com 连接超时就要 15s）",
-                t_head.elapsed().as_secs_f64()
-            );
-        }
-        Err(e) => println!("  客户端创建失败: {e}"),
-    }
-
     println!("\n--- 显卡与路由 ---");
     let gpu = framegen_core::scan::detect_gpu();
     let route = gpu
@@ -527,10 +470,14 @@ fn selftest() -> usize {
             framegen_core::update::DEFAULT_OPTIMIZED,
             framegen_core::update::DEFAULT_MAX_FRAMES,
             "Auto",
+            false,
+            "DLSS",
+            "Middle",
+            true,
         )
         .unwrap();
         ck(&mut fails, p == src && n.is_empty(), "预设选 Auto + 出厂档位：直接用上游原文件，不做任何改写");
-        let (p2, n2) = framegen_core::update::prepare_deploy_ini(&src, 2, 5, "Auto").unwrap();
+        let (p2, n2) = framegen_core::update::prepare_deploy_ini(&src, 2, 5, "Auto", false, "DLSS", "Middle", true).unwrap();
         let txt = std::fs::read_to_string(&p2).unwrap_or_default();
         ck(
             &mut fails,
@@ -552,7 +499,7 @@ fn selftest() -> usize {
         /* 默认预设 C 必须真的落进游戏目录那份 INI。
            这一条是防回归的：曾经"是默认值就跳过写文件"，结果部署出去的是 stock 的
            Preset=Auto —— 默认值形同虚设，而单测/肉眼都看不出来。 */
-        let (p3, _n3) = framegen_core::update::prepare_deploy_ini(&src, 2, 3, "").unwrap();
+        let (p3, _n3) = framegen_core::update::prepare_deploy_ini(&src, 2, 3, "", false, "DLSS", "Middle", true).unwrap();
         let t3 = std::fs::read_to_string(&p3).unwrap_or_default();
         ck(
             &mut fails,
@@ -560,14 +507,14 @@ fn selftest() -> usize {
             "空预设按出厂默认：部署用的 INI 里必须写着 Preset=C",
         );
         // 显式选 Auto（跟随上游出厂）时才原样用资产那份
-        let (p4, n4) = framegen_core::update::prepare_deploy_ini(&src, 2, 3, "Auto").unwrap();
+        let (p4, n4) = framegen_core::update::prepare_deploy_ini(&src, 2, 3, "Auto", false, "DLSS", "Middle", true).unwrap();
         ck(
             &mut fails,
             p4 == src && n4.is_empty(),
             "预设显式选 Auto 且档位是出厂值：直接用资产原文件，不改写",
         );
         std::fs::write(&slim, "; slim\n[General]\nEnabled=1\n").unwrap();
-        let (p5, _n5) = framegen_core::update::prepare_deploy_ini(&slim, 3, 5, "").unwrap();
+        let (p5, _n5) = framegen_core::update::prepare_deploy_ini(&slim, 3, 5, "", false, "DLSS", "Middle", true).unwrap();
         let t5 = std::fs::read_to_string(&p5).unwrap_or_default();
         ck(
             &mut fails,
@@ -704,23 +651,6 @@ fn selftest() -> usize {
         );
     }
 
-    println!("\n--- 仓库路径（20/30 系同一套文件）---");
-    ck(
-        &mut fails,
-        framegen_core::update::proxy_repo_path("version.dll") == "version.dll",
-        "默认入口 version.dll 在仓库根目录",
-    );
-    ck(
-        &mut fails,
-        framegen_core::update::proxy_repo_path("winmm.dll") == "alternatives/winmm.dll",
-        "备用入口在 alternatives/（以前叫 altnative/）",
-    );
-    ck(
-        &mut fails,
-        framegen_core::update::proxy_repo_path("dbghelp.dll") == "alternatives/dbghelp.dll"
-            && framegen_core::update::proxy_repo_path("d3d12.dll") == "alternatives/d3d12.dll",
-        "0.3.0 新增的 dbghelp / d3d12 也能找到",
-    );
     ck(
         &mut fails,
         framegen_core::update::INI_REPO_PATH == "dlssg_sm86.ini",
@@ -1062,84 +992,6 @@ fn selftest() -> usize {
             &mut fails,
             framegen_core::update::same_version_pub("0.3.5", "v0.3.5"),
             "版本号 0.3.5 和 v0.3.5 算同一个版本（镜像回退时要求两家一致）",
-        );
-    }
-
-    // ---- 导入时的「版本对照」 ----
-    // 上游源码包里根目录和 archive/0.2.4/ 各有一份 README，版本号不同：挑错会出现
-    // 「装的明明是当前版、界面却说这是 0.2.4」。
-    println!("\n--- 导入的版本对照 ---");
-    {
-        let both = [
-            (2u8, Some("0.2.4".to_owned())),
-            (0u8, Some("0.3.5".to_owned())),
-        ];
-        ck(
-            &mut fails,
-            framegen_core::importer::pick_pack_version(&both).as_deref() == Some("0.3.5"),
-            "包里同时有新旧两套 README 时取最新那套的版本",
-        );
-        ck(
-            &mut fails,
-            framegen_core::importer::pick_pack_version(&[(2u8, Some("0.2.4".to_owned()))]).as_deref() == Some("0.2.4"),
-            "只有老包时取 0.2.4",
-        );
-        ck(
-            &mut fails,
-            framegen_core::importer::pick_pack_version(&[(0u8, None), (2u8, Some("0.2.4".to_owned()))]).as_deref()
-                == Some("0.2.4"),
-            "读不出版本的条目不影响挑选",
-        );
-        ck(
-            &mut fails,
-            framegen_core::importer::pick_pack_version(&[]).is_none(),
-            "什么都没有时不编一个版本号出来",
-        );
-
-        let old = framegen_core::importer::Versions {
-            pack: Some("0.3.0".to_owned()),
-            local: Some("0.2.4".to_owned()),
-            upstream: Some("0.3.5".to_owned()),
-            upstream_cached: false,
-        };
-        ck(&mut fails, old.pack_is_old(), "0.3.0 的包 < 上游 0.3.5：要提示更新");
-        ck(
-            &mut fails,
-            old.report_lines().iter().any(|l| l.contains("比上游旧")),
-            "对照表里写明了「比上游旧」",
-        );
-        ck(
-            &mut fails,
-            old.report_lines().iter().any(|l| l.contains("0.2.4")),
-            "对照表里也写出了本机已装资产版本",
-        );
-
-        let same = framegen_core::importer::Versions {
-            pack: Some("0.3.5".to_owned()),
-            upstream: Some("0.3.5".to_owned()),
-            ..Default::default()
-        };
-        ck(&mut fails, !same.pack_is_old(), "和上游同版本：不提示更新");
-        ck(
-            &mut fails,
-            !same.report_lines().iter().any(|l| l.contains("比上游旧")),
-            "同版本时对照表不写「比上游旧」",
-        );
-
-        let unknown = framegen_core::importer::Versions::default();
-        ck(&mut fails, !unknown.pack_is_old(), "版本都未知时不乱提示");
-        ck(&mut fails, !unknown.worth_showing(), "三个号全未知时不占地方");
-        ck(
-            &mut fails,
-            framegen_core::importer::Versions {
-                upstream: Some("0.3.5".to_owned()),
-                upstream_cached: true,
-                ..Default::default()
-            }
-            .report_lines()
-            .iter()
-            .any(|l| l.contains("上次检查")),
-            "上游版本是缓存来的时候要注明来源",
         );
     }
 

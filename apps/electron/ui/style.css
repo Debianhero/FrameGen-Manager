@@ -149,6 +149,8 @@ body{
   transition:background .2s var(--ease),color .2s,transform .2s var(--ease),box-shadow .2s}
 .tab:hover{color:var(--ink);transform:translateY(-1px)}
 .tab.active{background:var(--glass-strong);color:var(--ink);font-weight:700;box-shadow:var(--sh-1), var(--gloss)}
+/* 语言下拉框在顶栏里：顶栏横向空间紧，别让它按 .input 的 min-width:150px 撑开 */
+.topbar select.input{min-width:0;padding:6px 26px 6px 10px}
 
 /* ---------------------------------------------------------------- 控件 */
 .btn{
@@ -167,6 +169,10 @@ body{
 .btn.danger{color:var(--err);border-color:rgba(198,40,40,.35)}
 .btn.small{padding:5px 10px;font-size:12.5px}
 .btn.wide{width:100%;margin-top:8px}
+/* 侧栏里的按钮允许换行：中文标签都短，从来不会换到第二行；英文的
+   "Open hardware-accelerated GPU scheduling settings" 这类长标签在 300px 卡片里
+   若强制单行会顶出卡片被裁掉（用户反馈）。 */
+.side .btn{white-space:normal;line-height:1.35}
 .input{flex:1;padding:9px 12px;border-radius:var(--r-ctl);border:1px solid var(--glass-line);background:var(--field);color:var(--ink);font:inherit;
   transition:border-color .2s, box-shadow .2s, background .2s}
 .input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(118,185,0,.22);background:var(--surface)}
@@ -194,9 +200,6 @@ select.input option{background:var(--surface);color:var(--ink)}
 .side{display:flex;flex-direction:column;gap:14px;position:sticky;top:0}
 /* 竖排卡片：卡片之间要留出间距（使用说明/设置页的几张卡现在离得太近就是这里没管） */
 .stack{display:grid;gap:16px;align-items:start}
-.setgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
-.setgrid .span2{grid-column:1 / -1}
-.removed{margin-top:16px}
 .count{background:rgba(118,185,0,.16);color:#3d6100;border-radius:999px;padding:1px 8px;font-size:11.5px;font-weight:400}
 
 /* ---------------------------------------------------------------- 信息卡 */
@@ -223,16 +226,13 @@ select.input option{background:var(--surface);color:var(--ink)}
   /* 三列网格：标签（最左，固定 44px）/ 文件名（占剩余，一行，超长省略）/ 体积（最右）。
      以前是 flex + space-between，把标签塞在名字和体积中间 —— 行与行对不齐，
      长文件名还会被挤到第二行（用户反馈）。放最左之后名字拿到的宽度最大。 */
-  display:grid;grid-template-columns:44px minmax(0,1fr) 68px;align-items:center;gap:10px;
+  display:grid;grid-template-columns:72px minmax(0,1fr) 68px;align-items:center;gap:10px;
   font-size:12.5px;padding:6px 8px;border-radius:9px;background:rgba(255,255,255,.62);border:1px solid rgba(255,255,255,.65);box-shadow:0 1px 2px rgba(16,24,40,.06);
 }
 .mod > :only-child{grid-column:1 / -1}   /* 只有一句话的行（空态、错误）横跨整行 */
 .mod b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gate{margin:8px 0 0;padding:8px 10px;border-radius:10px;font-size:12px;line-height:1.5;white-space:pre-wrap;
   background:rgba(198,40,40,.10);border:1px solid rgba(198,40,40,.28);color:var(--err)}
-.setrow{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:8px 0}
-.setrow > span{color:var(--muted);font-size:12.5px}
-/* 路径上面的小说明（资产文件夹那一处用） */
 /* 卡片里的小分组标题（帧生成 Mod 卡用） */
 .modgroup{font-size:11.5px;color:var(--muted);letter-spacing:.4px;margin:10px 0 2px;padding-top:8px;border-top:1px solid rgba(120,134,156,.18)}
 .modgroup:first-child{margin-top:2px;padding-top:0;border-top:0}
@@ -303,7 +303,6 @@ select.input option{background:var(--surface);color:var(--ink)}
   transition:opacity .15s var(--ease)}
 .qmark:hover::after{opacity:1;visibility:visible}
 
-.pathcap{font-size:12px;color:var(--muted);margin:10px 0 3px}
 /* 滚动到底部时最后一张卡要留出余量。
    为什么不用容器的 padding-bottom：多数浏览器里滚动容器的 padding-bottom 不计入可滚区域，
    实测最后一张卡会被切掉一点（用户反馈）。用最后一个子元素的 margin 一定算进去。 */
@@ -423,7 +422,7 @@ select.input option{background:var(--surface);color:var(--ink)}
 /* 注意：**进度条不在这个名单里**。它在 #layers 里、且叠在弹层之上，永远保持清晰 ——
    否则部署时用户只看到一条被糊掉的进度（用户反馈）。 */
 .topbar, .page{
-  transition:filter var(--ov-blur-out) var(--ov-ease-out);
+  transition:filter var(--ov-blur-out) var(--ease);
 }
 body.ov-open .topbar,
 body.ov-open .page{
@@ -431,7 +430,7 @@ body.ov-open .page{
   /* 进场曲线用 ease-out（起步快、收尾缓）。之前用 ease-in-out 的"慢启动"会被读成
      "点了没反应"—— 用户两次反馈慢，就是这个原因；但时长必须短（120ms），
      否则快的起步又会变成"啪"一下（第一版的错就在这：ease-out + 340ms）。 */
-  transition:filter var(--ov-blur-in) var(--ov-ease-out);
+  transition:filter var(--ov-blur-in) var(--ease);
 }
 /* 弹层背景：只负责**变暗**（进场快、出场更快）。
    整屏失焦由 body.ov-open 的页面 filter 负责 —— 这里再用 backdrop-filter 就是糊两遍，
@@ -538,7 +537,7 @@ body.ov-open .page{
 .toast.err::before{background:var(--err)}
 .toast.info::before{background:var(--info)}
 /* 提醒 / 冲突类提示用**深红**：蓝点看着像"通知"，用户明确要求红色的圆圈
-   （帧生成与 Smooth Motion 互斥那条提示就是走 warn）。 */
+   （帧生成与 Smooth Motion 同时开启那条提醒就是走 warn）。 */
 .toast.warn::before{background:#d32f2f;box-shadow:0 0 0 3px rgba(211,47,47,.22)}
 @keyframes toastIn{from{opacity:0;transform:translateX(24px) scale(.97)}to{opacity:1;transform:none}}
 

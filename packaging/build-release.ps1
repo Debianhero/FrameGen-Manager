@@ -102,6 +102,27 @@ try {
   Remove-Item $smoke -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Write-Output '[2b/5] 七道前端校验（不绿不许出包）...'
+$dev = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'dev-only'
+if (Test-Path (Join-Path $dev 'i18n-gen.py')) {
+  $env:PYTHONIOENCODING = 'utf-8'
+  $env:NODE_PATH = 'C:/Users/Administrator/.workbuddy/binaries/node/workspace/node_modules'
+  $py = 'C:/Users/Administrator/.workbuddy/binaries/python/versions/3.13.12/python.exe'
+  if (-not (Test-Path $py)) { throw "七道校验需要 python：$py 不存在" }
+  $fail = 0
+  foreach ($f in @('apps\electron\ui\app.js','apps\electron\ui\i18n.js','apps\electron\main.js','apps\electron\preload.js')) {
+    & $Node --check (Join-Path $root $f); if ($LASTEXITCODE) { $fail++; Write-Output "  语法不过：$f" }
+  }
+  & $Node (Join-Path $dev 'i18n-check.js'); if ($LASTEXITCODE) { $fail++ }
+  & $py (Join-Path $dev 'i18n-coverage.py'); if ($LASTEXITCODE) { $fail++ }
+  & $py (Join-Path $dev 'i18n-html-audit.py'); if ($LASTEXITCODE) { $fail++ }
+  & $Node (Join-Path $dev 'ui-e2e\check-t-shadow.js'); if ($LASTEXITCODE) { $fail++ }
+  & $Node (Join-Path $dev 'ui-e2e\run.js'); if ($LASTEXITCODE) { $fail++ }
+  & $py (Join-Path $dev 'i18n-sync.py'); if ($LASTEXITCODE) { $fail++ }
+  if ($fail) { throw "七道校验有 $fail 项不通过，中止打包" }
+  Write-Output '  七道校验全部通过'
+}
+
 Write-Output '[3/5] 把后台进程按软件名放好，再交给 electron-builder ...'
 # 任务管理器里显示的是**文件名**：后台进程原来叫 framegen-sidecar.exe，用户看到一条看不懂的
 # 进程。这里把它复制成「FrameGen Manager Sidecar.exe」，主程序也按这个名字找它。
