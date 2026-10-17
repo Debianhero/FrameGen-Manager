@@ -1,98 +1,39 @@
-# FrameGen Manager 更新日志
+**强烈推荐本次软件更新前请先还原所有已部署帧生成及DLSS5的游戏，避免不必要的BUG产生！**
 
-## v1.2.4
+【修复】
+1.修复1.2.6版本部署帧生成报错的问题
+2.HAGS 设置窗口遮挡已修复，现在点开GPU硬件加速设置的设置页面会出现在软件上层
+3.下载窗口背景模糊
 
-- 修复：重新部署（或换了程序版本后再部署）时，`dlssg_sm86\` 里上一次部署留下的运行库会被误当成「游戏原件」备份 —— 之后点「还原」会把我们自己的旧运行库写回游戏目录。现在按内容认得出是本工具放的，不再备份、还原也不写回。
-- 修复：部署过 Smooth Motion 之后再还原帧生成，Smooth Motion 的解锁组件会被当成「不是本工具的文件」留在游戏目录里（提示"部分还原…已跳过"）。现在还原时会把它一并收走。
+【新增】
+1.界面支持中文/英文，并且可以在顶栏切换，跟随系统语言设置
+2.部署界面新增 4 个进阶选项（超分加速 / 帧生成引擎 / 光流分辨率 / 无 HUD 合成）如果看不懂保持默认即可
+3.DLSS5 内置资产更新（新版插件+新的渲染模型，已部署过DLSS5的用户点一次部署即自动升级并清掉旧插件）
+DLSS5新的插件和新模型内置的资产来自https://www.bilibili.com/video/BV1iVJh6YEMD?spm_id_from=333.788.videopod.sections&vd_source=ae80914c86306af292e3a6fe3e9444dd
+4.部署/还原结果带「复制」按钮，方便出现问题时导出日志
+5.无法判定归属的文件自动锁定部署、引导先清理
 
-## v1.2.3
+【改进】
+1.【手动添加游戏】改为选择实际启动的 exe（帧生成/DLSS5/Smooth Motion三个页面统一）
+2.清理了废弃的代码
 
-- 新增提醒，并且**不再硬性拦截**：帧生成与 Smooth Motion 不再互相挡路（以前装了其中一个，另一个就点不动）。两者都是插帧（一个在驱动层、一个在渲染管线里），同时开通常会导致帧率反而下降、画面抖动、操作延迟变高，所以会提示「该游戏疑似已开启Smooth Motion。不建议同时开启Smooth Motion和DLSS-FG。但你可以忽略这条提示继续部署。」—— **想试可以照常继续**（按钮会写成「仍然部署」/「仍然开启」），装完后要觉得不对，关掉其中一个即可。
-- 修复：**关掉 Smooth Motion 之后，帧生成却装不上**。Smooth Motion 的解锁组件和帧生成用同一个文件名（version.dll）。上次关 Smooth Motion 时如果游戏没退干净、那个文件没删掉，帧生成这边就会显示「已被 Smooth Motion 占用」，点部署也被拦住。现在程序认得出那是本工具放的文件：**Smooth Motion 已经关了**就能直接部署帧生成（那份残留组件会被覆盖，原件有备份）；**Smooth Motion 还开着**才会拦下来，并提示你先去 Smooth Motion 页关掉它。
 
-## v1.2.2
+**It is strongly recommended to restore all deployed frame generation and DLSS5 games before this software update to avoid unnecessary bugs! ** 
 
-- 修复：**DLSS5 部署时手动选的图形 API 记不住**。以前选完这一次的部署是生效的，但关掉窗口再打开又回到「自动：未知」，还得重选一遍 —— 那个选择只当本次参数用掉了、没存下来。现在它会跟着这个游戏记住，下次打开自动帮你选好；想回到让它自己判断，就在下拉里选「自动」。
-- 修复：**手动添加游戏时误报「没有加进去」**。如果这个目录本来就在游戏库里，程序其实是「就地更新」成功的（启动 exe、图形 API、引擎、反作弊都重算了），提示却写成没加进去，而且列表还不刷新。现在会提示「已更新游戏库条目」并正常刷新。
+[Fixed]
+1. Fixed an error during deployment frame generation in version 1.2.6
+2. The HAGS settings window obstruction issue has been fixed. Now, opening the GPU hardware acceleration settings page will display it at the top of the software
+3. The background of the download window becomes blurry
 
-## v1.2.0
+[Newly Added]
+1. The interface supports both Chinese and English, can be switched in the top bar, and can be set according to the system language
+2. The deployment interface now offers 4 advanced options (Super-resolution acceleration / Frame generation engine / Optical flow resolution / No HUD synthesis). If you're unsure, just keep the default settings
+3. DLSS5 built-in resource updates (new plugins, new rendering models; users who have deployed DLSS5 can automatically upgrade and clear old plugins with just one click to deploy)
+DLSS5's new plugins and built-in resources for new models come from https://www.bilibili.com/video/BV1iVJh6YEMD?spm_id_from=333.788.videopod.sections&vd_source=ae80914c86306af292e3a6fe3e9444dd
+4. Deploy/restore results now have a "Copy" button to facilitate exporting logs when issues arise
+5. Files whose ownership cannot be determined will be automatically locked for deployment and prompted to clean up first
 
-> 1.1.0 / 1.1.1 / 1.1.2 三个版本没有单独对外发布，这次一并带上了，改动见下面三节。
+[Improvements]
+1. [Manually Add Game] Now select the actual startup exe (frame generation / DLSS5 / Smooth Motion all three pages are unified for this process)
+2. Cleared out the scrap code
 
-**本次更新前强烈建议先把所有部署过帧生成的游戏先还原！避免不必要的BUG产生！先还原先还原先还原！**
-
-【更新】
-1.帧生成资产文件同步上游https://github.com/sdli1995/dlssg_for_sm86
-2.更加具体的更新日志参见上述链接
-3.帧生成页面下的部署界面新增【DLSS-G】预设，上游配置文件默认是Auto，本软件会默认改为C模型（C模型画质会降低一点画质来提升帧数）。优化等级从默认的【1】改为【2】。可以根据个人喜欢自定义这些参数配置。
-
-## v1.1.2
-
-- 页签「设置」改名为「**关于**」（里面的内容没变，仍是版本 / 路径 / 备份），并新增「**反馈**」卡片：进群反馈与交流，群号 **1125445047**。
-- 「检查新版本」的结果说清楚了：**代码里的版本号已经写大、但安装包还没发布**时，最新版本显示成 `1.1.2（未发布）`，并附一句说明"安装包还没发布，所以不提示更新、也下载不到"。以前它只显示 `最新版本 1.1.2`，配一句"已是最新"，读起来就是"有 1.1.2 更新但你们没发"（真实反馈）。
-- 修复：设置页那句检查结果说明**从来没显示过** —— 界面代码一直在往 `#self-note` 写文字，但 HTML 里压根没有这个元素。补上了。
-- **优化等级出厂值改为 2**（与上游 0.4.0 的出厂 INI 一致）。老配置里如果还是 0.3.x 时代的出厂值 1，会**自动迁到 2 并只迁一次** —— 之后你自己改成 0/1/3 都不会再被动（只动 1：0 和 3 是明确选择，一律尊重）。
-- 帧生成页每个游戏卡片新增**资产版本徽章**：`资产 0.4.0 · 运行库 310.9.16`（绿）/ `资产 0.3.x · 运行库 310.9.1`（黄，提示该重新部署）/ 手动装的会多标一个「手动」（灰）。以前只有"已部署"三个字，看不出里面是哪一套。
-- 详情里新增「**清理旧版文件**」：列出这个游戏目录里还留着的 0.3.x 文件（含各自体积），点确认后**逐个核对哈希**再删 —— 不是你那份就不会动。手动装过旧版、之后又用新版部署过的目录，靠它才能清干净（那两份 NVIDIA 运行库没有记录、签名也认不出来）。
-- 游戏库新增「**重新部署旧版游戏（N）**」批量动作（只在库里真有旧版部署时出现）：先按内容核对清掉旧文件，再统一部署成当前版本，逐个报告结果。
-- 升级后首次打开会提示一次：「检测到 N 个游戏还在用旧版帧生成」→ 可以一键全部清理并重新部署，也可以稍后自己逐个处理（每个程序版本只问一次）。
-- 修复：**手动装过 0.3.x 的游戏，点「还原」会把我们自己的 28.6 MB 旧代理当成"游戏原件"写回游戏目录**，而且从此被当成游戏文件、本工具再也清不掉（实测复现）。现在按签名/内容指纹认得出"这是我们自己放的文件"，不再备份成游戏原件、还原也不会写回；**已经被旧版本写坏的记录在还原时会被治好并明确告知**（那份备份留在备份目录里供核对）。
-- 部署/还原的文案顺带改了两处：部署提示改为「已是本项目文件，已直接覆盖、没有当成游戏原件备份：…」；还原提示里不再罗列文件名。
-- **老用户升级提示**：如果某个游戏的部署还是 0.3.x 的旧布局（游戏目录里没有 `dlssg_sm86\\`），状态会写成「已部署 (…) · 旧版资产，建议重新部署」，而不是只显示"已部署" —— 否则用户根本不知道要再点一次「部署」才能换成 0.4.0 的新运行库与新内核。旧布局本身**照常能用**，只是拿不到新东西。
-- 修复：升级时清旧运行库失败的情况（例如游戏正开着、文件被占用）之前会把清理记录丢掉，于是之后点「还原」也永远清不掉它，而提示却写着"记录已保留"。现在记录会传下去，还原时重试。
-- 左侧资产卡片适配 0.4.0 的新布局：运行库不再显示在资产目录顶层（以前会误报「缺 2 个运行库」），改为按分发表列出 `dlssg_sm86\\` 运行库目录里的实际文件，并单独标出可选件（超分 / XeSS-FG）。
-- 部署界面新增「DLSS-G 预设」下拉：跟随游戏/驱动（Auto）/ A / B / **C · FG Lite**。**出厂默认改成 C** —— 生成帧的 GPU 时间约少 32-54%，代价是画质略低（主要在 HUD 与遮挡边缘）；想回到上游出厂行为就选「跟随游戏/驱动」。
-- 老配置（1.1.2 之前）里没有「预设」这一项：首次打开会自动补上 `fg_preset: "C"`，其它设置不动。
-- 说明：默认值写在代码里而不是改资产里那份 INI —— 老用户资产目录里的 `dlssg_sm86.ini` 可能还是上游 stock（`Preset=Auto`），只有每次部署都按代码里的默认写，结果才是确定的。
-- 升级时顺手清掉资产目录里 0.3.x 时代留下的两份运行库（nvngx_dlssg.dll / nvngx_dlss.dll，合计约 66 MB）——新版运行库在 `dlssg_sm86\\runtime\\` 里，顶层那两份留着只会让人以为还在用旧运行库。只删这两个精确文件名，用户自己放的东西不碰。
-
-## v1.1.1
-
-- 修复 1.1.0 的一个致命问题：新版资产是一整个 `dlssg_sm86\` 目录，而程序铺资产时只复制了顶层文件 —— 结果资产目录里没有运行库，点「部署」会失败。现在改为递归复制（资产仍会在缺失或大小不符时自动补回来）。
-
-## v1.1.0
-
-- 跟进上游 dlssg_for_sm86 **0.4.0**：随包运行库由 310.9.1 换成 **310.9.16**。
-- **部署方式变了**：运行库、后端、内核从代理 DLL 里搬进 `dlssg_sm86\` 目录，所以现在会把这个目录一起铺进游戏目录（代理 DLL 从 28.6 MB 缩到不到 1 MB）。
-- **老用户升级万无一失**：直接点「部署」即可 —— 会自动清掉根目录里 0.3.x 时代留下、新版已不再需要的运行库（nvngx_dlssg.dll / nvngx_dlss.dll），避免游戏优先加载到旧的那份；「还原」会把代理、INI 和整个 dlssg_sm86\ 目录一并收干净。
-- **资产会被校验**：每次部署前按内置清单逐个核对大小与 SHA256（数值取自上游 0.4.0 官方 manifest.json）。资产被安全软件清掉或安装不完整时会明确报错并拒绝部署，而不是让用户去游戏里反复试。
-- 内置资产可被新版整体覆盖：新版本安装后会按版本标记重新铺一次资产。
-- 出厂「优化等级」由 1 改为 **2**（与上游 0.4.0 出厂 INI 一致：全部加速 + 有损图像内核，并排看与档位 1 没有可见差别）；界面上各档位的说明也跟着改了。
-- 随包带上 0.4.0 的可选功能，默认关闭、需要手动改部署出去的 `dlssg_sm86.ini`：
-  · DLSS-G 预设 C（FG Lite）：`[DLSSG] Preset=C`，生成帧开销明显下降、画质略低；
-  · XeSS-FG 引擎：`[FrameGeneration] Engine=XeSS`（只 2X）；
-  · 超分 INT8：`[SuperResolution] Mode=On`（仅 RTX 30/20，预设 L/M）。
-
-## v1.0.7
-
-- 修复：版本号已经提到新版本、但对应安装包还没发布时，程序会误报"发现新版本"、点下载却 404。现在只有安装包真的在发布页上才会提示更新。
-- 修复：Smooth Motion 卡片上的徽章**慢一步**（刚开启显示"未部署"、关闭后反而显示"已被 Smooth Motion 占用"）。
-- 修复：同一个游戏被扫描成一张卡、手动选 exe 又多了另一张卡时，在扫描出来的那张点关闭会找不到组件、徽章一直显示"已被占用"。现在关闭会在这几个相关目录里找并取回组件；手动选中的 exe 与已入库条目是同一个文件时，就地更新那一条，不再多出一张卡。
-- 点「关闭 Smooth Motion」现在就是**真的关掉**（写 0）——不再出现"提示成功、其实还是开"。
-- 关闭时如果游戏还开着、解锁组件删不掉：会**明确告诉你**组件还留在游戏目录里、要先退出游戏再点一次，不再含糊地报成功。
-- Smooth Motion 页的开关做完立刻刷新卡片状态；和「帧生成」冲突的提示改用红色圆点。
-- 修复：目录里已有别人的入口文件时，Smooth Motion 的二次确认框弹不出来、按钮像点了没反应。
-
-## v1.0.6
-
-- Smooth Motion 现在写进**游戏真正归属的那个驱动配置**（NVIDIA 自带的那一份），不再自建一份挂不上游戏的配置，开启后立刻生效。
-- 「全部还原」会把驱动配置恢复成本工具改动之前的样子；改之前没有这一项的，还原后跟随全局。
-- 游戏卡片上直接显示它对应的驱动配置名与当前状态。
-- 新增「清理残留配置」：清掉旧版本建过、已经没挂任何游戏的配置；NVIDIA 自带的配置一个都不动。
-
-## v1.0.5
-
-- 新增「Smooth Motion（实验）」页：30 系显卡可解锁 NVIDIA 驱动自带的平滑运动（固定 2X）。
-- 只写单个游戏的驱动配置，不修改全局；可随时关闭或一键还原。
-- 与「帧生成」互斥：同一个游戏只能启用一个引擎（都用 version.dll）。
-- 关闭帧生成后按钮变红「还原」；Smooth Motion 已开启的游戏按钮显示为红色「关闭」。
-- 修复：帧生成与 Smooth Motion 互相认不出对方放的 version.dll。
-- 修复：深色模式样式错乱、更新检查在官方源不可达时失败等问题。
-
-## v1.0.4
-
-- 更新检查在官方源不可达时，改用「多镜像校验和一致」的方式兜底。
-
-## v1.0.3
-
-- 修复深色模式；侧车自动重启；新增日志文件与备份面板。
