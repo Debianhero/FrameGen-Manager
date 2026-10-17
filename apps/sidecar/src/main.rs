@@ -403,12 +403,19 @@ fn sm_set_game(args: &Value) -> Result<Value, String> {
             .map(|p| p.display().to_string())
             .unwrap_or_default()
     });
-    let r = framegen_core::sm::set_game_sm(
+    let r = match framegen_core::sm::set_game_sm(
         &name,
         std::path::Path::new(&dir),
         std::path::Path::new(&exe),
         on,
-    )?;
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            // 成功/失败都要进日志：用户贴日志来排障时，这里就是答案
+            framegen_core::log::line(&format!("[sm] set_game_sm name={name} on={on} 失败: {e}"));
+            return Err(e);
+        }
+    };
     framegen_core::log::line(&format!(
         "[sm] set_game_sm name={name} dir={dir} on={on} profile={} ok={} readback={:?}",
         r.profile, r.ok, r.readback
@@ -437,7 +444,13 @@ fn sm_turn_off_game(args: &Value) -> Result<Value, String> {
         })
         .unwrap_or_default();
     let exe = arg_opt_str(args, "exe")?.unwrap_or_default();
-    let msg = framegen_core::sm::turn_off_game_sm(&name, &dir, std::path::Path::new(&exe))?;
+    let msg = match framegen_core::sm::turn_off_game_sm(&name, &dir, std::path::Path::new(&exe)) {
+        Ok(m) => m,
+        Err(e) => {
+            framegen_core::log::line(&format!("[sm] turn_off_game name={name} 失败: {e}"));
+            return Err(e);
+        }
+    };
     framegen_core::log::line(&format!(
         "[sm] turn_off_game name={name} dir={}",
         dir.display()
@@ -964,13 +977,19 @@ fn pick_game_exe_at(exe: String) -> Result<Value, String> {
 /// detect_tech 判图形 API / 引擎 / 自带帧生成 → 反作弊扫一遍 → 存进 cache.manual。
 /// **存 manual 而不是 scanned**：重新扫描不会把用户手动加的条目冲掉。
 fn add_game() -> Result<Value, String> {
+    // 用户定的规则：手动添加改为**选 exe**（不是选文件夹）——部署就落在 exe 所在的那一层，
+    // 从根上避免"选了上层目录导致部署无效"的问题。
     let picked = rfd::FileDialog::new()
-        .set_title("选择游戏目录（渲染 EXE 所在的那一层，或它的上层）")
-        .pick_folder();
-    let Some(dir) = picked else {
+        .set_title("选择游戏实际启动的exe（通常在Win64文件夹下，根据实际情况选择exe！）")
+        .add_filter("可执行文件", &["exe"])
+        .pick_file();
+    let Some(exe) = picked else {
         return Ok(json!({ "canceled": true }));
     };
-    add_library_dir(&dir, None)
+    let Some(dir) = exe.parent() else {
+        return Ok(json!({ "canceled": true }));
+    };
+    add_library_dir(dir, None)
 }
 
 /// 「手动选择游戏根目录 exe 启动文件」（DLSS5 页与部署对话框的按钮）。
@@ -980,7 +999,7 @@ fn add_game() -> Result<Value, String> {
 /// （add_library_dir），所以两种加法的结果不会有第二套行为。
 fn pick_game_exe() -> Result<Value, String> {
     let picked = rfd::FileDialog::new()
-        .set_title("选择游戏的启动 exe（渲染 EXE 本体）")
+        .set_title("选择游戏实际启动的exe（通常在Win64文件夹下，根据实际情况选择exe！）")
         .add_filter("可执行文件", &["exe"])
         .pick_file();
     let Some(exe) = picked else {
@@ -1781,6 +1800,8 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
 
         "game_icons" => game_icons(),
         "open_hags_settings" => open_hags_settings(),
+        // Electron 主进程用：只拿 URI（由主进程 shell.openExternal 打开，设置页才在最前）
+        "hags_settings_uri" => Ok(json!({ "uri": framegen_core::gpu::hags_settings_uri() })),
         "remove_game" => remove_game(arg_str(args, "dir")?),
         "restore_removed" => restore_removed(arg_str(args, "key")?),
 

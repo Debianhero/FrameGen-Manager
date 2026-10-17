@@ -1297,7 +1297,12 @@ fn deploytest() -> usize {
     ]
     .iter()
     .map(PathBuf::from)
-    .find(|p| p.is_file());
+    // 必须是真·帧生成代理（我们签名的）：用户后来开了 SM 的话，version.dll 会变成
+    // SM 的解锁组件 —— 那种文件不能拿来当"本项目帧生成文件"的样本，直接跳过这段。
+    .find(|p| {
+        p.is_file()
+            && framegen_core::scan::identify_dll(p) == framegen_core::scan::FileIdentity::ThisProject
+    });
 
     match ours_src {
         None => {
@@ -1397,7 +1402,10 @@ fn deploytest() -> usize {
     ]
     .iter()
     .map(PathBuf::from)
-    .find(|p| p.is_file());
+    .find(|p| {
+        p.is_file()
+            && framegen_core::scan::identify_dll(p) == framegen_core::scan::FileIdentity::ThisProject
+    });
     match real_ours {
         None => println!("  （本机没有真实的本项目 DLL，跳过这段）"),
         Some(real) => {

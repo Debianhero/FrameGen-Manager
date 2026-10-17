@@ -1469,6 +1469,9 @@ pub fn advise_proxy(target_dir: &Path) -> ProxyAdvice {
     // 这一步同时回答了「用户是不是已经手动装过本项目」。
     let mut occupied: Vec<ExistingEntry> = Vec::new();
     let mut own_existing: Vec<ExistingEntry> = Vec::new();
+    // Smooth Motion 的解锁组件单独归一类：它可能正被用户开着（或打算开）——
+    // 推荐入口时必须**避开**它，而不是建议覆盖（覆盖 = SM 失效）。
+    let mut sm_component: Vec<ExistingEntry> = Vec::new();
     for &name in cands {
         let p = target_dir.join(name);
         if !p.is_file() {
@@ -1482,9 +1485,9 @@ pub fn advise_proxy(target_dir: &Path) -> ProxyAdvice {
         if entry.identity.is_ours() {
             own_existing.push(entry);
         } else if crate::sm::is_our_asset_file(&p) {
-            /* Smooth Motion 的解锁组件也叫 version.dll，没有我们的签名：按签名判会被
-               当成「别人的文件」，而它其实是本工具放进去的，可以直接覆盖。 */
-            own_existing.push(entry);
+            /* 走到这里的「本项目文件」不是我们签名的帧生成代理，而是 Smooth Motion
+               的解锁组件（固定指纹）—— 名字相同、作用完全不同。 */
+            sm_component.push(entry);
         } else {
             occupied.push(entry);
         }
@@ -1495,7 +1498,28 @@ pub fn advise_proxy(target_dir: &Path) -> ProxyAdvice {
         target_dir,
         find_render_exe(target_dir).as_deref(),
     );
-    let is_occupied = |n: &str| occupied.iter().any(|o| o.name == n);
+    let is_occupied = |n: &str| {
+        occupied.iter().any(|o| o.name == n) || sm_component.iter().any(|o| o.name == n)
+    };
+
+    // **推荐入口避开 SM 的解锁组件**：它可能正被用户开着，覆盖它 = SM 失效。
+    // 推荐第一个其它入口，并把共存的路子写进 reason（用户定的规则）。
+    if let Some(sc) = sm_component.first() {
+        if let Some(alt) = cands.iter().copied().find(|n| *n != sc.name && !is_occupied(n)) {
+            return ProxyAdvice {
+                recommended: alt.to_owned(),
+                reason: format!(
+                    "目录里是 Smooth Motion 的解锁组件（{0}）：推荐换用 {alt}，避免把它顶掉 —— 这样 Smooth Motion 和帧生成就能共存",
+                    sc.name
+                ),
+                occupied,
+                own_existing,
+                undetermined: false,
+                sm_likely_on,
+                scanned: 0,
+            };
+        }
+    }
 
     // 已经装过本项目的话，直接复用已有入口 —— 比重新挑一个更合理，
     // 否则目录里会留下两个代理，上游 README 明确不建议这样。

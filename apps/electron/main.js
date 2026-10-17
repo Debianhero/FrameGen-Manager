@@ -475,27 +475,48 @@ async function offerSelfUpdate(info) {
 }
 
 const PICKERS = {
+  // 用户定的规则：手动添加一律**选 exe**（不是选文件夹）——部署就落在 exe 所在的那一层，
+  // 从根上避免"选了上层目录导致部署无效"。所以 add_game 也走 exe 选择 + pick_game_exe_at
+  // （sidecar 会取 exe 所在的那一层入库，与 DLSS5 / SM 的手动添加同一份逻辑）。
+  // 标题/过滤器名是**中英各一套**：弹窗弹出时从界面读当前语言（原生对话框没有 i18n 体系）。
   add_game: {
-    title: '选择游戏目录（渲染 EXE 所在的那一层，或它的上层）',
-    properties: ['openDirectory'],
-    next: 'add_game_at', key: 'dir',
+    title: {
+      zh: '选择游戏实际启动的exe（通常在Win64文件夹下，根据实际情况选择exe！）',
+      en: 'Pick the exe the game actually launches (usually under the Win64 folder - choose according to the actual situation!)',
+    },
+    filterName: { zh: '可执行文件', en: 'Executable' },
+    properties: ['openFile'],
+    extensions: ['exe'],
+    next: 'pick_game_exe_at', key: 'exe',
   },
   pick_game_exe: {
-    title: '选择游戏的启动 exe（渲染 EXE 本体）',
+    title: {
+      zh: '选择游戏实际启动的exe（通常在Win64文件夹下，根据实际情况选择exe！）',
+      en: 'Pick the exe the game actually launches (usually under the Win64 folder - choose according to the actual situation!)',
+    },
+    filterName: { zh: '可执行文件', en: 'Executable' },
     properties: ['openFile'],
-    filters: [{ name: '可执行文件', extensions: ['exe'] }],
+    extensions: ['exe'],
     next: 'pick_game_exe_at', key: 'exe',
   },
   pick_assets_dir: {
-    title: '选择资产目录（存放代理 DLL 与配置）',
+    title: { zh: '选择资产目录（存放代理 DLL 与配置）', en: 'Pick the assets folder (holds the proxy DLL and config)' },
     properties: ['openDirectory'],
     next: 'pick_assets_dir_at', key: 'dir',
   },
 };
 
 async function pickFileThenCall(spec) {
-  const opt = { title: spec.title, properties: spec.properties };
-  if (spec.filters) opt.filters = spec.filters;
+  // 原生对话框跟着界面语言走：弹出前从渲染进程读一次当前语言（读不到就按中文）
+  let lang = 'zh';
+  if (mainWin && !mainWin.isDestroyed()) {
+    try {
+      lang = (await mainWin.webContents.executeJavaScript('window.getLang ? getLang() : "zh"')) || 'zh';
+    } catch (e) { lang = 'zh'; }
+  }
+  const pick = (v) => (v && typeof v === 'object') ? (v[lang] || v.zh) : v;
+  const opt = { title: pick(spec.title), properties: spec.properties };
+  if (spec.extensions) opt.filters = [{ name: pick(spec.filterName), extensions: spec.extensions }];
   if (mainWin && !mainWin.isDestroyed()) opt.defaultPath = app.getPath('home');
   const r = await dialog.showOpenDialog(mainWin, opt);
   if (!r || r.canceled || !r.filePaths || !r.filePaths.length) return { canceled: true };
@@ -564,6 +585,14 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(function () {
     ipcMain.handle('fgm:invoke', function (_e, cmd, args) {
       if (PICKERS[cmd]) return pickFileThenCall(PICKERS[cmd]);
+      if (cmd === 'open_hags_settings') {
+        // 从主进程打开：主进程有前台窗口，设置页才会弹到应用**前面** ——
+        // sidecar 是无窗进程，它 ShellExecute 出来的设置页会被压在应用下面（用户反馈）。
+        return callSidecar('hags_settings_uri').then(function (r) {
+          const uri = (r && r.uri) || 'ms-settings:display-advancedgraphics';
+          return shell.openExternal(uri).then(function () { return r; });
+        });
+      }
       return callSidecar(cmd, args).then(function (result) {
         if (cmd === 'check_self_update' && result && result.hasUpdate) {
           offerSelfUpdate(result);

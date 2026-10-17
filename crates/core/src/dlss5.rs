@@ -41,6 +41,11 @@ pub const BACKEND_RESHADE: &str = "reshade";
 pub const MODEL_NAME: &str = "nvngx_dlssnr.dll";
 pub const ADDON_PREFIX: &str = "renodx-dlss5";
 pub const ADDON_EXT: &str = ".addon64";
+/// 历史版本 DLSS5 资产的指纹：升级部署时靠它认出「旧插件是我们发的」并清掉
+/// （更老的构建部署时没记录哈希，光靠部署记录认不全 —— 漏了就会新旧两个插件共存）。
+pub const LEGACY_ADDON_SHA256: [&str; 1] = [
+    "ee99295d60426c9e05165ac4cb44a9ce773ff05b39bd7ae4a3c0f61e53b6c8a0", // renodx-dlss5-v8.5-model.addon64
+];
 pub const SETUP_PREFIX: &str = "ReShade_Setup_";
 pub const RE_INI: &str = "ReShade.ini";
 pub const RE_LOG: &str = "ReShade.log";
@@ -126,7 +131,12 @@ fn newest_with(dir: &Path, prefix: &str, suffix: &str) -> Option<PathBuf> {
         {
             continue;
         }
-        let v = version_key(&name);
+        // 无版本段的新命名（renodx-dlss5.addon64）= 当前版，视为最新
+        let v = if name.chars().any(|c| c.is_ascii_digit()) {
+            version_key(&name)
+        } else {
+            (u32::MAX, 0, 0)
+        };
         let better = match &best {
             None => true,
             Some((a, b, c, n, _)) => v > (*a, *b, *c) || (v == (*a, *b, *c) && name > *n),
@@ -1101,7 +1111,8 @@ pub fn deploy(
             .find(|e| &e.rel_path == name)
             .and_then(|r| r.deployed_sha256.clone())
             .map(|d| d == cur)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || LEGACY_ADDON_SHA256.contains(&cur.as_str());
         if still_ours && std::fs::remove_file(&p).is_ok() {
             removed_addons.push(name.clone());
         }
@@ -1308,7 +1319,12 @@ fn first_addon_in(dir: &Path) -> Option<String> {
         if !low.starts_with(ADDON_PREFIX) || !low.ends_with(ADDON_EXT) {
             continue;
         }
-        let v = version_key(&name);
+        // 无版本段的新命名（renodx-dlss5.addon64）= 当前版，视为最新
+        let v = if name.chars().any(|c| c.is_ascii_digit()) {
+            version_key(&name)
+        } else {
+            (u32::MAX, 0, 0)
+        };
         if best.as_ref().map(|(a, b, c, _)| v > (*a, *b, *c)).unwrap_or(true) {
             best = Some((v.0, v.1, v.2, name));
         }

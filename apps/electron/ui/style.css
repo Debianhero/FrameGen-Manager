@@ -539,6 +539,12 @@ body.ov-open .page{
 /* 提醒 / 冲突类提示用**深红**：蓝点看着像"通知"，用户明确要求红色的圆圈
    （帧生成与 Smooth Motion 同时开启那条提醒就是走 warn）。 */
 .toast.warn::before{background:#d32f2f;box-shadow:0 0 0 3px rgba(211,47,47,.22)}
+/* toast 里的「复制」按钮：独占一行、靠右（挤在文字后面会顶着字，用户反馈不美观）；
+   浅色描边才在深色玻璃上看得清 */
+.toast-actions{margin-top:10px;text-align:right}
+.toast .btn{display:inline-block;padding:3px 14px;font-size:11.5px;
+  background:transparent;color:#f2f5f9;border:1px solid rgba(255,255,255,.35)}
+.toast .btn:hover{background:rgba(255,255,255,.12)}
 @keyframes toastIn{from{opacity:0;transform:translateX(24px) scale(.97)}to{opacity:1;transform:none}}
 
 /* ---------------------------------------------------------------- 进度条 */

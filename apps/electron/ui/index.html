@@ -79,8 +79,8 @@
         </div>
         <div class="lh-actions">
           <span class="pickwrap">
-            <button class="btn" id="btn-add-game" type="button" data-i18n-attr="title" data-i18n="Steam / Epic / WeGame 扫不到的游戏，自己指一个目录" title="Steam / Epic / WeGame 扫不到的游戏，自己指一个目录" data-i18n-text="手动添加游戏exe启动根目录">手动添加游戏exe启动根目录</button>
-            <span class="qmark" role="img" aria-label="当扫描游戏库时没有找到自己的游戏请在这里手动添加游戏exe启动根目录文件夹路径！请注意若选错路径会导致部署帧生成无效！" data-tip="当扫描游戏库时没有找到自己的游戏请在这里手动添加游戏exe启动根目录文件夹路径！请注意若选错路径会导致部署帧生成无效！" data-i18n-attr="aria-label data-tip" data-i18n="当扫描游戏库时没有找到自己的游戏请在这里手动添加游戏exe启动根目录文件夹路径！请注意若选错路径会导致部署帧生成无效！">?</span>
+            <button class="btn" id="btn-add-game" type="button" data-i18n-attr="title" data-i18n="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" title="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" data-i18n-text="手动添加游戏">手动添加游戏</button>
+            <span class="qmark" role="img" aria-label="扫描游戏库时没找到你的游戏？点这里手动添加游戏：选择游戏实际启动的 exe（通常在 Win64 文件夹下，根据实际情况选择）！选错 exe 会导致部署帧生成无效！" data-tip="扫描游戏库时没找到你的游戏？点这里手动添加游戏：选择游戏实际启动的 exe（通常在 Win64 文件夹下，根据实际情况选择）！选错 exe 会导致部署帧生成无效！" data-i18n-attr="aria-label data-tip" data-i18n="扫描游戏库时没找到你的游戏？点这里手动添加游戏：选择游戏实际启动的 exe（通常在 Win64 文件夹下，根据实际情况选择）！选错 exe 会导致部署帧生成无效！">?</span>
           </span>
           <button class="btn" id="btn-removed-games" type="button" data-i18n-attr="title" data-i18n="看看从游戏库里移除过哪些游戏，可以放回来" title="看看从游戏库里移除过哪些游戏，可以放回来" data-i18n-text="已被移除的游戏">已被移除的游戏</button>
           <button class="btn hidden" id="btn-redeploy-legacy" type="button" data-i18n="重新部署旧版游戏">重新部署旧版游戏</button>
@@ -123,7 +123,7 @@
         </div>
         <div class="lh-actions">
           <button class="btn primary" id="btn-sm-scan" type="button" data-i18n-attr="title" data-i18n="扫描 Steam / Epic / WeGame 的游戏库（只读）" title="扫描 Steam / Epic / WeGame 的游戏库（只读）" data-i18n-text="扫描游戏库">扫描游戏库</button>
-          <button class="btn" id="btn-sm-pick" type="button" data-i18n-attr="title" data-i18n="有些游戏扫不出来：直接指它的启动 exe，Smooth Motion 就作用在它身上" title="有些游戏扫不出来：直接指它的启动 exe，Smooth Motion 就作用在它身上" data-i18n-text="手动选择游戏根目录exe启动文件">手动选择游戏根目录exe启动文件</button>
+          <button class="btn" id="btn-sm-pick" type="button" data-i18n-attr="title" data-i18n="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（Smooth Motion 就作用在它身上）" title="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（Smooth Motion 就作用在它身上）" data-i18n-text="手动添加游戏">手动添加游戏</button>
         </div>
       </div>
       <div class="liblist" id="sm-list"></div>
@@ -139,7 +139,7 @@
   <div class="toolbar">
     <button class="btn primary" id="btn-dlss5-scan" type="button" data-i18n="扫描游戏库">扫描游戏库</button>
     <button class="btn" id="btn-dlss5-removed" type="button" data-i18n="已被移除的游戏">已被移除的游戏</button>
-    <button class="btn" id="btn-dlss5-pick" type="button" data-i18n-attr="title" data-i18n="有些游戏扫不出来：直接指它的启动 exe，部署就落在 exe 所在的那一层" title="有些游戏扫不出来：直接指它的启动 exe，部署就落在 exe 所在的那一层" data-i18n-text="手动选择游戏根目录exe启动文件">手动选择游戏根目录exe启动文件</button>
+    <button class="btn" id="btn-dlss5-pick" type="button" data-i18n-attr="title" data-i18n="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" title="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" data-i18n-text="手动添加游戏">手动添加游戏</button>
     <div class="spacer"></div>
   </div>
   <section class="section">

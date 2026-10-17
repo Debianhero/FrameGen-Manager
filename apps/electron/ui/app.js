@@ -148,11 +148,28 @@
 
   function layers() { return $('layers'); }
 
-  function toast(msg, kind, ms) {
+  function toast(msg, kind, ms, copyText) {
     var root = layers();
     if (!root) return null;
     if (!toastWrap) { toastWrap = h('div', { class: 'toasts' }); root.appendChild(toastWrap); }
     var node = h('div', { class: 'toast ' + (kind || 'info'), text: backText(msg) });
+    if (copyText) {
+      // 一键把这条提示的全文复制出去（用户报障时直接贴到 Issues）。
+      // 按钮单独占一行、靠右 —— 挤在文字后面会顶着最后一个字，不好看（用户反馈）。
+      var cp = h('button', { class: 'btn small', type: 'button', text: t('复制') });
+      cp.addEventListener('click', function (ev) {
+        ev.stopPropagation();   // 别触发 toast 本身"点了就消失"
+        var ta = document.createElement('textarea');
+        ta.value = copyText;
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        var okCopy = false;
+        try { okCopy = document.execCommand('copy'); } catch (e) { okCopy = false; }
+        document.body.removeChild(ta);
+        if (okCopy) { cp.textContent = t('已复制'); setTimeout(function () { cp.textContent = t('复制'); }, 1600); }
+      });
+      node.appendChild(h('div', { class: 'toast-actions' }, [cp]));
+    }
     node.addEventListener('click', function () { if (node.parentNode) node.parentNode.removeChild(node); });
     toastWrap.appendChild(node);
     while (toastWrap.children.length > 4) toastWrap.removeChild(toastWrap.firstChild);
@@ -1195,13 +1212,17 @@
   }
 
   function openGameDialog(g) {
-  if (/Smooth Motion/.test((g && g.deployed) || '')) {
-    toast(t('这个游戏目录里是 Smooth Motion 的解锁组件（它和帧生成都用 version.dll）。请先到「Smooth Motion」页把这个游戏关闭或还原，再来部署帧生成。'), 'warn', 12000);
-    return;
-  }
+  // 游戏目录里是 Smooth Motion 的解锁组件（用户先开了 SM）时**不再拦**：按用户定的规则，
+  // 这种情况本来就该能部署帧生成 —— 前提是入口避开 version.dll（否则会把解锁组件顶掉）。
+  // 所以这里把默认入口自动切到第一个不是 version.dll 的代理，并在入口建议区说明原因。
+  var smOwnsDir = /Smooth Motion/.test((g && g.deployed) || '');
     var sel = h('select', { class: 'input' });
     PROXIES.forEach(function (p) { sel.appendChild(h('option', { value: p, text: p })); });
     sel.value = PROXY;
+    if (smOwnsDir && PROXY === 'version.dll') {
+      var alt = PROXIES.filter(function (p) { return p !== 'version.dll'; })[0];
+      if (alt) sel.value = alt;
+    }
 
     var targetDir = g.target || g.dir || '';
     var targetSel = h('select', { class: 'input' });
@@ -1346,8 +1367,12 @@
       restoreBtn.disabled = true;
       restoreBtn.title = t('这个游戏还没部署过帧生成');
     } else if (manualInstall) {
-      restoreBtn.textContent = t('清理手动安装');
-      restoreBtn.title = t('目录里的帧生成文件不是本工具放的：可以帮你把它们删掉（没有备份，恢复不了原件）');
+      // 用户定的规则：无法判定归属时**不许直接部署** —— 按钮锁定，先点红色【清理】。
+      restoreBtn.textContent = t('清理');
+      restoreBtn.className = 'btn danger';
+      restoreBtn.title = t('目录里的帧生成文件无法判定是否为本工具部署：先清理，再部署。');
+      deployBtn.disabled = true;
+      deployBtn.title = t('检测到无法判定归属的帧生成文件：先点【清理】，清理完再部署。');
     }
     var closeBtn = h('button', { class: 'x', type: 'button', text: '×' });
     var readiness = h('p', { class: 'hint' });
@@ -1363,6 +1388,11 @@
         readiness.textContent = t('资产目录里还没有 ') + sel.value +
           t(' —— 资产目录里还没有它：换一个已就绪的入口，或检查安装是否完整（资产随安装包内置）。');
         deployBtn.disabled = true;
+      } else if (manualInstall) {
+        // 用户定的规则：无法判定归属时不许部署，先【清理】再部署
+        readiness.className = 'hint warn';
+        readiness.textContent = t('检测到无法判定是否为本工具部署的帧生成文件 —— 部署已锁定：先点【清理】，清理完再部署。');
+        deployBtn.disabled = true;
       } else {
         readiness.className = 'hint';
         readiness.textContent = t('资产里已就绪：') + sel.value;
@@ -1373,6 +1403,7 @@
     sel.addEventListener('change', refreshReady);
 
     var adviceBox = h('div', { class: 'advice' });
+    if (smOwnsDir) adviceBox.appendChild(h('div', { class: 'hint warn', text: t('目录里现在是 Smooth Motion 的解锁组件：入口已自动避开 version.dll —— 保持这个选择，Smooth Motion 和帧生成就能共存。') }));
     var adviceBusy = false;
 
     var smOn = false;
@@ -1478,12 +1509,13 @@
     var ov = openOverlay(dialog);
     closeBtn.addEventListener('click', function () { ov.close(); });
     deployBtn.addEventListener('click', function () {
-      doDeploy(g, targetDir, sel.value, stateEl, deployBtn, ov, Number(optSel.value), Number(frmSel.value), String(preSel.value || ''), smOn);
+      doDeploy(g, targetDir, sel.value, stateEl, deployBtn, ov, Number(optSel.value), Number(frmSel.value), String(preSel.value || ''), smOn,
+        srSel.value === '1', engSel.value, flowSel.value, hudSel.value === '1');
     });
     restoreBtn.addEventListener('click', function () { doRestore(g, targetDir, stateEl, ov); });
   }
 
-  function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset, smOn) {
+  function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset, smOn, srOn, engine, flow, hudless) {
     var body = t('会先备份被覆盖的原件，之后可以一键还原。');
     if (smOn) body += '\n\n' + SM_CONFLICT_TEXT;
     var dfltPreset = (CFG && CFG.defaultPreset) || 'C';
@@ -1503,8 +1535,8 @@
         [t('优化等级'), optLabelOf(optimized)],
         [t('倍率上限'), frmLabelOf(frames)],
         [t('DLSS-G 预设'), presetLabelOf(preset)],
-        [t('超分加速'), srSel.value === '1' ? t('开') : t('关')],
-        [t('帧生成引擎'), engSel.value],
+        [t('超分加速'), srOn ? t('开') : t('关')],
+        [t('帧生成引擎'), engine],
         [t('部署目标'), targetDir || t('（未指定）')]
       ],
       body: body
@@ -1516,20 +1548,20 @@
       showBar(t('正在安装…'), 0.35);
       invoke('deploy_game', {
         dir: targetDir, proxy: proxy, optimized: optimized, frames: frames, preset: preset,
-        sr: srSel.value === '1', engine: engSel.value, flow: flowSel.value, hudless: hudSel.value === '1'
+        sr: srOn, engine: engine, flow: flow, hudless: hudless
       }).then(function (r) {
         rememberDeployLevels(optimized, frames, preset);
-        deployLsSet('sr', srSel.value); deployLsSet('engine', engSel.value);
-        deployLsSet('flow', flowSel.value); deployLsSet('hudless', hudSel.value);
+        deployLsSet('sr', srOn ? '1' : '0'); deployLsSet('engine', engine);
+        deployLsSet('flow', flow); deployLsSet('hudless', hudless ? '1' : '0');
         stateEl.textContent = t('已部署（') + proxy + t('）');
         stateEl.className = 'ok';
         var msg = t('安装完成（优化等级 ') + optLabelOf(optimized) + t('、倍率上限 ') + frmLabelOf(frames) +
-          (srSel.value === '1' ? t('、超分加速 开') : '') +
-          (engSel.value === 'XeSS' ? t('、引擎 XeSS') : '') +
+          (srOn ? t('、超分加速 开') : '') +
+          (engine === 'XeSS' ? t('、引擎 XeSS') : '') +
           (preset ? t('、DLSS-G 预设 ') + presetLabelOf(preset) : '') + t('）');
         if (r && r.msg) msg += '\n' + r.msg;
         if (r && r.notes && r.notes.length) msg += '\n\n' + r.notes.join('\n');
-        toast(msg, 'ok', 15000);
+        toast(t('已完成'), 'ok', 5000, msg);
         if (ov) ov.close();
         refreshLibrary();
       }).catch(function (e) {
@@ -1564,7 +1596,7 @@
       invoke('restore', { dir: targetDir }).then(function (r) {
         stateEl.textContent = t('未部署');
         stateEl.className = '';
-        toast(String(r || t('已完成还原')), 'ok', 14000);
+        toast(t('已还原'), 'ok', 5000, String(r || ''));
         if (ov) ov.close();
         refreshLibrary();
       }).catch(function (e) {
@@ -1664,6 +1696,12 @@
         readiness.className = 'risk strong';
         readiness.textContent = t('不能部署：') + backText(gate);
         deployBtn.disabled = true;
+      } else if (FOUND && FOUND.anything && !FOUND.ours) {
+        // 用户定的规则：目录里有 DLSS5 相关文件、但无法判定是不是本工具部署的 ——
+        // 不许直接部署（避免和来路不明的文件混装），先【卸载 ReShade / DLSS5】清空再部署。
+        readiness.className = 'hint warn';
+        readiness.textContent = t('检测到已装文件但无法判定是否为本工具部署 —— 部署已锁定：先点【卸载 ReShade / DLSS5】清空，再部署。');
+        deployBtn.disabled = true;
       } else if (apiUnknown) {
         readiness.className = 'hint warn';
         readiness.textContent = t('图形 API 是「自动」，但这个游戏认不出用哪个 API —— 部署前请在下面手动选一个（DX9/DX10/DX11/DX12/Vulkan/OpenGL）。');
@@ -1734,6 +1772,7 @@
           foundEl.textContent = t('未检测到 ReShade / DLSS5');
           foundEl.className = '';
         }
+        refreshReady();   // 检测结果变了，部署按钮的锁定状态要跟着重算
         return f;
       }).catch(function (e) {
         foundEl.textContent = t('检测失败：') + errText(e);
@@ -1918,6 +1957,7 @@
           toast(String((r && r.msg) || t('已完成还原')), 'ok', 16000);
           ov.close();
           refreshLibrary();
+          refreshFound();
         }).catch(function (e) {
           stateEl.textContent = t('还原失败');
           stateEl.className = 'err';
@@ -2158,8 +2198,11 @@
         var tailText = (res && res.text) || '';
         var tailBad = !!(res && res.bad);
         var ok = r && r.ok && !tailBad;
-        var msg = (backText(r && r.message) || (on ? t('已开启') : t('已关闭'))) + (tailText ? t('；') + tailText : '');
-        toast((ok ? '' : t('未生效：')) + msg, ok ? 'ok' : 'warn', ok ? 9000 : 14000);
+        // 用户定的口径：成功只说【已开启】/【已关闭】，长说明一律进日志（core 侧已记录）；
+        // 但失败的部分（驱动没写成 / 组件没取回）必须照说，不然没法排障。
+        var msg = on ? t('已开启') : t('已关闭');
+        if (!ok || tailBad) msg += (tailText ? t('；') + tailText : '');
+        toast(msg, ok ? 'ok' : 'warn', ok ? 9000 : 14000);
         var done = ok ? refreshLibrary().catch(function () { }) : Promise.resolve();
         done.then(function () { return paintSmList(); }).catch(function () { });
         return r;

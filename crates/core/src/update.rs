@@ -1555,44 +1555,6 @@ pub fn cleanup_self_update_leftovers() -> usize {
 // ------------------------------------------------------------------ 测速
 
 
-/// 测速时读的样本大小。够判断数量级了，又不会真的把 15 MB 拖下来。
-const SPEED_TEST_BYTES: u64 = 512 * 1024;
-/// 单个源的测速上限。慢源不能在测速阶段把用户卡住。
-const SPEED_TEST_CAP_SECS: f64 = 4.0;
-
-/// 测一个源的下载速率：只读前若干字节就断开，**不落盘、不校验**。
-fn measure_source(client: &reqwest::blocking::Client, url: &str, cancel: &AtomicBool) -> Result<u64> {
-    let mut resp = client
-        .get(url)
-        .timeout(Duration::from_secs(SPEED_TEST_CAP_SECS as u64 + 6))
-        .send()
-        .map_err(|e| anyhow::anyhow!(friendly_error(&e)))?;
-    if !resp.status().is_success() {
-        bail!("HTTP {}", resp.status().as_u16());
-    }
-    let t0 = Instant::now();
-    let mut chunk = vec![0u8; 64 * 1024];
-    let mut got: u64 = 0;
-    while got < SPEED_TEST_BYTES {
-        if cancelled(Some(cancel)) {
-            bail!("{}", CANCELLED_MSG);
-        }
-        if t0.elapsed().as_secs_f64() >= SPEED_TEST_CAP_SECS {
-            break;
-        }
-        let n = resp.read(&mut chunk).map_err(|e| anyhow::anyhow!("{e}"))?;
-        if n == 0 {
-            break;
-        }
-        got += n as u64;
-    }
-    let el = t0.elapsed().as_secs_f64();
-    // 连 32 KB 都拿不到就别报速率了，报上去会误导用户
-    if got < 32 * 1024 || el <= 0.05 {
-        bail!("{:.1} 秒里只拿到 {} 字节", el, got);
-    }
-    Ok((got as f64 / el / 1024.0) as u64)
-}
 
 
 fn rd_u16le(d: &[u8], o: usize) -> u16 {
