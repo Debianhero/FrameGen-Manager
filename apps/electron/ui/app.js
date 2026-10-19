@@ -48,6 +48,8 @@
   var CFG = null;
   var GPU = null;
   var SELF = null;
+  // 最近一次「检查更新」取回来的更新日志（后端从仓库 docs/release-notes.md 拉），给更新窗口显示
+  var UPD_NOTES = '';
   var DLSS5 = { apis: [], backends: [], assets: null };
   var SM_CONFLICT_TEXT = t('该游戏疑似已开启Smooth Motion。不建议同时开启Smooth Motion和DLSS-FG。但你可以忽略这条提示继续部署。');
 
@@ -79,6 +81,8 @@
     [/^已还原：恢复 (\d+) 个原始文件$/, 'Restored: $1 original file(s) back in place'],
     [/^部分还原：恢复 (\d+) 个原始文件$/, 'Partly restored: $1 original file(s) back in place'],
     [/^扫描结束：共 (\d+) 个游戏，用时 ([\d.]+) 秒$/, 'Scan finished: $1 games in $2 s'],
+    [/^当前显卡「(.+)」不是 20\/30 系 —— 这个解锁只对 20\/30 系有效。$/,
+      'The current GPU "$1" is not RTX 20/30 series - this unlock only applies to RTX 20/30 series.'],
     [/^资产缺失（(.+)）—— 资产随安装包内置，请检查安装是否完整（或重新安装本程序）$/,
       'Asset missing ($1) - assets ship inside the installer; check that the installation is complete (or reinstall the app)'],
     [/^缺少运行库 (.+) —— 资产随安装包内置，请检查安装是否完整（或重新安装本程序）$/,
@@ -755,6 +759,7 @@
     busy($('btn-self-update'), t('检查中…'), function () {
       return invoke('check_self_update').then(function (r) {
         SELF = r;
+        UPD_NOTES = (r && r.notes) || '';
         var el = $('ver-latest');
         if (el) {
           if (r.hasUpdate) {
@@ -1219,10 +1224,17 @@
     var sel = h('select', { class: 'input' });
     PROXIES.forEach(function (p) { sel.appendChild(h('option', { value: p, text: p })); });
     sel.value = PROXY;
-    if (smOwnsDir && PROXY === 'version.dll') {
-      var alt = PROXIES.filter(function (p) { return p !== 'version.dll'; })[0];
-      if (alt) sel.value = alt;
+    // SM 占着 version.dll 时：**把这个选项从下拉里直接拿掉**（用户要求：不能让用户继续选
+    // version.dll —— 选中就会把解锁组件顶掉）。记忆值恰好是 version.dll 时自动落到第一个其它入口。
+    function applyProxyLock() {
+      if (!smOwnsDir) return;
+      var opt = sel.querySelector('option[value="version.dll"]');
+      if (opt) opt.remove();
+      if (sel.value === 'version.dll') {
+        sel.value = PROXIES.filter(function (p) { return p !== 'version.dll'; })[0] || sel.value;
+      }
     }
+    applyProxyLock();
 
     var targetDir = g.target || g.dir || '';
     var targetSel = h('select', { class: 'input' });
@@ -1423,6 +1435,8 @@
       });
       if (a.smLikelyOn) {
         smOn = true;
+        // 后端探测到目标目录里是 SM（或驱动疑似开着）：锁死 version.dll 选项
+        if (!smOwnsDir) { smOwnsDir = true; applyProxyLock(); }
         adviceBox.appendChild(h('div', { class: 'hint warn', text: '! ' + SM_CONFLICT_TEXT }));
       }
       if (a.undetermined) {
@@ -2163,6 +2177,17 @@
       });
       return;
     }
+    if (on && GPU && GPU.routeKey === 'sm75') {
+      // RTX 20 支持是本轮新增：上游清单标注「未经实机验证」，部署前如实说明并让用户确认
+      uiConfirm({
+        title: t('开启 Smooth Motion（RTX 20）'),
+        ok: t('仍然开启'),
+        body: t('RTX 20 的 Smooth Motion 支持是实验性的：上游标注该运行库未经实机验证。确定继续吗？'),
+      }).then(function (yes) {
+        if (yes) doSmWrite(g, exe, on);
+      });
+      return;
+    }
     doSmWrite(g, exe, on);
   }
   function doSmWrite(g, exe, on) {
@@ -2249,19 +2274,42 @@
       updOpen = on;
       setOvOpen(on);
     }
+    var netdiskBtn = $('upd-netdisk');
+    if (netdiskBtn) netdiskBtn.addEventListener('click', function () {
+      invoke('open_netdisk').catch(function () {  });
+    });
+    var stopAck = false;   // 点了停止之后，等后台确认（canceled/done 事件）就置位
     if (stop) stop.addEventListener('click', function () {
-      busy(stop, t('正在停止…'), function () {
-        return invoke('cancel_self_update').then(function () {
-          toast(t('已请求停止，临时文件会一并清理'), 'info', 5000);
-        });
+      if (stop.disabled) return;
+      // 用户反馈：点了停止要立刻有反馈，而不是干等后台确认
+      stop.disabled = true;
+      if ($('upd-msg')) $('upd-msg').textContent = t('正在停止…');
+      stopAck = false;
+      invoke('cancel_self_update').then(function () {
+        toast(t('已请求停止，临时文件会一并清理'), 'info', 5000);
+        // 5 秒内没等到后台确认 = 连接卡住了：如实说明，别让用户以为没点上
+        setTimeout(function () {
+          if (stopAck || box.classList.contains('hidden')) return;
+          toast(t('当前网络暂时卡住，停止将在连接恢复响应后自动完成（不会继续下载内容）'), 'info', 8000);
+        }, 5000);
+      }).catch(function (e) {
+        toast(t('停止失败：') + errText(e), 'err', 8000);
+        stop.disabled = false;
       });
     });
     EV.listen('selfupdate', function (e) {
       var p = (e && e.payload) || {};
       var phase = p.phase || '';
+      if (phase) stopAck = true;
       if (phase === 'start') {
         box.classList.remove('hidden');
         setUpdBlur(true);
+        // 更新内容：检查更新时从发布页取回来的日志，下载前让用户看得见
+        var nEl = $('upd-notes');
+        if (nEl) {
+          nEl.textContent = UPD_NOTES || '';
+          nEl.classList.toggle('hidden', !UPD_NOTES);
+        }
         if ($('upd-fill')) $('upd-fill').style.width = '0%';
         if ($('upd-msg')) $('upd-msg').textContent = t('正在获取版本信息…');
         return;
@@ -2285,6 +2333,9 @@
     }
     if ($('btn-check')) $('btn-check').addEventListener('click', function () { busy(this, t('检查中…'), function () { return checkSelfUpdate(); }); });
 
+    if ($('btn-netdisk')) $('btn-netdisk').addEventListener('click', function () {
+      invoke('open_netdisk').catch(function () {  });
+    });
     if ($('btn-hags')) $('btn-hags').addEventListener('click', function () {
       invoke('open_hags_settings').then(function (r) {
         toast(t('已打开系统设置里的「硬件加速 GPU 计划」\n') + (r && r.uri ? r.uri : '') +

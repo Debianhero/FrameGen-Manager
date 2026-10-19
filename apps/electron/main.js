@@ -7,6 +7,8 @@ const fs = require('node:fs');
 const readline = require('node:readline');
 
 const PRODUCT = 'FrameGen Manager';
+// 网盘下载（发布页直链之外的备用下载方式，放在更新窗口与「关于」页）
+const NETDISK_URL = 'https://pan.quark.cn/s/adea7ed4f2b2';
 
 const DEV = !app.isPackaged || process.env.FGM_DEV === '1';
 const USE_GPU = !(process.argv.includes('--fgm-no-gpu') || process.env.FGM_NO_GPU === '1');
@@ -213,6 +215,7 @@ function callSidecar(cmd, args, isRetry) {
       resolve: resolve,
       reject: reject,
       timer: timer,
+      cmd: cmd,
       retry: RETRYABLE.has(cmd) ? function () { callSidecar(cmd, args, true).then(resolve, reject); } : null,
     });
     try {
@@ -428,7 +431,8 @@ async function offerSelfUpdate(info) {
       cancelId: 1,
       title: '发现新版本',
       message: '发现新版本 v' + version + '（当前 v' + info.current + '）。',
-      detail: '现在下载并安装吗？\n\n安装过程会关闭本程序，装完会自动重新打开。',
+      detail: '现在下载并安装吗？\n\n安装过程会关闭本程序，装完会自动重新打开。' +
+        (info.notes ? '\n\n—— 更新内容 ——\n' + String(info.notes).slice(0, 1200) + (String(info.notes).length > 1200 ? '…' : '') : ''),
       noLink: true,
     });
     proceed = r.response === 0;
@@ -585,6 +589,27 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(function () {
     ipcMain.handle('fgm:invoke', function (_e, cmd, args) {
       if (PICKERS[cmd]) return pickFileThenCall(PICKERS[cmd]);
+      if (cmd === 'cancel_self_update') {
+        // 用户要求「点了停止就**立刻**停」：置位取消标志要等一次阻塞读取返回（最长 20 秒），
+        // 所以这里直接**重启后台进程** —— 下载线程随进程消失，立即终止。
+        // 正在下载的命令先代答 {canceled:true}（上层按取消走）；进程退出处理会自动拉起新实例，
+        // 只读命令也会自动重放，其它功能不受影响。没下完的 .part 有断点续传，下次接着下。
+        try {
+          for (const [id, q] of Array.from(pending)) {
+            if (q.cmd === 'self_update_download') {
+              clearTimeout(q.timer);
+              pending.delete(id);
+              q.resolve({ canceled: true });
+            }
+          }
+          if (sidecar && !sidecarDead) sidecar.kill();
+        } catch (e) {  }
+        if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('fgm:event:selfupdate', { phase: 'canceled' });
+        return Promise.resolve({ killed: true });
+      }
+      if (cmd === 'open_netdisk') {
+        return shell.openExternal(NETDISK_URL).then(function () { return { ok: true }; });
+      }
       if (cmd === 'open_hags_settings') {
         // 从主进程打开：主进程有前台窗口，设置页才会弹到应用**前面** ——
         // sidecar 是无窗进程，它 ShellExecute 出来的设置页会被压在应用下面（用户反馈）。

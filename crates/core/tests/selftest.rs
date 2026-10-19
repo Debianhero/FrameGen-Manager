@@ -587,9 +587,9 @@ fn selftest() -> usize {
         (Some("591.86"), true, false),  // 上游列为实验，但按本产品规定 <616.64 一律不许
         (Some("580.0"), true, false),   // 帧生成的最低驱动，但 SM 不够
         (None, true, false),            // 读不到驱动版本：拒绝
-        (Some("617.42"), false, false), // 不是 30 系：拒绝
+        (Some("617.42"), false, false), // 不是 20/30 系：拒绝
     ] {
-        let g = framegen_core::sm::gate_for(drv, sm86, "NVIDIA GeForce RTX 3070");
+        let g = framegen_core::sm::gate_for(drv, sm86, false, "NVIDIA GeForce RTX 3070");
         ck(
             &mut fails,
             g.allowed == want,
@@ -1481,11 +1481,12 @@ fn deploytest() -> usize {
     println!("
 -- 游戏目录里留着 Smooth Motion 的解锁组件 --");
     // 组件在哪：先是运行时的资产目录，再是本仓库里随包的那一份（自测的数据目录是空的）
-    let sm_src = framegen_core::sm::asset_path()
+    let sm_src = framegen_core::sm::asset_base()
         .ok()
+        .map(|d| d.join("rtx30").join("version.dll"))
         .filter(|p| p.is_file())
         .or_else(|| {
-            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bundled-sm/version.dll");
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bundled-sm/rtx30/version.dll");
             if p.is_file() { Some(p) } else { None }
         });
     match sm_src {
@@ -1576,11 +1577,12 @@ fn deploytest() -> usize {
        留着的话游戏还在加载 Smooth Motion 的组件，而用户以为已经还原干净了。 */
     println!("
 -- 代理位被 Smooth Motion 组件顶掉后还原 --");
-    let sm_dll = framegen_core::sm::asset_path()
+    let sm_dll = framegen_core::sm::asset_base()
         .ok()
+        .map(|d| d.join("rtx30").join("version.dll"))
         .filter(|p| p.is_file())
         .or_else(|| {
-            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bundled-sm/version.dll");
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bundled-sm/rtx30/version.dll");
             if p.is_file() { Some(p) } else { None }
         });
     match sm_dll {

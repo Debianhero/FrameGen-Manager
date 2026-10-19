@@ -42,7 +42,7 @@ Five tabs across the top: Frame generation / Smooth Motion (experimental) / DLSS
 > reads the same in either language.
 
 - **Frame generation**: deploys the upstream frame interpolation into games that do not support DLSS-FG (RTX 20 / 30 series)
-- **Smooth Motion (experimental)**: unlocks NVIDIA's driver-level Smooth Motion — **RTX 30 series only**, driver >= 616.64 required
+- **Smooth Motion (experimental)**: unlocks NVIDIA's driver-level Smooth Motion — **RTX 20/30 series** (RTX 20 is experimental; upstream marks the runtime as not tested on real hardware), driver >= 616.64 required
 - **About**: version / paths / backups / feedback (QQ group 1125445047)
 
 ## Download and usage

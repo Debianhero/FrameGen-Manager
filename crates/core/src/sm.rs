@@ -18,6 +18,8 @@ pub const MIN_SM_DRIVER_TEXT: &str = "616.64";
 pub struct Gate {
     /// 30 系 / SM86？
     pub is_sm86: bool,
+    /// 20 系 / SM75？（本工具新增的支持范围）
+    pub is_sm75: bool,
     pub gpu_name: String,
     /// 市场版本号，如 "617.42"；读不到则空串
     pub driver: String,
@@ -33,23 +35,25 @@ pub struct Gate {
 /// 按产品规定判定能不能部署 SM（读本机实际信息）。
 pub fn gate() -> Gate {
     let gpu_name = crate::scan::detect_gpu().unwrap_or_default();
-    let is_sm86 = matches!(crate::scan::classify_gpu(&gpu_name), crate::scan::GpuRoute::Sm86);
+    let route = crate::scan::classify_gpu(&gpu_name);
+    let is_sm86 = matches!(route, crate::scan::GpuRoute::Sm86);
+    let is_sm75 = matches!(route, crate::scan::GpuRoute::Sm75);
     let raw = gpu::nvidia_smi_version();
-    gate_for(raw.as_deref(), is_sm86, &gpu_name)
+    gate_for(raw.as_deref(), is_sm86, is_sm75, &gpu_name)
 }
 
 /// 纯判定版本（不碰系统），自测与界面预览都用它。
-pub fn gate_for(driver_raw: Option<&str>, is_sm86: bool, gpu_name: &str) -> Gate {
+pub fn gate_for(driver_raw: Option<&str>, is_sm86: bool, is_sm75: bool, gpu_name: &str) -> Gate {
     let (driver, version) = match driver_raw {
         Some(s) => (s.trim().to_owned(), gpu::parse_marketing_version(s)),
         None => (String::new(), None),
     };
     let mut allowed = true;
     let mut reason = String::new();
-    if !is_sm86 {
+    if !is_sm86 && !is_sm75 {
         allowed = false;
         reason = format!(
-            "当前显卡「{}」不是 30 系（SM86）—— 这个解锁只对 30 系有效。",
+            "当前显卡「{}」不是 20/30 系 —— 这个解锁只对 20/30 系有效。",
             if gpu_name.is_empty() { "未知" } else { gpu_name }
         );
     } else if version.is_none() {
@@ -64,6 +68,7 @@ pub fn gate_for(driver_raw: Option<&str>, is_sm86: bool, gpu_name: &str) -> Gate
     }
     Gate {
         is_sm86,
+        is_sm75,
         gpu_name: gpu_name.to_owned(),
         driver,
         version,
@@ -1485,9 +1490,18 @@ pub const SM_ASSET_FILE: &str = "version.dll";
 pub const SM_ASSET_SHA256: &str =
     "4091efe2db3dc8dbb671a187b3904c36a58da18149b309021c5367d1646c21cb";
 
+/// RTX 20 运行库（native 三件套）的指纹与文件名（上游 Fix37，source/rtx20 构建）。
+pub const SM20_LOADER_SHA256: &str =
+    "7b6fd97e626c2d55ad0597a68e4f6fb84a76eeee3ee42405b032acbb588dce0f";
+pub const SM20_RUNTIME_SHA256: &str =
+    "e6fe728f7a97caea87d594aa4bf18b239c1aadb9b245ee92f0390ecaba915016";
+pub const SM20_MANIFEST_SHA256: &str =
+    "92e16f20b372d2897fa7d64c85aef572cdf4b6038db70e1a9c19b13d42be630d";
+pub const SM20_MANIFEST_NAME: &str = "runtime-manifest.json";
+
 /// 这个目录里的 version.dll 是不是我们的解锁组件？
 pub fn has_our_asset(dir: &std::path::Path) -> bool {
-    is_our_asset_file(&dir.join(SM_ASSET_FILE))
+    is_our_asset_file(&dir.join(SM_ASSET_FILE)) || is_our_asset_file(&dir.join("normal.asi"))
 }
 
 /// 这个游戏「疑似开着 Smooth Motion」吗（给部署帧生成前的那句提醒用）。
@@ -1511,14 +1525,56 @@ pub fn looks_enabled_for_dir(dir: &std::path::Path, exe: Option<&std::path::Path
 pub fn is_our_asset_file(path: &std::path::Path) -> bool {
     path.is_file()
         && crate::util::sha256_file(path)
-            .map(|h| h.eq_ignore_ascii_case(SM_ASSET_SHA256))
+            .map(|h| is_our_asset_hash(&h))
             .unwrap_or(false)
 }
 
-/// 内置组件在磁盘上的位置（随包分发，位于 assets 目录下的 bundled-sm）。
-pub fn asset_path() -> Result<std::path::PathBuf, String> {
+/// 我们放进游戏目录的文件的指纹集合：30 系组件、20 系加载器、20 系运行库。
+/// 归属判定一律走这里，别再单独比某个常量（两个系列的组件都要认）。
+fn is_our_asset_hash(h: &str) -> bool {
+    h.eq_ignore_ascii_case(SM_ASSET_SHA256)
+        || h.eq_ignore_ascii_case(SM20_LOADER_SHA256)
+        || h.eq_ignore_ascii_case(SM20_RUNTIME_SHA256)
+}
+
+/// 当前 GPU 该用哪套解锁组件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmComponent {
+    Rtx30,
+    Rtx20,
+}
+
+pub fn component_for_gpu() -> SmComponent {
+    let gpu = crate::scan::detect_gpu().unwrap_or_default();
+    if matches!(crate::scan::classify_gpu(&gpu), crate::scan::GpuRoute::Sm75) {
+        SmComponent::Rtx20
+    } else {
+        SmComponent::Rtx30
+    }
+}
+
+/// 内置资产根（assets 目录下的 bundled-sm）。
+pub fn asset_base() -> Result<std::path::PathBuf, String> {
     let d = crate::util::assets_dir().map_err(|e| format!("找不到内置资产目录：{e:#}"))?;
-    Ok(d.join(SM_ASSET_DIR).join(SM_ASSET_FILE))
+    Ok(d.join(SM_ASSET_DIR))
+}
+
+/// 一套组件 = 要放进游戏目录的 (相对文件名, 内置源相对路径, 期望 SHA256) 列表。
+///
+/// 30 系 = 单文件解锁组件；20 系 = native 三件套（ASI 加载器 + 运行库 + 清单）。
+pub fn component_files(c: SmComponent) -> Vec<(&'static str, &'static str, &'static str)> {
+    match c {
+        SmComponent::Rtx30 => vec![(SM_ASSET_FILE, "rtx30/version.dll", SM_ASSET_SHA256)],
+        SmComponent::Rtx20 => vec![
+            (SM_ASSET_FILE, "rtx20/version.dll", SM20_LOADER_SHA256),
+            ("normal.asi", "rtx20/normal.asi", SM20_RUNTIME_SHA256),
+            (
+                SM20_MANIFEST_NAME,
+                "rtx20/runtime-manifest.json",
+                SM20_MANIFEST_SHA256,
+            ),
+        ],
+    }
 }
 
 fn asset_record_path(game_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
@@ -1535,51 +1591,145 @@ fn asset_record_path(game_dir: &std::path::Path) -> Result<std::path::PathBuf, S
 
 /// 把内置解锁组件放进这个游戏目录（备份同名原文件，写入后逐字节复核）。
 /// 返回给用户看的一句话说明。
-pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
-    let src = asset_path()?;
-    if !src.is_file() {
-        return Err(format!("内置组件不存在：{}", src.display()));
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssetFileRecord {
+    pub rel: String,
+    #[serde(default)]
+    pub had_original: bool,
+    #[serde(default)]
+    pub backup: Option<String>,
+    #[serde(default)]
+    pub sha: Option<String>,
+}
+
+/// 解锁组件的部署记录。v1 = 单文件时代的手写 JSON（没有 v 字段 → 按 1 处理）；
+/// v2 = 多文件（RTX 20 的三件套）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssetRecord {
+    pub dir: String,
+    #[serde(default = "default_asset_record_v")]
+    pub v: u8,
+    #[serde(default)]
+    pub had_original: bool,
+    #[serde(default)]
+    pub backup: Option<String>,
+    #[serde(default)]
+    pub sha: Option<String>,
+    #[serde(default)]
+    pub files: Vec<AssetFileRecord>,
+}
+fn default_asset_record_v() -> u8 {
+    1
+}
+
+/// 部署中途失败时把已铺的文件回滚（有备份还原备份，没有就删掉）。
+fn rollback_asset_files(game_dir: &std::path::Path, done: &[AssetFileRecord]) {
+    for f in done {
+        let dst = game_dir.join(&f.rel);
+        if f.had_original {
+            if let Some(bp) = &f.backup {
+                if std::path::Path::new(bp).is_file() {
+                    let _ = std::fs::copy(bp, &dst);
+                    continue;
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&dst);
     }
+}
+
+/// 记录之外、目录里遗留的"我们的文件"（例如上次部署中断留下的）也要认出来。
+fn known_asset_rels() -> Vec<&'static str> {
+    component_files(SmComponent::Rtx30)
+        .into_iter()
+        .map(|f| f.0)
+        .chain(component_files(SmComponent::Rtx20).into_iter().map(|f| f.0))
+        .collect()
+}
+
+pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
+    let comp = component_for_gpu();
+    let base = asset_base()?;
     if !game_dir.is_dir() {
         return Err(format!("游戏目录不存在：{}", game_dir.display()));
     }
     if !crate::util::is_writable(game_dir) {
         return Err(format!("没有权限写入 {}", game_dir.display()));
     }
-    let want = crate::util::sha256_file(&src).map_err(|e| format!("{e:#}"))?;
-    let dst = game_dir.join(SM_ASSET_FILE);
-    let mut had_original = false;
-    let mut backup: Option<std::path::PathBuf> = None;
-    if dst.is_file() {
-        let rec = asset_record_path(game_dir)?;
-        let bdir = rec.parent().unwrap_or(std::path::Path::new(".")).join("originals");
-        std::fs::create_dir_all(&bdir).map_err(|e| format!("{e}"))?;
-        let bp = bdir.join(format!("{}.bak", dst.file_name().unwrap_or_default().to_string_lossy()));
-        std::fs::copy(&dst, &bp).map_err(|e| format!("备份原文件失败：{e}"))?;
-        had_original = true;
-        backup = Some(bp);
+    let files = component_files(comp);
+    let mut done: Vec<AssetFileRecord> = Vec::new();
+    for (rel, src_rel, want) in &files {
+        let src = base.join(src_rel.replace('/', "\\"));
+        if !src.is_file() {
+            rollback_asset_files(game_dir, &done);
+            return Err(format!("内置组件不存在：{}", src.display()));
+        }
+        let dst = game_dir.join(rel);
+        match crate::util::lock_state(&dst) {
+            crate::util::LockState::InUse => {
+                rollback_asset_files(game_dir, &done);
+                return Err(format!("{rel} 正被占用，请先完全退出游戏。"));
+            }
+            crate::util::LockState::NoAccess => {
+                rollback_asset_files(game_dir, &done);
+                return Err(format!(
+                    "{rel} 现在写不进去：文件带了只读属性，或者权限不足。去掉只读 / 换个可写的目录再试。"
+                ));
+            }
+            crate::util::LockState::Free => {}
+        }
+        let mut had_original = false;
+        let mut backup: Option<String> = None;
+        if dst.is_file() {
+            let rec = asset_record_path(game_dir)?;
+            let bdir = rec.parent().unwrap_or(std::path::Path::new(".")).join("originals");
+            std::fs::create_dir_all(&bdir).map_err(|e| format!("{e}"))?;
+            let bp = bdir.join(format!("{}.bak", rel.replace('/', "_")));
+            std::fs::copy(&dst, &bp).map_err(|e| format!("备份原文件失败：{e}"))?;
+            had_original = true;
+            backup = Some(bp.display().to_string());
+        }
+        std::fs::copy(&src, &dst).map_err(|e| format!("复制到 {} 失败：{e}", dst.display()))?;
+        let got = crate::util::sha256_file(&dst).map_err(|e| format!("{e:#}"))?;
+        if !got.eq_ignore_ascii_case(want) {
+            rollback_asset_files(game_dir, &done);
+            return Err("复制后校验不一致，已回滚".to_owned());
+        }
+        done.push(AssetFileRecord {
+            rel: rel.to_string(),
+            had_original,
+            backup,
+            sha: Some(got),
+        });
     }
-    std::fs::copy(&src, &dst).map_err(|e| format!("复制到 {} 失败：{e}", dst.display()))?;
-    let got = crate::util::sha256_file(&dst).map_err(|e| format!("{e:#}"))?;
-    if got != want {
-        let _ = std::fs::remove_file(&dst);
-        return Err("复制后校验不一致，已撤掉写入的文件".to_owned());
-    }
+    let had_any = done.iter().any(|f| f.had_original);
     let rec = asset_record_path(game_dir)?;
-    let body = format!(
-        "{{\"dir\":\"{}\",\"hadOriginal\":{},\"backup\":{},\"sha\":\"{}\"}}",
-        game_dir.display().to_string().replace(std::path::MAIN_SEPARATOR, "/"),
-        had_original,
-        match &backup { Some(p) => format!("\"{}\"", p.display().to_string().replace(std::path::MAIN_SEPARATOR, "/")), None => "null".to_owned() },
-        got
-    );
-    std::fs::write(&rec, body).map_err(|e| format!("写部署记录失败：{e}"))?;
+    let body = AssetRecord {
+        dir: game_dir.display().to_string().replace(std::path::MAIN_SEPARATOR, "/"),
+        v: 2,
+        had_original: false,
+        backup: None,
+        sha: None,
+        files: done,
+    };
+    std::fs::write(&rec, serde_json::to_string(&body).map_err(|e| format!("{e}"))?)
+        .map_err(|e| format!("写部署记录失败：{e}"))?;
     crate::log::line(&format!("[sm] 已部署解锁组件到 {}", game_dir.display()));
+    let label = match comp {
+        SmComponent::Rtx30 => "RTX 30 系组件",
+        SmComponent::Rtx20 => "RTX 20 系运行库（加载器 + 运行库 + 清单）",
+    };
+    let size = body
+        .files
+        .iter()
+        .filter_map(|f| f.sha.as_deref())
+        .count();
+    let _ = size;
     Ok(format!(
-        "已放入解锁组件（{}，{:.1} MB）{}",
-        SM_ASSET_FILE,
-        std::fs::metadata(&src).map(|m| m.len() as f64 / 1048576.0).unwrap_or(0.0),
-        if had_original { "，原文件已备份" } else { "" }
+        "已放入解锁组件（{}，{} 个文件）{}",
+        label,
+        files.len(),
+        if had_any { "，原文件已备份" } else { "" }
     ))
 }
 
@@ -1624,9 +1774,14 @@ pub fn asset_restore_searching(
         let msg = match asset_restore(d) {
             Ok(m) => m,
             Err(e) => {
-                // 记录对不上（或压根没有）时直接删 —— 到这里已经确认它就是我们的组件了
-                let f = d.join(SM_ASSET_FILE);
-                remove_with_retry(&f)?;
+                // 记录对不上（或压根没有）时直接删 —— 到这里已经确认它就是我们的组件了。
+                // 20 系是三件套：把目录里所有"我们的文件"都按指纹清掉。
+                for rel in known_asset_rels() {
+                    let f = d.join(rel);
+                    if is_our_asset_file(&f) {
+                        remove_with_retry(&f)?;
+                    }
+                }
                 crate::log::line(&format!(
                     "[sm] 按指纹直接删除组件 dir={} （asset_restore 说：{e}）",
                     d.display()
@@ -1687,7 +1842,6 @@ fn remove_with_retry(path: &std::path::Path) -> Result<(), String> {
 /// 取回内置解锁组件：有备份就还原原文件，没有就删掉我们放的那份。
 pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
     let rec = asset_record_path(game_dir)?;
-    let dst = game_dir.join(SM_ASSET_FILE);
     let has_component = has_our_asset(game_dir);
     let has_record = rec.is_file();
     crate::log::line(&format!(
@@ -1697,17 +1851,21 @@ pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
         has_record
     ));
     if !rec.is_file() {
-        // 没有记录：如果这个文件正好是我们的组件，就把它清掉；否则不动
-        let mine = dst.is_file()
-            && asset_path()
-                .ok()
-                .and_then(|p| crate::util::sha256_file(&p).ok())
-                .zip(crate::util::sha256_file(&dst).ok())
-                .map(|(a, b)| a == b)
-                .unwrap_or(false);
-        if mine {
-            remove_with_retry(&dst)?;
-            crate::log::line(&format!("[sm] 取回组件完成（无记录、按指纹删除）dir={}", game_dir.display()));
+        // 没有记录：凡是我们的文件（按指纹）就清掉；否则不动
+        let mut removed: Vec<String> = Vec::new();
+        for rel in known_asset_rels() {
+            let p = game_dir.join(rel);
+            if is_our_asset_file(&p) {
+                remove_with_retry(&p)?;
+                removed.push(rel.to_string());
+            }
+        }
+        if !removed.is_empty() {
+            crate::log::line(&format!(
+                "[sm] 取回组件完成（无记录、按指纹删除）dir={} files={}",
+                game_dir.display(),
+                removed.join("、")
+            ));
             return Ok("已取回解锁组件（没有部署记录，按文件指纹确认后清理）".to_owned());
         }
         crate::log::line(&format!(
@@ -1718,37 +1876,83 @@ pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
         return Err("没有本工具的部署记录，未做任何改动".to_owned());
     }
     let text = std::fs::read_to_string(&rec).map_err(|e| format!("{e}"))?;
-    let backup = {
-        let k = "\"backup\":";
-        match text.find(k) {
-            Some(i) => {
-                let rest = &text[i + k.len()..];
-                let end = rest.find(',').unwrap_or(rest.len());
-                let v = rest[..end].trim().trim_matches('"');
-                if v == "null" || v.is_empty() { None } else { Some(std::path::PathBuf::from(v)) }
-            }
-            None => None,
-        }
+    let record: AssetRecord = serde_json::from_str(&text)
+        .map_err(|e| format!("部署记录读不出来（{e}），不敢按它还原"))?;
+    // v1 单文件记录 → 归一化成 files 列表
+    let files: Vec<AssetFileRecord> = if record.files.is_empty() {
+        vec![AssetFileRecord {
+            rel: SM_ASSET_FILE.to_string(),
+            had_original: record.had_original,
+            backup: record.backup.clone(),
+            sha: record.sha.clone(),
+        }]
+    } else {
+        record.files.clone()
     };
-    if let Some(bp) = backup {
-        if bp.is_file() {
-            std::fs::copy(&bp, &dst).map_err(|e| format!("还原原文件失败：{e}"))?;
-            let _ = std::fs::remove_file(&bp);
-            let _ = std::fs::remove_file(&rec);
-            crate::log::line(&format!("[sm] 已还原 {} 的原文件", game_dir.display()));
-            return Ok("已还原成原来的 version.dll".to_owned());
+    let mut restored: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
+    for f in &files {
+        let p = game_dir.join(&f.rel);
+        if f.had_original {
+            if let Some(bp) = &f.backup {
+                if std::path::Path::new(bp).is_file() {
+                    std::fs::copy(bp, &p).map_err(|e| format!("还原原文件失败：{e}"))?;
+                    let _ = std::fs::remove_file(bp);
+                    restored.push(f.rel.clone());
+                    continue;
+                }
+            }
+        }
+        // 没有可还原的原件：是我们的就删掉；不是我们的（内容对不上）保留并说明
+        if p.is_file() && is_our_asset_file(&p) {
+            remove_with_retry(&p)?;
+            removed.push(f.rel.clone());
+        } else if p.is_file() {
+            kept.push(f.rel.clone());
         }
     }
-    if dst.is_file() {
-        remove_with_retry(&dst)?;
+    // 记录之外遗留的我们的文件（上次部署中断等）也一并清掉
+    for rel in known_asset_rels() {
+        if files.iter().any(|f| f.rel == rel) {
+            continue;
+        }
+        let p = game_dir.join(rel);
+        if is_our_asset_file(&p) {
+            remove_with_retry(&p)?;
+            removed.push(rel.to_string());
+        }
     }
     let _ = std::fs::remove_file(&rec);
     crate::log::line(&format!(
-        "[sm] 取回组件完成（删除）dir={} 现在组件在={}",
+        "[sm] 取回组件完成 dir={} 还原={} 删除={} 保留={}",
         game_dir.display(),
-        has_our_asset(game_dir)
+        restored.join("、"),
+        removed.join("、"),
+        kept.join("、")
     ));
-    Ok("已取回解锁组件（原本没有同名文件，直接删除）".to_owned())
+    let mut msg = String::new();
+    if !restored.is_empty() {
+        msg.push_str(&format!("已还原 {}", restored.join("、")));
+    }
+    if !removed.is_empty() {
+        msg.push_str(&format!(
+            "{}已取回 {}",
+            if msg.is_empty() { "" } else { "；" },
+            removed.join("、")
+        ));
+    }
+    if !kept.is_empty() {
+        msg.push_str(&format!(
+            "{}这些文件不是我们放的，已保留：{}",
+            if msg.is_empty() { "" } else { "；" },
+            kept.join("、")
+        ));
+    }
+    if msg.is_empty() {
+        msg = "目录里没有需要取回的组件".to_owned();
+    }
+    Ok(msg)
 }
 
 /// 【只读探测】给诊断命令用的会话入口（不写任何配置）。

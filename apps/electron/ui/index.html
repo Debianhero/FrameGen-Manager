@@ -111,7 +111,7 @@
 
       <section class="panel">
         <div class="ctitle" data-i18n="说明">说明</div>
-        <div class="hint" data-i18n="解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X），仅 30 系可用。不建议与帧生成同时开启。">解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X），仅 30 系可用。不建议与帧生成同时开启。</div>
+        <div class="hint" data-i18n="解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X）。不建议与帧生成同时开启。">解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X）。不建议与帧生成同时开启。</div>
       </section>
     </aside>
 
@@ -138,9 +138,9 @@
   </div>
   <div class="toolbar">
     <button class="btn primary" id="btn-dlss5-scan" type="button" data-i18n="扫描游戏库">扫描游戏库</button>
-    <button class="btn" id="btn-dlss5-removed" type="button" data-i18n="已被移除的游戏">已被移除的游戏</button>
     <button class="btn" id="btn-dlss5-pick" type="button" data-i18n-attr="title" data-i18n="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" title="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" data-i18n-text="手动添加游戏">手动添加游戏</button>
     <div class="spacer"></div>
+    <button class="btn" id="btn-dlss5-removed" type="button" data-i18n="已被移除的游戏">已被移除的游戏</button>
   </div>
   <section class="section">
     <h2><span data-i18n="自带 DLSS（可用 DLSS5）">自带 DLSS（可用 DLSS5）</span><span class="count" id="c-dlss">0</span></h2>
@@ -165,6 +165,7 @@
       <div class="kv2"><span data-i18n="最新版本">最新版本</span><b id="ver-latest" data-i18n="未检查">未检查</b></div>
       <div class="row">
         <button class="btn primary" id="btn-self-update" type="button" data-i18n="检查新版本">检查新版本</button>
+        <button class="btn" id="btn-netdisk" type="button" data-i18n="网盘下载">网盘下载</button>
       </div>
       <div class="hint" id="self-note" data-i18n="还没检查过。点上面的按钮看一眼。">还没检查过。点上面的按钮看一眼。</div>
     </section>
@@ -187,7 +188,7 @@
 
     <section class="panel">
       <div class="ctitle" data-i18n="反馈">反馈</div>
-      <p class="fbline"><span data-i18n="若在使用途中遇到各种问题，或者您有更好的建议欢迎您进群反馈与交流：">若在使用途中遇到各种问题，或者您有更好的建议欢迎您进群反馈与交流：</span><b>1125445047</b></p>
+      <p class="fbline"><span data-i18n="若在使用途中遇到各种问题，或者您有更好的建议欢迎您进入腾讯QQ群反馈与交流：">若在使用途中遇到各种问题，或者您有更好的建议欢迎您进入腾讯QQ群反馈与交流：</span><b>1125445047</b></p>
     </section>
 
   </div>
@@ -218,7 +219,9 @@
     <div class="upd-title" data-i18n="正在下载新版本">正在下载新版本</div>
     <div class="upd-bar"><div class="upd-fill" id="upd-fill"></div></div>
     <div class="upd-msg" id="upd-msg" data-i18n="准备中…">准备中…</div>
+    <div class="upd-notes hidden" id="upd-notes"></div>
     <div class="upd-foot">
+      <button class="btn" id="upd-netdisk" type="button" data-i18n="网盘下载">网盘下载</button>
       <button class="btn danger" id="upd-stop" type="button" data-i18n="停止更新">停止更新</button>
     </div>
   </div>

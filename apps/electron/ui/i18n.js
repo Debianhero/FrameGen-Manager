@@ -250,8 +250,6 @@
   "ReShade（Addon）": "ReShade (Addon)",
   "部署 DLSS5": "Deploy DLSS5",
   "这个游戏还没有 DLSS5 的部署记录，没有可还原的东西": "This game has no DLSS5 deployment record, so there is nothing to restore",
-  "DLSS5 的神经网络模型只做了 20/30 系（当前：": "DLSS5's neural model ships for the RTX 20/30 series only (current: ",
-  "图形 API 是「自动」，但这个游戏认不出用哪个 API —— 部署前请在下面手动选一个（DX9/DX10/DX11/DX12/Vulkan/OpenGL）。": "Graphics API is set to \"Auto\", but this game's API could not be determined - pick one manually below (DX9/DX10/DX11/DX12/Vulkan/OpenGL).",
   "还没认出这个游戏的启动 exe —— 点「手动选择」自己指一个（文件都铺在 exe 所在目录）。": "The launch exe for this game is not known yet - click the manual picker and point at one (all files go next to the exe).",
   "DLSS5 资产缺 ": "DLSS5 assets missing: ",
   " —— 重启程序会自动补回内置的那几个。": " - restarting the app restores the built-in ones.",
@@ -339,11 +337,19 @@
   "这个游戏没有识别到启动用的 EXE，先到「帧生成」页确认游戏路径。": "No launch EXE was identified for this game; check the game path on the \"Frame generation\" page first.",
   "这个游戏已经装了帧生成": "This game already has frame generation",
   "我知道了": "Got it",
+  "网盘下载": "Cloud download",
+  "DLSS5 的神经网络模型只做了 20/30 系（当前：": "The DLSS5 neural network model only covers RTX 20/30 series (current: ",
+  "图形 API 是「自动」，但这个游戏认不出用哪个 API —— 部署前请在下面手动选一个（DX9/DX10/DX11/DX12/Vulkan/OpenGL）。": "Graphics API is set to Auto but the game's API could not be detected - pick one manually before deploying (DX9/DX10/DX11/DX12/Vulkan/OpenGL).",
+  "开启 Smooth Motion（RTX 20）": "Turn Smooth Motion on (RTX 20)",
+  "RTX 20 的 Smooth Motion 支持是实验性的：上游标注该运行库未经实机验证。确定继续吗？": "RTX 20 Smooth Motion support is experimental: upstream marks this runtime as not tested on real hardware. Continue?",
+  "若在使用途中遇到各种问题，或者您有更好的建议欢迎您进入腾讯QQ群反馈与交流：": "If you run into any problems or have suggestions, welcome to our Tencent QQ group for feedback and chat: ",
   "清理手动安装的帧生成": "Clean up manually installed frame generation",
   "目录里的帧生成文件无法判定是否为本工具部署：先清理，再部署。": "The frame generation files in this folder cannot be confirmed as deployed by this tool: clean up first, then deploy.",
   "检测到无法判定归属的帧生成文件：先点【清理】，清理完再部署。": "Frame generation files with unclear ownership were detected: click Clean up first, then deploy.",
   "检测到无法判定是否为本工具部署的帧生成文件 —— 部署已锁定：先点【清理】，清理完再部署。": "Frame generation files with unclear ownership were detected - deployment is locked: click Clean up first, then deploy.",
   "检测到已装文件但无法判定是否为本工具部署 —— 部署已锁定：先点【卸载 ReShade / DLSS5】清空，再部署。": "Installed files were detected but cannot be confirmed as deployed by this tool - deployment is locked: click Uninstall ReShade / DLSS5 to clear them first, then deploy.",
+  "当前网络暂时卡住，停止将在连接恢复响应后自动完成（不会继续下载内容）": "The network is momentarily stalled; stopping will finish automatically once it responds (nothing more is being downloaded)",
+  "停止失败：": "Failed to stop: ",
   "已完成": "Done",
   "复制": "Copy",
   "已复制": "Copied",
@@ -517,7 +523,7 @@
   "显卡": "GPU",
   "最低要求": "Minimum required",
   "重新检测": "Re-detect",
-  "解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X），仅 30 系可用。不建议与帧生成同时开启。": "Unlocks NVIDIA's built-in Smooth Motion (fixed 2X); RTX 30 series only. Not recommended alongside frame generation.",
+  "解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X）。不建议与帧生成同时开启。": "Unlocks NVIDIA's built-in Smooth Motion (fixed 2X). Not recommended alongside frame generation.",
   "DLSS5 接入": "DLSS5 setup",
   "目前仅适用于自带DLSS的游戏开启DLSS5，老游戏以及不自带DLSS的游戏无法开启！": "DLSS5 can currently only be enabled for games that ship with DLSS; older games and games without built-in DLSS cannot use it!",
   "自更新": "Self-update",
@@ -532,8 +538,7 @@
   "日志目录": "Logs folder",
   "备份": "Backups",
   "已保存的部署备份": "Saved deployment backups",
-  "反馈": "Feedback",
-  "若在使用途中遇到各种问题，或者您有更好的建议欢迎您进群反馈与交流：": "Ran into a problem, or have a better idea? Join the group to report it and chat: "
+  "反馈": "Feedback"
 };
 
   var current = guess();
