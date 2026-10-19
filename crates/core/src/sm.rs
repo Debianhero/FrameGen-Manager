@@ -1659,7 +1659,17 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
     let files = component_files(comp);
     let mut done: Vec<AssetFileRecord> = Vec::new();
     for (rel, src_rel, want) in &files {
-        let src = base.join(src_rel.replace('/', "\\"));
+        let mut src = base.join(src_rel.replace('/', "\\"));
+        if !src.is_file() {
+            // 兼容旧数据目录：老版本铺开是**平铺的** version.dll（内容与 rtx30 组件相同）。
+            // 铺开逻辑没跟上之前装的副本，靠这个兜底也能部署。
+            if *src_rel == "rtx30/version.dll" {
+                let flat = base.join(SM_ASSET_FILE);
+                if flat.is_file() {
+                    src = flat;
+                }
+            }
+        }
         if !src.is_file() {
             rollback_asset_files(game_dir, &done);
             return Err(format!("内置组件不存在：{}", src.display()));

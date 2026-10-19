@@ -326,21 +326,40 @@ function ensureBundledAssets() {
     if (fs.existsSync(smsrc)) {
       const smdst = path.join(dst, 'bundled-sm');
       try { fs.mkdirSync(smdst, { recursive: true }); } catch (e) {}
-      for (const f of fs.readdirSync(smsrc)) {
-        const s = path.join(smsrc, f);
-        const t = path.join(smdst, f);
-        try {
-          const st = fs.statSync(s);
+      // SM 资产现在是**按系列分目录**（rtx30/、rtx20/）—— 必须递归铺开并保留相对路径。
+      // 只平铺一层的话，侧车找 rtx30/version.dll 会落空（用户实测报「内置组件不存在」）。
+      const walk = function (dir, rel) {
+        let entries = [];
+        try { entries = fs.readdirSync(dir); } catch (e) { return; }
+        for (const f of entries) {
+          const s = path.join(dir, f);
+          const r = rel ? rel + '/' + f : f;
+          let st = null;
+          try { st = fs.statSync(s); } catch (e) { continue; }
+          if (st.isDirectory()) { walk(s, r); continue; }
           if (!st.isFile()) continue;
-          if (skipMarker) {
-            let ok = false;
-            try { ok = fs.statSync(t).size === st.size; } catch (e) { ok = false; }
-            if (ok) continue;
-          }
-          fs.copyFileSync(s, t);
-          copied++; names.push('bundled-sm/' + f);
-        } catch (e) { console.error('[bundled] 复制失败', f, e.message); }
-      }
+          const t = path.join(smdst, r);
+          try {
+            fs.mkdirSync(path.dirname(t), { recursive: true });
+            if (skipMarker) {
+              let ok = false;
+              try { ok = fs.statSync(t).size === st.size; } catch (e2) { ok = false; }
+              if (ok) continue;
+            }
+            fs.copyFileSync(s, t);
+            copied++; names.push('bundled-sm/' + r);
+          } catch (e) { console.error('[bundled] 复制失败', r, e.message); }
+        }
+      };
+      walk(smsrc, '');
+      // 旧版平铺的 version.dll 已被 rtx30/ 子目录取代：清掉，避免新旧两份并存
+      try {
+        const legacyFlat = path.join(smdst, 'version.dll');
+        if (fs.existsSync(legacyFlat) && fs.statSync(legacyFlat).isFile()) {
+          fs.rmSync(legacyFlat, { force: true });
+          removedLegacy.push('bundled-sm/version.dll(旧平铺)');
+        }
+      } catch (e) {}
     }
 
     const d5src = path.join(exeDir, 'bundled-dlss5');
