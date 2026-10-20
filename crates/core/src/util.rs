@@ -369,12 +369,7 @@ pub struct AppConfig {
     /// 用户自定义的资产目录。None 表示用默认位置。
     #[serde(default)]
     pub asset_dir: Option<PathBuf>,
-    /// 用户是否已同意改用备用下载源
-    #[serde(default)]
-    pub allow_backup_source: bool,
-    /// 用户选定的下载源前缀。留空 = 自动（按测速值挑最快的那个）。
-    #[serde(default)]
-    pub backup_prefix: String,
+
     /// 部署时写进 INI 的「优化等级」（上游 0.4.0 是 0~3 档；出厂默认 **2** = 全部加速
     /// 再加有损图像内核，并排看与档位 1 没有可见差别）。
     /// 只影响**部署到游戏目录的那一份**，资产目录里的原文件不动。
@@ -404,6 +399,12 @@ pub struct AppConfig {
     /// 默认值，得反复调（真实反馈）。这里记住它，启动时按上次的大小打开。
     #[serde(default)]
     pub window_size: Option<[f32; 2]>,
+    /// 每次启动时自动刷新游戏库（默认**关**，用户要求）。
+    ///
+    /// 关掉后启动只显示上次的缓存（秒开），发现新游戏靠手动点「扫描游戏库」；
+    /// 第一次使用（库是空的）无论开关如何都会自动扫一次。
+    #[serde(default)]
+    pub auto_scan_on_start: bool,
 }
 
 // 这两个是**业务默认**（2 / 3），不是 u8 的类型默认（0），所以 AppConfig 的 Default
@@ -424,14 +425,13 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             asset_dir: None,
-            allow_backup_source: false,
-            backup_prefix: String::new(),
             fg_optimized: default_fg_optimized(),
             fg_frames: default_fg_frames(),
             fg_preset: default_fg_preset(),
             optimized_migrated_to_2: false,
             legacy_prompt_version: String::new(),
             window_size: None,
+            auto_scan_on_start: false,
         }
     }
 }

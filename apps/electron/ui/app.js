@@ -808,9 +808,41 @@
     var cov = coverOf(g);
     var ico = iconOf(g);
     var src = preferCover ? (cov || ico) : (ico || cov);
-    if (!src) return h('div', { class: 'thumb ph2', text: (g.name || '?').slice(0, 1) });
+    var id = (g && g.appId) ? String(g.appId) : '';
+    if (!src) {
+      var ph = h('div', { class: 'thumb ph2', text: (g.name || '?').slice(0, 1) });
+      if (id) { ph.setAttribute('data-cover-id', id); lazyCoverFor(id); }
+      return ph;
+    }
     var isIcon = (src === ico && src !== cov);
-    return h('img', { class: 'thumb' + (isIcon ? ' icon' : ''), src: src, alt: '' });
+    var im = h('img', { class: 'thumb' + (isIcon ? ' icon' : ''), src: src, alt: '' });
+    if (id && !cov) { im.setAttribute('data-cover-id', id); lazyCoverFor(id); }
+    return im;
+  }
+
+  /// 分批渲染（配合滚动哨兵）：几百个游戏时不一次性建全部卡片。
+  function appendLibChunk(box) {
+    var end = Math.min(LIB_RENDERED + LIB_CHUNK, GAMES.length);
+    for (var i = LIB_RENDERED; i < end; i++) box.appendChild(gameCard(GAMES[i], i));
+    LIB_RENDERED = end;
+    if (LIB_RENDERED >= GAMES.length) return;
+    var sent = $('lib-sentinel');
+    if (!sent) {
+      sent = h('div', { id: 'lib-sentinel', style: 'grid-column:1/-1;height:1px' });
+    }
+    box.appendChild(sent);   // 每次把哨兵挪到末尾
+    if (typeof IntersectionObserver !== 'function') {
+      for (var j = LIB_RENDERED; j < GAMES.length; j++) box.appendChild(gameCard(GAMES[j], j));
+      LIB_RENDERED = GAMES.length;
+      return;
+    }
+    if (LIB_OBSERVER) { try { LIB_OBSERVER.disconnect(); } catch (e) {  } }
+    LIB_OBSERVER = new IntersectionObserver(function (ents) {
+      for (var k = 0; k < ents.length; k++) {
+        if (ents[k].isIntersecting) { appendLibChunk(box); return; }
+      }
+    }, { rootMargin: '800px' });
+    LIB_OBSERVER.observe(sent);
   }
 
 
@@ -926,14 +958,20 @@
     ]);
   }
 
+  var LIB_RENDERED = 0;
+  var LIB_OBSERVER = null;
+  var LIB_CHUNK = 24;
+
   function paintLibrary() {
     var box = $('lib-list');
     if (box) {
       box.textContent = '';
+      LIB_RENDERED = 0;
+      if (LIB_OBSERVER) { try { LIB_OBSERVER.disconnect(); } catch (e) {  } LIB_OBSERVER = null; }
       if (!GAMES.length) {
         box.appendChild(h('div', { class: 'empty', text: t('游戏库是空的 —— 点右上「扫描游戏库」。扫描只读启动器记录，不改动任何游戏文件。') }));
       } else {
-        GAMES.forEach(function (g, i) { box.appendChild(gameCard(g, i)); });
+        appendLibChunk(box);
       }
     }
     var legacyGames = GAMES.filter(function (g) { return g.fgAssets && g.fgAssets.legacy; });
@@ -1058,7 +1096,6 @@
       paintLibrary();
       setTimeout(function () { maybePromptLegacyUpgrade(); }, 1500);
       loadGameIcons();
-      ensureCovers();
       return GAMES;
     }).catch(function (e) {
       var box = $('lib-list');
@@ -1111,7 +1148,6 @@
     ]));
   }
 
-  var COVERS_TRIED = false;
   function coverFailCache() {
     try { return JSON.parse(localStorage.getItem('fgm.covers.failed') || '{}'); } catch (e) { return {}; }
   }
@@ -1121,33 +1157,60 @@
     ids.forEach(function (id) { c[id] = now; });
     try { localStorage.setItem('fgm.covers.failed', JSON.stringify(c)); } catch (e) { }
   }
-  function ensureCovers() {
-    if (COVERS_TRIED) return;
-    var failed = coverFailCache();
-    var now = Date.now();
-    var WEEK = 7 * 24 * 3600 * 1000;
-    var ids = [];
-    GAMES.forEach(function (g) {
-      var id = (g && g.appId) ? String(g.appId) : '';
-      if (!id || COVERS[id] || ids.indexOf(id) >= 0) return;
-      if (failed[id] && now - failed[id] < WEEK) return;
-      ids.push(id);
-    });
-    if (!ids.length) { COVERS_TRIED = true; return; }
-    COVERS_TRIED = true;
-    function hideCoverBarIfMine() {
-      hideBarIfPhase('cover', 1200);
-      BAR_PHASE = '';
-    }
-    BAR_PHASE = 'cover';
-    invoke('fetch_covers', { ids: ids }).then(function (r) {
-      return loadCovers().then(function () {
-        var miss = ids.filter(function (id) { return !COVERS[id]; });
+  // 封面改为**按需加载**：只请求真正渲染出来的那几张；最多 2 个请求并发、每批 8 个。
+  // 以前是一次性把全库几百个 appId 都丢给后端下载 —— 启动瞬间几百个网络请求。
+  var COVER_Q = [];
+  var COVER_INFLIGHT = 0;
+  var COVER_PENDING = {};
+  var COVER_FAILED = null;
+
+  function lazyCoverFor(id) {
+    if (!id || COVERS[id] || COVER_PENDING[id]) return;
+    if (!COVER_FAILED) COVER_FAILED = coverFailCache() || {};
+    var at = COVER_FAILED[id];
+    if (at && Date.now() - at < 7 * 24 * 3600 * 1000) return;
+    COVER_PENDING[id] = 1;
+    COVER_Q.push(id);
+    pumpCovers();
+  }
+
+  function pumpCovers() {
+    while (COVER_INFLIGHT < 2 && COVER_Q.length) {
+      var batch = COVER_Q.splice(0, 8);
+      COVER_INFLIGHT++;
+      BAR_PHASE = 'cover';
+      invoke('fetch_covers', { ids: batch }).then(function () {
+        return loadCovers();
+      }).then(function () {
+        var miss = [];
+        batch.forEach(function (id) {
+          delete COVER_PENDING[id];
+          if (!COVERS[id]) { miss.push(id); return; }
+          // 就地换图，不重绘列表（重绘会打乱滚动加载）
+          var els = document.querySelectorAll('[data-cover-id="' + id + '"]');
+          for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            if (el.tagName === 'IMG') {
+              el.src = COVERS[id];
+              el.classList.remove('icon');
+            } else if (el.parentNode) {
+              var img = document.createElement('img');
+              img.className = 'thumb';
+              img.src = COVERS[id];
+              img.alt = '';
+              el.parentNode.replaceChild(img, el);
+            }
+          }
+        });
         if (miss.length) markCoverFailed(miss);
-        if (r && r.fetched) toast(t('已补齐 ') + r.fetched + t(' 张游戏封面'), 'ok', 7000);
-        paintLibrary();
+      }).catch(function () {
+        batch.forEach(function (id) { delete COVER_PENDING[id]; });
+      }).then(function () {
+        COVER_INFLIGHT--;
+        if (!COVER_Q.length && !COVER_INFLIGHT) hideBarIfPhase('cover', 900);
+        pumpCovers();
       });
-    }).catch(function () { }).then(hideCoverBarIfMine);
+    }
   }
 
   function wallTile(g, idx) {
@@ -2013,10 +2076,23 @@
   function autoScanLibrary() {
     var before = (GAMES || []).map(function (g) { return g.dir; });
     showBar(t('正在扫描游戏库…'), 0.05, 'scan');
-    return invoke('scan_library').then(function (r) {
+    // 启动时的刷新走轻量模式：只读启动器清单 + 复用缓存，不再逐个游戏重新探测
+    // （用户反馈：游戏装得多时每次启动要等 20 分钟）
+    return invoke('scan_library', { mode: 'startup' }).then(function (r) {
+      if (r && r.stale) {
+        // 缓存 schema 过期（探测逻辑升级过）：先秒开显示旧数据，后台静默重探测一次
+        setTimeout(function () {
+          invoke('scan_library', { mode: 'reprobe' }).then(function () {
+            return refreshLibrary();
+          }).then(function () {
+            toast(t('游戏库已在后台更新'), 'ok', 6000);
+          }).catch(function () { });
+        }, 1200);
+        hideBarIfPhase('scan', 600);
+        return refreshLibrary();
+      }
       showBar(t('扫描完成，共 ') + r.count + t(' 个游戏'), 1, 'scan');
       hideBarLater(2000);
-      COVERS_TRIED = false;
       return refreshLibrary().then(function () {
         var after = (GAMES || []).map(function (g) { return g.dir; });
         var beforeSet = {}, afterSet = {};
@@ -2038,19 +2114,26 @@
 
   function scanLibrary() {
     busy($('btn-scan'), t('扫描中…'), function () {
-      showBar(t('正在扫描游戏库…'), 0.05, 'scan');
-      return invoke('scan_library').then(function (r) {
-        showBar(t('扫描完成，共 ') + r.count + t(' 个游戏'), 1, 'scan');
-        hideBarLater(2500);
-        var notes = r.notes || [];
-        var msg = t('扫描完成：找到 ') + r.count + t(' 个游戏');
-        if (r.saved === false) msg += t('\n（缓存写入失败，下次启动不会自动显示）');
-        if (notes.length) {
-          msg += '\n' + notes.slice(0, 2).join('\n');
-          if (notes.length > 2) msg += t('\n…还有 ') + (notes.length - 2) + t(' 条说明，见日志');
-        }
-        toast(msg, 'ok', 8000);
-        return refreshLibrary();
+      // 散装目录（D:\Game 这类手放的游戏）的枚举明显更慢：让用户自己选要不要扫
+      return uiConfirm({
+        title: t('扫描游戏库'),
+        ok: t('连同散装目录'),
+        body: t('是否同时扫描非启动器目录（例如 D:\\Game 这类手放的游戏）？\n\n· 仅启动器：更快，但扫不到手放的游戏\n· 连同散装目录：更全，但更慢'),
+      }).then(function (withLoose) {
+        showBar(t('正在扫描游戏库…'), 0.05, 'scan');
+        return invoke('scan_library', { mode: withLoose ? 'manual' : 'manual_fast' }).then(function (r) {
+          showBar(t('扫描完成，共 ') + r.count + t(' 个游戏'), 1, 'scan');
+          hideBarLater(2500);
+          var notes = r.notes || [];
+          var msg = t('扫描完成：找到 ') + r.count + t(' 个游戏');
+          if (r.saved === false) msg += t('\n（缓存写入失败，下次启动不会自动显示）');
+          if (notes.length) {
+            msg += '\n' + notes.slice(0, 2).join('\n');
+            if (notes.length > 2) msg += t('\n…还有 ') + (notes.length - 2) + t(' 条说明，见日志');
+          }
+          toast(msg, 'ok', 8000);
+          return refreshLibrary();
+        });
       });
     });
   }
@@ -2336,6 +2419,14 @@
     if ($('btn-netdisk')) $('btn-netdisk').addEventListener('click', function () {
       invoke('open_netdisk').catch(function () {  });
     });
+    if ($('auto-scan-tgl')) {
+      $('auto-scan-tgl').addEventListener('change', function () {
+        var on = this.checked;
+        invoke('set_auto_scan', { on: on }).then(function () {
+          if (CFG) CFG.autoScanOnStart = on;
+        }).catch(function (e) { toast(t('保存失败：') + errText(e), 'err'); });
+      });
+    }
     if ($('btn-hags')) $('btn-hags').addEventListener('click', function () {
       invoke('open_hags_settings').then(function (r) {
         toast(t('已打开系统设置里的「硬件加速 GPU 计划」\n') + (r && r.uri ? r.uri : '') +
@@ -2461,12 +2552,20 @@
     bindUpdateDialog();
     startLogLive();
     refreshGpu().then(function () { warnGpuIfNeeded(); }).catch(function () { });
-    loadConfig().then(function () { return refreshAssets(); }).catch(function () { });
+    loadConfig().then(function () {
+      if ($('auto-scan-tgl')) $('auto-scan-tgl').checked = !!(CFG && CFG.autoScanOnStart);
+      return refreshAssets();
+    }).catch(function () { });
     loadDlss5Meta().catch(function () { });
     loadSpoof().catch(function () { });
     loadCovers()
       .then(function () { return refreshLibrary(); })
-      .then(function () { return autoScanLibrary(); })
+      .then(function () {
+        // 默认不自动扫描（用户要求，开关在「关于」页，默认关）；
+        // 第一次使用（库是空的）扫一次，避免新用户一进来看到空列表。
+        var firstRun = !(GAMES && GAMES.length);
+        if (firstRun || (CFG && CFG.autoScanOnStart)) return autoScanLibrary();
+      })
       .catch(function () { });
   }
 

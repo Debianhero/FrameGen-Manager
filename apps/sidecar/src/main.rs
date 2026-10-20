@@ -907,36 +907,152 @@ fn build_cached(entry: framegen_core::scan::GameEntry) -> framegen_core::scan::C
     }
 }
 
-/// 扫描游戏库（Steam / Epic / WeGame / 本地目录）并落盘。
+/// 多线程探测（只对**新增 / 需要刷新**的游戏做）：找渲染 exe、PE 分析、反作弊扫描
+/// 都是只读重活，串行做几百个游戏会要命（用户反馈启动等 20 分钟）。
+fn parallel_build_cached(entries: Vec<framegen_core::scan::GameEntry>) -> Vec<framegen_core::scan::CachedRow> {
+    if entries.len() <= 1 {
+        return entries.into_iter().map(build_cached).collect();
+    }
+    let n = std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(4)
+        .min(4)
+        .min(entries.len());
+    let mut chunks: Vec<Vec<framegen_core::scan::GameEntry>> = (0..n).map(|_| Vec::new()).collect();
+    for (i, e) in entries.into_iter().enumerate() {
+        chunks[i % n].push(e);
+    }
+    std::thread::scope(|s| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|c| s.spawn(move || c.into_iter().map(build_cached).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    })
+}
+
+/// 游戏目录在上次扫描之后有没有被改过（游戏更新、换内容）。
+fn dir_touched_since(dir: &std::path::Path, since_epoch: u64) -> bool {
+    if since_epoch == 0 {
+        return false;
+    }
+    let Ok(m) = std::fs::metadata(dir) else {
+        return false;
+    };
+    let Ok(t) = m.modified() else {
+        return false;
+    };
+    let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    d.as_secs() > since_epoch
+}
+
+/// 扫描游戏库并落盘。
 ///
-/// 落盘这一步不能省：不写缓存的话下次启动还是空列表，
-/// 用户看到的就是「扫描了但没生效」。手动条目与忽略清单原样保留。
-fn scan_library(id: u64) -> Result<Value, String> {
+/// **模式**（性能的关键）：
+///   * `startup`：启动时的自动刷新。只读启动器清单（毫秒级）、不枚举散装目录、
+///     老游戏零探测、直接用缓存 —— 启动秒开（用户反馈：游戏多时等 20 分钟）。
+///     缓存 schema 过期时**不**在这里补探测，只返回 `stale:true`，由界面另发
+///     一次静默的 `reprobe`（不阻塞启动）。
+///   * `manual`：手动扫描（用户选了「连同散装目录」）。连散装目录一起枚举；
+///     老游戏只在目录被改过 / 没找到过渲染 exe / 技术字段没算过时才重新探测。
+///   * `manual_fast`：手动扫描（用户只选「仅启动器」），枚举启动器清单，不做散装枚举。
+///   * `reprobe`：schema 升级后的静默重探测 —— 全部游戏重新探测，分批汇报进度。
+/// 探测分批（每批 4 个）并汇报「正在识别（N/M）」；落盘不能省。手动条目与忽略清单原样保留。
+fn scan_library(id: u64, mode: &str) -> Result<Value, String> {
     progress(id, "正在扫描游戏库…", 0.0);
-    let (entries, notes) = framegen_core::scan::scan_all_notes();
+    let startup = mode == "startup";
+    let reprobe = mode == "reprobe";
+    let with_loose = mode == "manual";
+    let (entries, notes) = {
+        let mut notes = Vec::new();
+        let mut all = framegen_core::scan::scan_launcher_notes(&mut notes);
+        if with_loose {
+            all.extend(framegen_core::scan::scan_loose_notes(&mut notes));
+        }
+        (all, notes)
+    };
     let old = framegen_core::scan::load_library();
-    let mut rows: Vec<framegen_core::scan::CachedRow> = entries.into_iter().map(build_cached).collect();
-    /* 重新扫描会把 scanned 整批重建，而「用户上次在 DLSS5 部署框里手动选的图形 API」
-       是跟这个游戏走的决定 —— 按安装目录把它带过来，别让一次扫描冲掉。 */
-    for row in rows.iter_mut() {
-        if let Some(prev) = old
-            .scanned
-            .iter()
-            .find(|c| c.entry.install_dir == row.entry.install_dir)
-        {
-            row.dlss5_api = prev.dlss5_api.clone();
+    let schema_stale = old.schema != framegen_core::scan::LIBRARY_SCHEMA;
+    if startup && schema_stale && !old.scanned.is_empty() {
+        // 启动路径绝不在这里补探测：只报告过期，界面随后静默发 reprobe
+        return Ok(json!({ "count": old.scanned.len(), "notes": notes, "saved": true, "stale": true }));
+    }
+    let full_probe = reprobe || schema_stale;
+    let key_of = |p: &std::path::Path| p.display().to_string().to_lowercase();
+    let mut by_dir: std::collections::HashMap<String, framegen_core::scan::CachedRow> = old
+        .scanned
+        .iter()
+        .cloned()
+        .map(|r| (key_of(&r.entry.install_dir), r))
+        .collect();
+    let mut rows: Vec<framegen_core::scan::CachedRow> = Vec::new();
+    let mut probe: Vec<framegen_core::scan::GameEntry> = Vec::new();
+    // 需要重探测的旧行：手动选的图形 API 要带回去（别让扫描冲掉用户的决定）
+    let mut keep_api: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for e in entries {
+        let k = key_of(&e.install_dir);
+        match by_dir.remove(&k) {
+            Some(row) => {
+                let verbose = full_probe
+                    || ((mode == "manual" || mode == "manual_fast")
+                        && (dir_touched_since(&e.install_dir, old.scanned_epoch)
+                            || row.render_exe.is_none()
+                            || !row.tech_scanned));
+                if verbose {
+                    keep_api.insert(k, row.dlss5_api.clone());
+                    probe.push(e);
+                } else {
+                    // 元数据（名字/来源）可能变了，刷新它；探测结果与 dlss5_api 原样保留
+                    rows.push(framegen_core::scan::CachedRow { entry: e, ..row });
+                }
+            }
+            None => probe.push(e),
+        }
+    }
+    // 分批探测：每批 4 个并行，批间汇报进度（手动扫描时用户能看到扫到第几个）
+    let total = rows.len() + probe.len();
+    let mut done = rows.len();
+    let mut probe_entries = probe;
+    while !probe_entries.is_empty() {
+        let rest = probe_entries.split_off(probe_entries.len().min(4));
+        let batch = std::mem::replace(&mut probe_entries, rest);
+        let mut probed = parallel_build_cached(batch);
+        for row in probed.iter_mut() {
+            if let Some(api) = keep_api.get(&key_of(&row.entry.install_dir)) {
+                row.dlss5_api = api.clone();
+            }
+        }
+        done += probed.len();
+        rows.extend(probed);
+        if total > 0 {
+            progress(
+                id,
+                &format!("正在识别游戏（{done}/{total}）…"),
+                (done as f32 / total as f32).min(0.99),
+            );
         }
     }
     let count = rows.len();
     let cache = framegen_core::scan::LibraryCache {
+        schema: framegen_core::scan::LIBRARY_SCHEMA,
         scanned_at: framegen_core::util::now_utc(),
+        scanned_epoch: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
         scanned: rows,
         manual: old.manual,
         ignored: old.ignored,
     };
     let saved = framegen_core::scan::save_library(&cache).is_ok();
     progress(id, &format!("扫描完成，共 {count} 个游戏"), 1.0);
-    Ok(json!({ "count": count, "notes": notes, "saved": saved }))
+    Ok(json!({ "count": count, "notes": notes, "saved": saved, "stale": false }))
 }
 
 /// 打开系统设置里「硬件加速 GPU 计划」那一页（只跳转，绝不写注册表）。
@@ -1547,6 +1663,7 @@ fn get_config() -> Value {
         "optimized": cfg.fg_optimized,
         "frames": cfg.fg_frames,
         "preset": cfg.fg_preset,
+        "autoScanOnStart": cfg.auto_scan_on_start,
         "legacyPrompted": cfg.legacy_prompt_version,
         "defaultPreset": framegen_core::update::DEFAULT_PRESET,
         "presets": framegen_core::update::PRESETS,
@@ -1565,6 +1682,14 @@ fn get_config() -> Value {
         "libraryPath": framegen_core::scan::library_path().display().to_string(),
         "logsDir": framegen_core::log::dir().map(|p| p.display().to_string()).unwrap_or_default(),
     })
+}
+
+/// 保存「启动时自动扫描游戏库」开关（默认**关**）。
+fn set_auto_scan(on: bool) -> Result<Value, String> {
+    let mut cfg = framegen_core::util::load_config();
+    cfg.auto_scan_on_start = on;
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({ "autoScanOnStart": on }))
 }
 
 /// 改部署档位：只接受上游真正支持的取值 —— 别让前端传进来的怪数字写进配置
@@ -1791,7 +1916,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             Ok(Value::Null)
         }
         "list_games" => list_games(),
-        "scan_library" => scan_library(id),
+        "scan_library" => scan_library(id, &arg_opt_str(args, "mode")?.unwrap_or_else(|| "manual".to_owned())),
         "add_game" => add_game(),
         "pick_game_exe" => pick_game_exe(),
         // 界面走的这三条：主进程弹的框（带父窗口，不会被窗口盖住）
@@ -1853,6 +1978,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             arg_opt_str(args, "preset")?.unwrap_or_default(),
             arg_opt_str(args, "legacyPrompted")?,
         ),
+        "set_auto_scan" => set_auto_scan(args.get("on").and_then(Value::as_bool).unwrap_or(false)),
         "check_self_update" => check_self_update(),
         "self_update_download" => self_update_download(id, args),
 

@@ -88,9 +88,17 @@ fn tier_none() -> crate::anticheat::AcTier {
 /// 两者分开存，是为了「重新扫描」不会把用户手动加的条目冲掉。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LibraryCache {
+    /// 缓存结构/探测逻辑的版本。和 LIBRARY_SCHEMA 不一致时，由界面在后台静默重探测
+    /// （不阻塞启动）—— 以后探测项变化（比如新增识别内容）靠它自动刷新。
+    #[serde(default)]
+    pub schema: u32,
     /// 上次扫描完成的时间（UTC，空表示没扫过）
     #[serde(default)]
     pub scanned_at: String,
+    /// 上次扫描完成的时间（Unix 秒）。手动扫描时用它判断「游戏目录在上次扫描后有没有被改过」，
+    /// 只重探测变化过的游戏；老缓存没有这个字段（0）就不强制刷新。
+    #[serde(default)]
+    pub scanned_epoch: u64,
     #[serde(default)]
     pub scanned: Vec<CachedRow>,
     #[serde(default)]
@@ -103,6 +111,10 @@ pub struct LibraryCache {
 const LIBRARY_NAME: &str = "game_library.json";
 
 /// 缓存文件位置：和配置文件放在一起（便携版就在 exe 旁边）。
+/// 缓存里 technical 字段的「探测逻辑版本」。改了探测内容/新增识别项就 +1：
+/// 旧缓存（schema 小）会由界面在后台**静默**重探测一次（不阻塞启动）。
+pub const LIBRARY_SCHEMA: u32 = 2;
+
 pub fn library_path() -> PathBuf {
     crate::util::config_path().with_file_name(LIBRARY_NAME)
 }
@@ -2717,6 +2729,17 @@ pub fn scan_loose_in(roots: &[PathBuf], notes: &mut Vec<String>) -> Vec<GameEntr
         }
     ));
     out
+}
+
+/// 只扫启动器登记的游戏库（Steam / Epic / WeGame），**不做**「散装目录」的盘符枚举。
+///
+/// 启动时的轻量刷新用它：只读 libraryfolders.vdf / Epic 清单 / WeGame 目录，
+/// 毫秒级；全量探测（找渲染 exe、PE 分析）交给调用方按缓存增量做。
+pub fn scan_launcher_notes(notes: &mut Vec<String>) -> Vec<GameEntry> {
+    let mut all = scan_steam_notes(notes);
+    all.extend(scan_epic_notes(notes));
+    all.extend(scan_wegame_notes(notes));
+    all
 }
 
 pub fn scan_all_notes() -> (Vec<GameEntry>, Vec<String>) {
