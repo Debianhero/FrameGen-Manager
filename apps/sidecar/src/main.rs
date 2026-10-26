@@ -1702,6 +1702,31 @@ fn sm_legacy_scan() -> Result<Value, String> {
     Ok(json!({ "games": games, "prompt": prompt }))
 }
 
+/// 扫一遍游戏库：哪些游戏的目录里还是**旧版 DLSS5（RenoDX）**——需先卸载再重装。
+fn dlss5_legacy_scan() -> Result<Value, String> {
+    let cache = framegen_core::scan::load_library();
+    let mut games: Vec<String> = Vec::new();
+    for row in cache.scanned.iter().chain(cache.manual.iter()) {
+        if framegen_core::dlss5::has_legacy_renodx(&row.entry.install_dir) {
+            games.push(row.entry.name.clone());
+        }
+    }
+    let cfg = framegen_core::util::load_config();
+    let prompt = !games.is_empty()
+        && !cfg
+            .dlss5_legacy_prompt_version
+            .eq(framegen_core::update::SELF_VERSION);
+    Ok(json!({ "games": games, "prompt": prompt }))
+}
+
+/// 记录「DLSS5 更换提示」已经按当前版本弹过了。
+fn dlss5_legacy_prompt_done() -> Result<Value, String> {
+    let mut cfg = framegen_core::util::load_config();
+    cfg.dlss5_legacy_prompt_version = framegen_core::update::SELF_VERSION.to_owned();
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({ "ok": true }))
+}
+
 /// 记录「旧版组件提示」已经按当前版本弹过了。
 fn sm_legacy_prompt_done() -> Result<Value, String> {
     let mut cfg = framegen_core::util::load_config();
@@ -2007,6 +2032,8 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         "set_auto_scan" => set_auto_scan(args.get("on").and_then(Value::as_bool).unwrap_or(false)),
         "sm_legacy_scan" => sm_legacy_scan(),
         "sm_legacy_prompt_done" => sm_legacy_prompt_done(),
+        "dlss5_legacy_scan" => dlss5_legacy_scan(),
+        "dlss5_legacy_prompt_done" => dlss5_legacy_prompt_done(),
         "check_self_update" => check_self_update(),
         "self_update_download" => self_update_download(id, args),
 

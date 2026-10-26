@@ -49,15 +49,6 @@ pub fn git_blob_sha1_file(path: &Path) -> Result<String> {
     Ok(to_hex(&h.finalize()))
 }
 
-/// git 的 blob 对象哈希 = sha1("blob <字节数>\0" + 内容)。
-/// 可以直接和 GitHub contents API 返回的 sha 字段比对，确认下载内容与仓库一致。
-pub fn git_blob_sha1(data: &[u8]) -> String {
-    let mut h = Sha1::new();
-    h.update(format!("blob {}\0", data.len()).as_bytes());
-    h.update(data);
-    to_hex(&h.finalize())
-}
-
 /// 把路径里的 Windows 用户名换成 `<user>`，好让用户放心把日志发给别人。
 ///
 /// 只动这一处：目录名要留着 —— 「Tencent\\QQ」「steamapps\\common\\…」这些名字正是
@@ -409,6 +400,9 @@ pub struct AppConfig {
     /// 记版本号而不是布尔值：每次发新版应该再提醒一次。
     #[serde(default)]
     pub sm_legacy_prompt_version: String,
+    /// 「DLSS5 已更换为 GITC 版，需先卸载再重装」这个提示按哪个程序版本弹过。
+    #[serde(default)]
+    pub dlss5_legacy_prompt_version: String,
 }
 
 // 这两个是**业务默认**（2 / 3），不是 u8 的类型默认（0），所以 AppConfig 的 Default
@@ -437,26 +431,11 @@ impl Default for AppConfig {
             window_size: None,
             auto_scan_on_start: false,
             sm_legacy_prompt_version: String::new(),
+            dlss5_legacy_prompt_version: String::new(),
         }
     }
 }
 
-
-/// 老配置里有没有「legacy_3101: true」（一次性迁移用）。
-///
-/// 这个开关已经取消：上游 0.3.1 起 20/30 系用同一套文件。但带这个标记的老配置对应的
-/// 本地 version.dll 是旧的：探测落到镜像时指纹不可信，「已是最新」的判定会退化成
-/// 「比字节数」，旧文件正好和旧记录对得上，于是静默跳过下载 —— 用户以为升级了，
-/// 其实还是老版本。所以启动时看一次老配置。
-pub fn config_had_legacy_3101() -> bool {
-    let Ok(text) = std::fs::read_to_string(config_path()) else {
-        return false;
-    };
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|v| v.get("legacy_3101").and_then(|x| x.as_bool()))
-        .unwrap_or(false)
-}
 
 pub fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe()

@@ -6,7 +6,6 @@ pub mod util;
 pub mod log;
 pub mod anticheat;
 pub mod gpu;
-pub mod verify;
 pub mod update;
 pub mod scan;
 pub mod deploy;

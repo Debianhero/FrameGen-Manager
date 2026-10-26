@@ -35,8 +35,6 @@ pub const INI_REPO_PATH: &str = "dlssg_sm86.ini";
 const USER_AGENT: &str = "FrameGen-Manager/0.1 (+https://github.com/sdli1995/dlssg_for_sm86)";
 
 /// GitHub 未登录 API 每分钟/小时的配额用尽时的提示
-const RATE_LIMIT_MSG: &str = "GitHub 接口配额用完了（未登录每小时 60 次）。\
-本地文件状态不受影响，等一会儿再点「检查更新」即可。";
 
 pub fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
@@ -241,21 +239,6 @@ fn same_version(a: &str, b: &str) -> bool {
     }
 }
 
-/// 从一组候选里挑出**最大**的版本号。解析不出来的直接忽略 ——
-/// 宁可什么都不提示，也不能因为一个乱七八糟的字符串就误报有新版本。
-pub fn pick_latest(versions: impl IntoIterator<Item = String>) -> Option<String> {
-    let mut best: Option<String> = None;
-    for v in versions {
-        if parse_version(&v).is_none() {
-            continue;
-        }
-        if best.as_ref().map(|b| is_newer(&v, b)).unwrap_or(true) {
-            best = Some(v);
-        }
-    }
-    best
-}
-
 /// 问一个源，拿它报的版本号。失败返回 None。
 fn fetch_self_version_one(client: &reqwest::blocking::Client, url: &str) -> Option<String> {
     let resp = client.get(url).timeout(Duration::from_secs(8)).send().ok()?;
@@ -316,14 +299,6 @@ fn etag_of(resp: &reqwest::blocking::Response) -> Option<String> {
     } else {
         None
     }
-}
-
-fn content_length_of(resp: &reqwest::blocking::Response) -> u64 {
-    resp.headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0)
 }
 
 
@@ -1141,104 +1116,12 @@ pub fn runtime_deploy_plan(target_dir: &Path) -> (Vec<&'static str>, Vec<&'stati
     (have, need)
 }
 
-/// release 资产的直链。github.com 直连不通时，调用方会在前面拼镜像前缀。
-pub fn release_url(tag: &str, asset_name: &str) -> String {
-    format!("https://github.com/{DLSS_REPO}/releases/download/{tag}/{asset_name}")
-}
-
 #[derive(Debug, Clone)]
 pub struct ReleaseAsset {
     pub tag: String,
     pub asset_name: String,
     pub url: String,
     pub size: u64,
-}
-
-fn pick_zip_asset(release: &serde_json::Value, tag: &str) -> Option<ReleaseAsset> {
-    for a in release.get("assets")?.as_array()? {
-        let name = a.get("name").and_then(|x| x.as_str()).unwrap_or_default();
-        if !name.to_ascii_lowercase().ends_with(".zip") {
-            continue;
-        }
-        let url = a
-            .get("browser_download_url")
-            .and_then(|x| x.as_str())?
-            .to_owned();
-        let size = a.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
-        return Some(ReleaseAsset {
-            tag: tag.to_owned(),
-            asset_name: name.to_owned(),
-            url,
-            size,
-        });
-    }
-    None
-}
-
-/// 找 release 里的 zip 资产。
-/// 先按 preferred_tag 精确找；找不到就退到最新的、tag 以 prefix 开头的 release，
-/// 这样指定版本被删掉时不会直接失败。
-pub fn find_release_zip(
-    client: &reqwest::blocking::Client,
-    repo: &str,
-    prefix: &str,
-    preferred_tag: &str,
-) -> Result<ReleaseAsset> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/tags/{preferred_tag}");
-    if let Ok(resp) = client.get(&url).send() {
-        if resp.status().is_success() {
-            if let Ok(text) = resp.text() {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(a) = pick_zip_asset(&v, preferred_tag) {
-                        return Ok(a);
-                    }
-                }
-            }
-        }
-    }
-
-    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
-    let resp = client.get(&url).send().context("查询 Releases 失败")?;
-    let status = resp.status();
-    if status.as_u16() == 403 || status.as_u16() == 429 {
-        bail!(RATE_LIMIT_MSG);
-    }
-    if !status.is_success() {
-        bail!("查询 Releases 返回 HTTP {}", status.as_u16());
-    }
-    let text = resp.text().context("读取响应失败")?;
-    let list: Vec<serde_json::Value> =
-        serde_json::from_str(&text).context("解析 Releases JSON 失败")?;
-    for r in &list {
-        let tag = r.get("tag_name").and_then(|x| x.as_str()).unwrap_or_default();
-        if tag.starts_with(prefix) {
-            if let Some(a) = pick_zip_asset(r, tag) {
-                return Ok(a);
-            }
-        }
-    }
-    bail!("在 {repo} 里找不到 tag 以 {prefix} 开头的 release 资产")
-}
-
-/// HEAD 任意 URL，拿 (大小, ETag)。发布资产也有 Content-Length，够界面显示用了。
-/// 同样先官方后镜像，失败返回 None（只是显示不出大小，不影响下载）。
-pub fn probe_url(client: &reqwest::blocking::Client, url: &str) -> Option<(u64, String)> {
-    // release 直链是 github.com，墙内直连要干等连接超时 —— 而这里只是问个文件大小
-    // 给界面显示，没有「指纹必须来自 GitHub」的要求（zip 解压后靠 NVIDIA 签名校验），
-    // 所以直接走镜像优先。
-    let ms = mirrors("");
-    try_sources(url, &ms, true, None, |u, _src| {
-        let r = client
-            .head(u)
-            .timeout(Duration::from_secs(6))
-            .send()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        if !r.status().is_success() {
-            bail!("HTTP {}", r.status().as_u16());
-        }
-        Ok((content_length_of(&r), etag_of(&r).unwrap_or_default()))
-    })
-    .ok()
 }
 
 /// 按「镜像优先、官方兜底」的顺序下载一个不需要指纹校验的文件（运行库 zip）。
@@ -1953,14 +1836,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_notes_keep_only_the_newest_section() {
-        let doc = "# 更新日志\n\n## v1.2.2\n\n- 修复 A\n- 修复 B\n\n## v1.2.0\n\n- 更早的内容\n";
-        let out = clip_notes(doc.to_owned());
-        assert!(out.starts_with("## v1.2.2"), "开头就该是最新那一节：{out}");
-        assert!(out.contains("修复 A") && out.contains("修复 B"), "本节的条目要都在：{out}");
-        assert!(!out.contains("更早的内容"), "不该带上更早的版本：{out}");
-    }
-
     #[test]
     fn version_compare_reads_three_parts() {
         assert!(is_newer("1.2.2", "1.2.0"));

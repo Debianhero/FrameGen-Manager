@@ -935,7 +935,9 @@
     ]);
     return h('div', { class: 'gcard', style: 'animation-delay:' + Math.min(idx * 35, 350) + 'ms' }, [
       h('div', { class: 'gtop' }, [
-        gameThumb(g, false),
+        // 缩略图**封面优先**（封面是启动时就加载好的，图标是延后 2.5 秒才补齐的）——
+        // 反过来会让卡片先显示封面、图标到位后又整体变回图标（用户反馈"图标样式来回跳"）。
+        gameThumb(g, true),
         h('div', { class: 'ginfo' }, [
           h('div', { class: 'gname', text: g.name || t('（无名）') }),
           badges
@@ -1098,7 +1100,8 @@
       SCANNED_AT = (data && data.scannedAt) || '';
       paintLibrary();
       setTimeout(function () { maybePromptLegacyUpgrade(); }, 1500);
-      loadGameIcons();
+      // 图标是逐个 exe 从 Shell 读的（每个几十~几百毫秒）：延后一点，别抢首屏
+      setTimeout(function () { loadGameIcons(); }, 2500);
       return GAMES;
     }).catch(function (e) {
       var box = $('lib-list');
@@ -1776,9 +1779,13 @@
         readiness.className = 'risk strong';
         readiness.textContent = t('不能部署：') + backText(gate);
         deployBtn.disabled = true;
+      } else if (FOUND && FOUND.legacy) {
+        // 旧版 RenoDX（我们以前的 DLSS5）：用户定的过渡口径 —— 必须先彻底卸载再部署 GITC
+        readiness.className = 'hint warn';
+        readiness.textContent = t('内置的DLSS5版本已更换至GITC版，插件原生支持DX9/10/11/12、Vulkan、OpenGL，32位/64位游戏。请先删除/卸载DLSS5后重新部署新版本。');
+        deployBtn.disabled = true;
       } else if (FOUND && FOUND.anything && !FOUND.ours) {
-        // 用户定的规则：目录里有 DLSS5 相关文件、但无法判定是不是本工具部署的 ——
-        // 不许直接部署（避免和来路不明的文件混装），先【卸载 ReShade / DLSS5】清空再部署。
+        // 目录里有 DLSS5 相关文件、但不是本工具部署的 —— 不许直接部署，先卸载清空
         readiness.className = 'hint warn';
         readiness.textContent = t('检测到已装文件但无法判定是否为本工具部署 —— 部署已锁定：先点【卸载 ReShade / DLSS5】清空，再部署。');
         deployBtn.disabled = true;
@@ -1894,7 +1901,8 @@
         invoke('dlss5_uninstall', { dir: targetDir, exe: exePath || null }).then(function (r) {
           stateEl.textContent = t('未部署');
           stateEl.className = '';
-          toast(((r && r.msg) || t('已卸载')), 'ok', 20000);
+          // 成功只说一句，细节放复制按钮（用户反馈：长串提示看不过来）
+          toast(t('已卸载'), 'ok', 6000, String((r && r.msg) || ''));
           refreshFound();
           refreshLibrary();
         }).catch(function (e) {
@@ -2034,7 +2042,7 @@
         invoke('dlss5_restore', { dir: targetDir }).then(function (r) {
           stateEl.textContent = t('未部署');
           stateEl.className = '';
-          toast(String((r && r.msg) || t('已完成还原')), 'ok', 16000);
+          toast(t('已还原'), 'ok', 6000, String((r && r.msg) || ''));
           ov.close();
           refreshLibrary();
           refreshFound();
@@ -2075,6 +2083,23 @@
     });
   }
 
+
+  // 检测游戏目录里还是**旧版 DLSS5（RenoDX）**的游戏：提醒先卸载再重装 GITC 版（按版本记一次）。
+  function checkDlss5Legacy() {
+    return invoke('dlss5_legacy_scan').then(function (r) {
+      if (!r || !r.prompt || !(r.games || []).length) return;
+      var names = r.games.slice(0, 6).join('\n· ');
+      var more = r.games.length > 6 ? t('\n…还有 ') + (r.games.length - 6) + t(' 个') : '';
+      uiConfirm({
+        title: t('DLSS5 已更换为 GITC 版'),
+        ok: t('我知道了'),
+        single: true,
+        body: t('内置的DLSS5版本已更换至GITC版，插件原生支持DX9/10/11/12、Vulkan、OpenGL，32位/64位游戏。请先删除/卸载DLSS5后重新部署新版本。') +
+          '\n\n' + t('以下游戏目录里还是旧版：') + '\n· ' + names + more,
+      });
+      invoke('dlss5_legacy_prompt_done').catch(function () {  });
+    }).catch(function () {  });
+  }
 
   // 检测游戏目录里还是**旧版** Smooth Motion 组件的游戏，提醒一次「先还原后重新部署」。
   // 按程序版本记一次（用户忽略后不反复烦，发新版再提醒）。
@@ -2584,7 +2609,10 @@
     loadSpoof().catch(function () { });
     loadCovers()
       .then(function () { return refreshLibrary(); })
-      .then(function () { checkSmLegacy(); })
+      .then(function () {
+        // 旧版扫描放到首屏之后（4 秒）再做，别挡窗口出现
+        setTimeout(function () { checkSmLegacy(); checkDlss5Legacy(); }, 4000);
+      })
       .then(function () {
         // 默认不自动扫描（用户要求，开关在「关于」页，默认关）；
         // 第一次使用（库是空的）扫一次，避免新用户一进来看到空列表。

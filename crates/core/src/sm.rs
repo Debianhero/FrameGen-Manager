@@ -1317,44 +1317,6 @@ pub fn drop_game_sm_record(game: &str, game_dir: &std::path::Path, exe: &std::pa
     dropped
 }
 
-/// 把备份记录里所有游戏都还原一遍（界面上的"全部还原"）。
-/// 返回 (成功数, 记录总数, 失败说明)。
-pub fn restore_all_game_sm() -> (usize, usize, Vec<String>) {
-    let dir = match sm_records_dir() {
-        Ok(d) => d,
-        Err(e) => return (0, 0, vec![e]),
-    };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return (0, 0, Vec::new());
-    };
-    let mut files: Vec<std::path::PathBuf> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-        .collect();
-    files.sort();
-    let total = files.len();
-    let mut done = 0usize;
-    let mut errs = Vec::new();
-    for f in files {
-        let Some(rec) = record_read(&f) else {
-            continue;
-        };
-        // 记录名是「游戏目录」的哈希、不可逆；直接拿记录里存的目录算回同一个名字。
-        if rec.dir.is_empty() {
-            continue; // 老记录没有目录字段：按名字也能还原，界面上的"全部还原"跳过它
-        }
-        match restore_game_sm(&rec.game, std::path::Path::new(&rec.dir), std::path::Path::new(&rec.exe)) {
-            Ok(_) => done += 1,
-            Err(e) => errs.push(format!(
-                "{}：{e}",
-                if rec.game.is_empty() { "（未知游戏）" } else { &rec.game }
-            )),
-        }
-    }
-    (done, total, errs)
-}
-
 // ---------------------------------------------------------------- 自测用的小接口
 
 /// 自测用的一条记录（形如 "备份记录里的一行"）。
@@ -1454,31 +1416,6 @@ fn recorded_profile_names() -> Vec<String> {
         }
     }
     out
-}
-
-/// 清掉孤儿 profile。返回 (删掉的个数, 每个失败的说明)。
-pub fn clean_orphan_profiles() -> Result<(usize, Vec<String>), String> {
-    let sess = nv::Session::open()?;
-    let names = orphan_profiles()?;
-    let mut removed = 0usize;
-    let mut errs = Vec::new();
-    for name in names {
-        match handle_by_name(&sess, &name)? {
-            Some(p) => match sess.apps(p).is_empty() {
-                true => match sess.delete_profile(p) {
-                    Ok(()) => {
-                        removed += 1;
-                        crate::log::line(&format!("[sm] 清掉孤儿配置 {name}"));
-                    }
-                    Err(e) => errs.push(format!("{name}：{e}")),
-                },
-                false => errs.push(format!("{name}：又挂上应用了，跳过")),
-            },
-            None => errs.push(format!("{name}：找不到句柄，跳过")),
-        }
-    }
-    sess.save()?;
-    Ok((removed, errs))
 }
 
 // ---------------------------------------------------------------- 内置解锁组件的部署 / 还原

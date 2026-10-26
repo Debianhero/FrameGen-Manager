@@ -12,7 +12,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, GetIconInfo, PrivateExtractIconsW, HICON, ICONINFO,
+    DestroyIcon, GetIconInfo, HICON, ICONINFO,
 };
 
 /// 提取出来的图标：RGBA8 像素，可直接喂给 egui
@@ -64,27 +64,6 @@ pub fn icon_of(path: &Path) -> Option<IconImage> {
         }
         // from_hicon 负责收尾（连 hIcon 一起销毁）
         from_hicon(shfi.hIcon)
-    }
-}
-
-/// **本程序自己**的图标：从本 exe 的资源里取 256×256 那一档，给窗口用。
-///
-/// 为什么不直接让 Windows 回退到 exe 图标：不同的 Windows 版本、不同的 DPI 下，
-/// 「窗口没有图标时到底显示哪张图」表现不一致，索性显式取出来设给窗口。
-///
-/// 走 PrivateExtractIconsW（Shell 取文件图标的同一套底层），再复用下面的
-/// HICON -> RGBA。取不到就返回 None —— 没图标也要能正常跑。
-pub fn app_icon() -> Option<IconImage> {
-    let exe = std::env::current_exe().ok()?;
-    let w = wide(&exe);
-    unsafe {
-        let mut hicon: HICON = std::ptr::null_mut();
-        let mut id: u32 = 0;
-        let n = PrivateExtractIconsW(w.as_ptr(), 0, 256, 256, &mut hicon, &mut id, 1, 0);
-        if n == 0 || hicon.is_null() {
-            return None;
-        }
-        from_hicon(hicon)
     }
 }
 

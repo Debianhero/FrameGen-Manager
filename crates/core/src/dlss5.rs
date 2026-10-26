@@ -39,8 +39,16 @@ pub const DIR_NAME: &str = "DLSS5";
 /// 目前只有这一个渲染后端。列表将来变长时，界面直接读这里的常量。
 pub const BACKEND_RESHADE: &str = "reshade";
 pub const MODEL_NAME: &str = "nvngx_dlssnr.dll";
-pub const ADDON_PREFIX: &str = "renodx-dlss5";
+pub const ADDON_PREFIX: &str = "gitc-uplift";
 pub const ADDON_EXT: &str = ".addon64";
+/// GITC 款的另外几件：32 位插件、32 位/DX9 的辅助进程、两个可选 Shader
+pub const ADDON32_NAME: &str = "gitc-uplift.addon32";
+pub const HELPER_NAME: &str = "gitc-uplift-helper64.exe";
+pub const FX_NAMES: [&str; 2] = ["Uplift.fx", "UpliftMask.fx"];
+/// 模型必须放这个子目录（GITC 规定：放 exe 旁边会被 NVIDIA DLSS 抢先加载）
+pub const GITC_MODEL_DIR: &str = "GITC-Uplift";
+/// 旧版（RenoDX）插件文件名前缀：命中即"需要先彻底卸载再部署新版本"
+pub const LEGACY_PREFIX: &str = "renodx-dlss5";
 /// 历史版本 DLSS5 资产的指纹：升级部署时靠它认出「旧插件是我们发的」并清掉
 /// （更老的构建部署时没记录哈希，光靠部署记录认不全 —— 漏了就会新旧两个插件共存）。
 pub const LEGACY_ADDON_SHA256: [&str; 1] = [
@@ -271,10 +279,29 @@ pub fn assets_report() -> AssetsReport {
         name: MODEL_NAME.to_owned(),
         present: model.is_some(),
         bytes: size_of(&model),
-        hint: format!("神经网络模型（{MODEL_SUBDIR}）"),
+        hint: "神经网络模型（部署进 GITC-Uplift 子目录）".to_owned(),
     });
     if model.is_none() {
         missing.push("神经网络模型".to_owned());
+    }
+
+    for (nm, hint) in [
+        (ADDON32_NAME, "DLSS5 插件（32 位）"),
+        (HELPER_NAME, "DLSS5 辅助进程（32 位/DX9）"),
+        (FX_NAMES[0], "DLSS5 Shader"),
+        (FX_NAMES[1], "DLSS5 Shader"),
+    ] {
+        let p = dir.join(nm);
+        let present = p.is_file();
+        items.push(AssetItem {
+            name: nm.to_owned(),
+            present,
+            bytes: std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
+            hint: hint.to_owned(),
+        });
+        if !present {
+            missing.push(hint.to_owned());
+        }
     }
 
     AssetsReport {
@@ -397,6 +424,50 @@ pub struct Manifest {
 }
 
 /// 备份目录：和帧生成那份**分开**（同一目录 key 加后缀），共用会让两边互相删记录。
+/// 快速判断两份文件内容是否一致：小文件（≤8MB）比全量哈希，大文件比「大小 + 首尾各
+/// 256KB」。509MB 的模型每次全量哈希要两秒多，部署/重部署时没必要反复算。
+fn same_file_content(a: &Path, b: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let (ma, mb) = match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => (x, y),
+        _ => return false,
+    };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    if ma.len() <= 8 * 1024 * 1024 {
+        return util::sha256_file(a)
+            .ok()
+            .zip(util::sha256_file(b).ok())
+            .map(|(x, y)| x == y)
+            .unwrap_or(false);
+    }
+    const CHUNK: u64 = 256 * 1024;
+    let mut fa = match std::fs::File::open(a) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut fb = match std::fs::File::open(b) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut ba = vec![0u8; CHUNK as usize];
+    let mut bb = vec![0u8; CHUNK as usize];
+    for pos in [0u64, ma.len().saturating_sub(CHUNK)] {
+        if fa.seek(SeekFrom::Start(pos)).is_err() || fb.seek(SeekFrom::Start(pos)).is_err() {
+            return false;
+        }
+        let n = CHUNK.min(ma.len() - pos) as usize;
+        if fa.read_exact(&mut ba[..n]).is_err() || fb.read_exact(&mut bb[..n]).is_err() {
+            return false;
+        }
+        if ba[..n] != bb[..n] {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn base_dir(deploy_dir: &Path) -> Result<PathBuf> {
     Ok(util::backups_dir()?.join(format!("{}-dlss5", util::dir_key(deploy_dir))))
 }
@@ -727,12 +798,7 @@ pub fn prepare(dir: &Path, exe: Option<&Path>, api_sel: GraphicsApi) -> Result<P
             dir.display()
         );
     }
-    if !pe_is_64bit(&exe)? {
-        bail!(
-            "{} 是 32 位程序，内置的 DLSS5 插件是 64 位版（*.addon64），暂不支持",
-            exe.display()
-        );
-    }
+    // 32 位游戏现在也支持（GITC 款自带 addon32 + helper64），不再拦。
 
     let setup = find_setup().with_context(|| {
         format!(
@@ -856,6 +922,11 @@ pub fn deploy(
         ),
     };
 
+    // 用户定的过渡口径：目录里还是旧版 RenoDX → **拒绝部署**，必须先彻底卸载再重装
+    if has_legacy_renodx(&dir) {
+        bail!("内置的DLSS5版本已更换至GITC版，插件原生支持DX9/10/11/12、Vulkan、OpenGL，32位/64位游戏。请先删除/卸载DLSS5后重新部署新版本。");
+    }
+
     let base = base_dir(&dir)?;
     let files_dir = base.join("files");
     std::fs::create_dir_all(&files_dir)?;
@@ -877,7 +948,38 @@ pub fn deploy(
         .map(|n| n.to_string_lossy().to_string())
         .context("插件文件名读不出来")?;
     want_files.push((addon_name.clone(), "DLSS5 插件".to_owned()));
-    want_files.push((MODEL_NAME.to_owned(), "神经网络模型".to_owned()));
+    want_files.push((ADDON32_NAME.to_owned(), "DLSS5 插件（32 位）".to_owned()));
+    want_files.push((HELPER_NAME.to_owned(), "DLSS5 辅助进程（32 位/DX9）".to_owned()));
+    // 模型按 GITC 的要求放子目录（放 exe 旁边会被 NVIDIA DLSS 抢先加载）
+    want_files.push((format!("{GITC_MODEL_DIR}\\{MODEL_NAME}"), "神经网络模型".to_owned()));
+    for fx in FX_NAMES {
+        // 必须放进**子目录**：ReShade 默认 EffectSearchPaths 是 `reshade-shaders\Shaders\**\**`，
+        // 只认子目录里的 fx —— 直接放 Shaders 根下会解析失败、首页提示"没有效果文件"（实测踩过）。
+        want_files.push((
+            format!("{SHADERS_DIR}\\Shaders\\{GITC_MODEL_DIR}\\{fx}"),
+            "DLSS5 Shader".to_owned(),
+        ));
+    }
+    // 内置效果包的清单（与实际拷贝用同一套遍历规则）
+    {
+        let fx_root0 = asset_dir().unwrap_or_default().join("effects");
+        let mut stack = vec![fx_root0.clone()];
+        while let Some(d) = stack.pop() {
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if let Ok(rel) = p.strip_prefix(&fx_root0) {
+                        want_files.push((
+                            format!("{SHADERS_DIR}\\{}", rel.display()),
+                            "内置效果包".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     // 占用检查：正被游戏占着的文件写不进去，早点说清楚
     for (name, _) in &want_files {
@@ -916,13 +1018,33 @@ pub fn deploy(
             }
         }
         let dst = dir.join(name);
-        let existed = dst.is_file();
+        let mut existed = dst.is_file();
+        // **已是我们自己的资产就不要再备份**：同名同大小 = 我们自己上一版铺的文件，
+        // 备份它只会把我们的旧文件存成"原件"，还原时又把它还原回来（SM 那边踩过同款坑）。
+        // 判大小足够（同名 + 精确到字节的大小，误判概率可忽略），不用重算 509MB 的哈希。
+        if existed {
+            let known = [addon_name.as_str(), ADDON32_NAME, HELPER_NAME, MODEL_NAME];
+            if known.iter().any(|k| name.eq_ignore_ascii_case(k)) {
+                let asset_sz = asset_dir()
+                    .ok()
+                    .and_then(|a| std::fs::metadata(a.join(name)).ok())
+                    .map(|m| m.len());
+                let dst_sz = std::fs::metadata(&dst).ok().map(|m| m.len());
+                if asset_sz.is_some() && asset_sz == dst_sz {
+                    existed = false;
+                }
+            }
+        }
         let mut backup_name = None;
         let mut original_sha256 = None;
         if existed {
             let orig = std::fs::read(&dst).with_context(|| format!("备份 {}", dst.display()))?;
             original_sha256 = Some(util::sha256_hex(&orig));
-            let bn = format!("{}.bak", name);
+            // 子目录里的目标（GITC-Uplift\\nvngx_dlssnr.dll）备份名不能带反斜杠
+            let bn = format!("{}.bak", name.replace('\\', "_").replace('/', "_"));
+            if let Some(p) = files_dir.join(&bn).parent() {
+                std::fs::create_dir_all(p).ok();
+            }
             std::fs::write(files_dir.join(&bn), &orig)?;
             backup_name = Some(bn);
         }
@@ -1009,12 +1131,52 @@ pub fn deploy(
             .map(|d| d.as_millis())
             .unwrap_or(0)
     ));
-    let expect = extract_reshade_dll(&setup, is64, &tmp_dll);
-    let expect_sha = match &expect {
-        Ok(()) => util::sha256_file(&tmp_dll).ok(),
-        Err(_) => None,
+    // 「安装器里内嵌的 ReShade 哈希」按 setup 文件（大小+mtime）缓存：每次部署都解包
+    // 4.3MB 安装器再算哈希是白花一秒（用户要求优化部署速度）。
+    let cache_path = util::config_path().with_file_name("reshade-setup-cache.json");
+    let setup_key = std::fs::metadata(&setup)
+        .ok()
+        .map(|m| {
+            let mt = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{}|{}|{}", setup.display(), m.len(), mt)
+        })
+        .unwrap_or_default();
+    let mut cached: std::collections::HashMap<String, String> = std::fs::read_to_string(&cache_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let expect_sha = if !setup_key.is_empty() {
+        if let Some(h) = cached.get(&setup_key) {
+            Some(h.clone())
+        } else {
+            let expect = extract_reshade_dll(&setup, is64, &tmp_dll);
+            let sha = match &expect {
+                Ok(()) => util::sha256_file(&tmp_dll).ok(),
+                Err(_) => None,
+            };
+            let _ = std::fs::remove_file(&tmp_dll);
+            if let Some(h) = &sha {
+                cached.insert(setup_key, h.clone());
+                if let Ok(t) = serde_json::to_string(&cached) {
+                    let _ = std::fs::write(&cache_path, t);
+                }
+            }
+            sha
+        }
+    } else {
+        let expect = extract_reshade_dll(&setup, is64, &tmp_dll);
+        let sha = match &expect {
+            Ok(()) => util::sha256_file(&tmp_dll).ok(),
+            Err(_) => None,
+        };
+        let _ = std::fs::remove_file(&tmp_dll);
+        sha
     };
-    let _ = std::fs::remove_file(&tmp_dll);
 
     let mut verify_problem: Option<String> = None;
     let mut verify_note = String::new();
@@ -1059,12 +1221,64 @@ pub fn deploy(
     // 4) 铺插件与模型（原子写入 + 逐个核对）
     on("正在铺 DLSS5 插件与模型…".to_owned(), 0.7);
     let mut placed: Vec<String> = Vec::new();
-    for (src, name, role) in [
-        (&addon, addon_name.clone(), "DLSS5 插件"),
-        (&model, MODEL_NAME.to_owned(), "神经网络模型"),
-    ] {
-        let dst = dir.join(&name);
-        let tmp = dir.join(format!(".{name}.fgm.tmp"));
+    let extra_asset = asset_dir()?;
+    // 内置效果包（标准效果 + SweetFX + iMMERSE 免费套件 + lilium HDR）：整棵树铺进
+    // reshade-shaders\（必须按原相对路径，`.fxh` 依赖、纹理目录都在里面）
+    let mut effect_copies: Vec<(PathBuf, String)> = Vec::new();
+    let fx_root = extra_asset.join("effects");
+    if fx_root.is_dir() {
+        let mut stack = vec![fx_root.clone()];
+        while let Some(d) = stack.pop() {
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if let Ok(rel) = p.strip_prefix(&fx_root) {
+                        effect_copies.push((p.clone(), format!("{SHADERS_DIR}\\{}", rel.display())));
+                    }
+                }
+            }
+        }
+    }
+    let copies: Vec<(PathBuf, String, &str)> = vec![
+        (addon.clone(), addon_name.clone(), "DLSS5 插件"),
+        (extra_asset.join(ADDON32_NAME), ADDON32_NAME.to_owned(), "DLSS5 插件（32 位）"),
+        (extra_asset.join(HELPER_NAME), HELPER_NAME.to_owned(), "DLSS5 辅助进程"),
+        (model.clone(), format!("{GITC_MODEL_DIR}\\{MODEL_NAME}"), "神经网络模型"),
+        (
+            extra_asset.join(FX_NAMES[0]),
+            format!("{SHADERS_DIR}\\Shaders\\{GITC_MODEL_DIR}\\{}", FX_NAMES[0]),
+            "DLSS5 Shader",
+        ),
+        (
+            extra_asset.join(FX_NAMES[1]),
+            format!("{SHADERS_DIR}\\Shaders\\{GITC_MODEL_DIR}\\{}", FX_NAMES[1]),
+            "DLSS5 Shader",
+        ),
+    ];
+    // 旧版本把 fx 直接铺在 Shaders 根下（ReShade 的通配解析不到）：部署时顺手清掉
+    for fx in FX_NAMES {
+        let legacy = dir.join(SHADERS_DIR).join("Shaders").join(fx);
+        if legacy.is_file() {
+            let _ = std::fs::remove_file(&legacy);
+        }
+    }
+    let mut all_copies = copies;
+    for (src, target) in &effect_copies {
+        all_copies.push((src.clone(), target.clone(), "内置效果包"));
+    }
+    for (src, name, role) in &all_copies {
+        let dst = dir.join(name);
+        if let Some(p) = dst.parent() {
+            std::fs::create_dir_all(p).ok();
+        }
+        // 增量：目标与资产内容一致就直接跳过（效果包 108 个文件，重部署时不必反复重写）
+        if dst.is_file() && same_file_content(src, &dst) {
+            placed.push(name.clone());
+            continue;
+        }
+        let tmp = dir.join(format!(".{}.fgm.tmp", name.replace('\\', "_")));
         let step = std::fs::copy(src, &tmp)
             .with_context(|| format!("写入临时文件 {}", tmp.display()))
             .and_then(|_| util::atomic_replace(&tmp, &dst));
@@ -1078,9 +1292,8 @@ pub fn deploy(
             );
         }
         util::clear_motw(&dst);
-        let want = util::sha256_file(src)?;
-        let got = util::sha256_file(&dst)?;
-        if got != want {
+        // 校验用「快速同内容判定」：大文件不再每次算两遍 509MB 的 SHA256
+        if !same_file_content(src, &dst) {
             let rb = rollback_entries(&dir, &base, &entries);
             bail!(
                 "{name} 写入后校验失败；回滚{}",
@@ -1088,13 +1301,75 @@ pub fn deploy(
                     .unwrap_or_else(|e| format!("失败：{e}"))
             );
         }
-        placed.push(name);
+        placed.push(name.clone());
+    }
+
+    // 4.5) 修正 ReShade 的效果搜索路径。安装器默认写的是 `.\reshade-shaders\Shaders\**\**`，
+    // 实测 ReShade 6.8 解析它直接报 ERROR_INVALID_NAME(123) → 首页提示"没有找到效果文件"。
+    // 改成逐层的单星号通配（最多三层，覆盖我们内置的标准/SweetFX/iMMERSE/lilium 结构）。
+    let ini_path = dir.join(RE_INI);
+    if let Ok(text) = std::fs::read_to_string(&ini_path) {
+        // 按 ReShade 官方语法：**分隔符是分号**；路径以 `\**`（递归）结尾，**不要**加
+        // `*.fx` 扩展名过滤（它自己只收 .fx）；`**\**` 连用会报 123 无效名称（实测）。
+        let fx_paths = r".\reshade-shaders\Shaders\**";
+        let tx_paths = r".\reshade-shaders\Textures\**";
+        // **合并而不是覆盖**：用户自己加过的搜索路径（比如游戏目录外的大效果包）要保留，
+        // 只清掉已知有问题的写法（`**\**`、带 `*.fx`/`*.png` 扩展名的），再确保我们的
+        // `.\reshade-shaders\...(Shaders|Textures)\**` 在最前面。
+        let merge = |cur: &str, want: &str| -> String {
+            let mut parts: Vec<String> = cur
+                .split(';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .filter(|s| {
+                    let low = s.to_ascii_lowercase();
+                    // 已知解析失败的写法：清掉，避免"没有效果文件"提示
+                    !(low.contains("**\\**") || low.contains("*.fx") || low.contains("*.png"))
+                })
+                .collect();
+            if !parts.iter().any(|p| p.eq_ignore_ascii_case(want)) {
+                parts.insert(0, want.to_string());
+            }
+            parts.join(";")
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let mut seen_fx = false;
+        let mut seen_tx = false;
+        for l in text.lines() {
+            if let Some(cur) = l.strip_prefix("EffectSearchPaths=") {
+                lines.push(format!("EffectSearchPaths={}", merge(cur, &fx_paths)));
+                seen_fx = true;
+            } else if let Some(cur) = l.strip_prefix("TextureSearchPaths=") {
+                lines.push(format!("TextureSearchPaths={}", merge(cur, &tx_paths)));
+                seen_tx = true;
+            } else {
+                lines.push(l.to_owned());
+            }
+        }
+        if !seen_fx {
+            lines.push(format!("EffectSearchPaths={fx_paths}"));
+        }
+        if !seen_tx {
+            lines.push(format!("TextureSearchPaths={tx_paths}"));
+        }
+        if std::fs::write(&ini_path, lines.join("\r\n")).is_ok() {
+            notes.push(
+                "已修正 ReShade 的效果搜索路径（安装器写的 ** 通配在 6.8 上解析失败）".to_owned(),
+            );
+        }
     }
 
     // 5) 记录我们写进去的哈希（失败时留空，还原时只会保守处理）
     for e in manifest.files.iter_mut() {
         if want_files.iter().any(|(n, _)| n == &e.rel_path) {
-            e.deployed_sha256 = util::sha256_file(&dir.join(&e.rel_path)).ok();
+            // 大文件（模型 509MB）不再每次算全量哈希：留空，还原时按指纹常量判定
+            let p = dir.join(&e.rel_path);
+            let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            e.deployed_sha256 = if sz > 8 * 1024 * 1024 {
+                None
+            } else {
+                util::sha256_file(&p).ok()
+            };
         }
     }
 
@@ -1125,14 +1400,37 @@ pub fn deploy(
     }
     write_manifest(&base, &manifest)?;
 
-    let mut names: Vec<String> = placed.clone();
-    if let Some(m) = &module {
-        names.insert(0, m.clone());
+    // 结果只给**按类摘要**：内置效果包有 108 个文件，全列出来会刷屏（用户反馈提示太长）。
+    // 完整清单进日志，排障照样能看。
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for (_, role) in &want_files {
+        if let Some(e) = counts.iter_mut().find(|(r, _)| r == role) {
+            e.1 += 1;
+        } else {
+            counts.push((role.clone(), 1));
+        }
     }
-    let mut msg = format!("已部署 {} -> {}", names.join("、"), dir.display());
+    let mut parts: Vec<String> = Vec::new();
+    for (role, n) in &counts {
+        if *role == "内置效果包" {
+            parts.push(format!("{role}（{n} 个文件）"));
+        } else {
+            parts.push(role.clone());
+        }
+    }
+    if let Some(m) = &module {
+        parts.insert(0, m.clone());
+    }
+    let mut msg = format!("已部署 {} -> {}", parts.join("、"), dir.display());
     if let Some(n) = &plan.note {
         msg.push_str(&format!("（{n}）"));
     }
+    crate::log::line(&format!(
+        "[dlss5] 已铺 {} 个文件 -> {}：{}",
+        placed.len(),
+        dir.display(),
+        placed.join("、")
+    ));
     notes.push(format!(
         "部署记录：{}（「还原」就按它恢复）",
         manifest_path(&dir)
@@ -1140,6 +1438,10 @@ pub fn deploy(
             .unwrap_or_default()
     ));
     notes.push("首次进游戏请确认 ReShade 的插件列表里能看到 DLSS5；模型只对 20/30 系有效。".to_owned());
+    notes.push(
+        "内置效果包已一并装好：首次进游戏 ReShade 会编译这些 shader（可能几十秒），属于正常现象。"
+            .to_owned(),
+    );
     Ok((msg, notes))
 }
 
@@ -1360,7 +1662,7 @@ pub struct Found {
     pub reshade_ini: bool,
     pub reshade_log: bool,
     pub preset: bool,
-    /// ReShade 的效果包目录
+    /// ReShade 的效果包目录（**里面有文件**才算；还原后残留的空目录不该被当成"外来文件"）
     pub shaders_dir: bool,
     /// DLSS5 插件文件名
     pub addon: Option<String>,
@@ -1368,6 +1670,8 @@ pub struct Found {
     pub model: bool,
     /// 插件运行时留下的残渣（文件名）
     pub leftovers: Vec<String>,
+    /// 目录里是**旧版 RenoDX**（要求先彻底卸载再部署 GITC）
+    pub legacy: bool,
 }
 
 impl Found {
@@ -1417,6 +1721,23 @@ impl Found {
     }
 }
 
+/// 目录里有没有**旧版 RenoDX**（插件文件名前缀，或模型躺在根目录 = 旧布局）。
+/// 命中就要求用户先「彻底卸载」再部署新版 GITC（用户定的过渡口径）。
+pub fn has_legacy_renodx(dir: &Path) -> bool {
+    if dir.join(MODEL_NAME).is_file() {
+        return true;
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if n.starts_with(LEGACY_PREFIX) && n.ends_with(ADDON_EXT) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn detect(dir: &Path) -> Found {
     let ours = matches!(state_of(dir), State::Deployed(_));
     let mut reshade_module = None;
@@ -1438,17 +1759,60 @@ pub fn detect(dir: &Path) -> Found {
             }
         }
     }
+    let legacy = has_legacy_renodx(dir);
     Found {
         ours,
         reshade_module,
         reshade_ini: dir.join(RE_INI).is_file(),
         reshade_log: dir.join(RE_LOG).is_file(),
         preset: dir.join(RE_PRESET).is_file(),
-        shaders_dir: dir.join(SHADERS_DIR).is_dir(),
+        shaders_dir: dir
+            .join(SHADERS_DIR)
+            .is_dir()
+            && std::fs::read_dir(dir.join(SHADERS_DIR))
+                .map(|mut rd| rd.any(|e| e.map(|e| e.path().is_file()).unwrap_or(false)))
+                .unwrap_or(false),
         addon: first_addon_in(dir),
-        model: dir.join(MODEL_NAME).is_file(),
+        model: dir.join(MODEL_NAME).is_file() || dir.join(GITC_MODEL_DIR).join(MODEL_NAME).is_file(),
         leftovers: addon_leftover_names(dir),
+        legacy,
     }
+}
+
+/// 卸载/清理时要额外删掉的文件：GITC 的另外几件 + 旧版 RenoDX 遗留。
+fn clean_extras(dir: &Path) -> Vec<String> {
+    let mut done = Vec::new();
+    let mut targets: Vec<String> = vec![
+        ADDON32_NAME.to_owned(),
+        HELPER_NAME.to_owned(),
+        format!("{GITC_MODEL_DIR}\\{MODEL_NAME}"),
+        format!("{SHADERS_DIR}\\Shaders\\{GITC_MODEL_DIR}\\{}", FX_NAMES[0]),
+        format!("{SHADERS_DIR}\\Shaders\\{GITC_MODEL_DIR}\\{}", FX_NAMES[1]),
+        // 旧布局：直接铺在 Shaders 根下的两个 fx（也一并清）
+        format!("{SHADERS_DIR}\\Shaders\\{}", FX_NAMES[0]),
+        format!("{SHADERS_DIR}\\Shaders\\{}", FX_NAMES[1]),
+        // 旧布局根目录的模型也算旧版遗留
+        MODEL_NAME.to_owned(),
+    ];
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if n.starts_with(LEGACY_PREFIX) && n.ends_with(ADDON_EXT) {
+                targets.push(n);
+            }
+        }
+    }
+    for t in targets {
+        let p = dir.join(&t);
+        if p.is_file() && std::fs::remove_file(&p).is_ok() {
+            done.push(t);
+        }
+    }
+    let gd = dir.join(GITC_MODEL_DIR);
+    if gd.is_dir() && std::fs::read_dir(&gd).map(|mut r| r.next().is_none()).unwrap_or(false) {
+        let _ = std::fs::remove_dir(&gd);
+    }
+    done
 }
 
 /// **彻底卸载** ReShade + DLSS5：先让官方卸载器删本体 / ReShade.ini / ReShade.log / 效果包目录，
@@ -1465,6 +1829,10 @@ pub fn uninstall(dir: &Path, exe: Option<&Path>, on: &mut dyn FnMut(String, f32)
     }
     let mut notes: Vec<String> = Vec::new();
     let mut deleted: Vec<String> = Vec::new();
+    // GITC 新增的几件（32 位插件 / 辅助进程 / 模型子目录 / Shader）+ 旧版 RenoDX 遗留，一并清掉
+    for t in clean_extras(dir) {
+        deleted.push(t);
+    }
 
     // 1) 有本体 + 有游戏 exe + 有安装器：先用官方卸载器。
     //    它会删本体、ReShade.ini、ReShade.log，并按 ini 里记的搜索路径删掉效果包目录 ——
@@ -1608,6 +1976,31 @@ pub fn restore(dir: &Path) -> Result<String> {
     }
 
     let msg = rollback_entries(dir, &base, &m.files)?;
+    // 还原后残留下来的空目录（reshade-shaders\Shaders\SweetFX 等、GITC-Uplift）要清掉：
+    // 否则 detect 会认为"目录里有别人的文件"→ 部署按钮保持锁定，用户还得再点一次卸载（用户反馈）。
+    for sub in [SHADERS_DIR.to_owned(), GITC_MODEL_DIR.to_owned()] {
+        let root = dir.join(&sub);
+        if !root.is_dir() {
+            continue;
+        }
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(d) = stack.pop() {
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        dirs.push(p.clone());
+                        stack.push(p);
+                    }
+                }
+            }
+        }
+        for d in dirs.into_iter().rev() {
+            let _ = std::fs::remove_dir(&d);
+        }
+        let _ = std::fs::remove_dir(&root);
+    }
     // 备份目录整个删掉（记录+备份都清干净），和帧生成那边的收尾一致
     let _ = std::fs::remove_dir_all(&base);
     Ok(format!("已还原 DLSS5：{msg}{vulkan_note}"))

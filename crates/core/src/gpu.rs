@@ -107,10 +107,6 @@ pub struct DriverInfo {
 }
 
 impl DriverInfo {
-    /// 低于建议版本：帧生成可能不生效
-    pub fn too_old(&self) -> bool {
-        self.version < MIN_FG_DRIVER
-    }
 }
 
 /// 调 nvidia-smi 问驱动自己。比读注册表权威，但要起一个进程（约 35ms）。

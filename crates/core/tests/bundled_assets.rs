@@ -108,7 +108,15 @@ fn bundled_dlss5_matches_core_expectations() {
 
     let extra: Vec<&String> = have
         .iter()
-        .filter(|n| !(*n == dlss5::MODEL_NAME) && !is_addon(n) && !is_setup(n))
+        .filter(|n| {
+            !(*n == dlss5::MODEL_NAME)
+                && !is_addon(n)
+                && !is_setup(n)
+                && *n != dlss5::ADDON32_NAME
+                && *n != dlss5::HELPER_NAME
+                && *n != "effects"
+                && !dlss5::FX_NAMES.iter().any(|f| f == n)
+        })
         .collect();
     assert!(extra.is_empty(), "bundled-dlss5 里有多余文件 {extra:?}");
 }
@@ -126,14 +134,18 @@ fn dlss5_assets_report_detects_missing_then_present() {
 
     let before = dlss5::assets_report();
     assert!(
-        !before.ready && before.missing.len() == 3,
-        "空目录时应当报缺三件套，实际: ready={} missing={:?}",
+        !before.ready && before.missing.len() == before.items.len() && before.missing.len() >= 7,
+        "空目录时应当把每一件资产都报缺（GITC 套共 7 件），实际: ready={} missing={:?}",
         before.ready,
         before.missing
     );
 
     for e in std::fs::read_dir(bundle("bundled-dlss5")).expect("读内置 DLSS5 资产") {
         let e = e.expect("目录项");
+        // effects 是子目录（内置效果包），本测试只关心报告所列的顶层资产
+        if e.path().is_dir() {
+            continue;
+        }
         std::fs::copy(e.path(), d5.join(e.file_name())).expect("拷贝内置资产");
     }
 

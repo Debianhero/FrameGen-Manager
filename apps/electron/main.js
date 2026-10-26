@@ -366,7 +366,32 @@ function ensureBundledAssets() {
     if (fs.existsSync(d5src)) {
       const d5dst = path.join(dst, 'DLSS5');
       try { fs.mkdirSync(d5dst, { recursive: true }); } catch (e) {}
-      for (const f of fs.readdirSync(d5src)) {
+      // 内置效果包是子目录（effects\Shaders\...、effects\Textures\...）：必须递归铺开
+      const walkD5 = function (dir, rel) {
+        let entries = [];
+        try { entries = fs.readdirSync(dir); } catch (e) { return; }
+        for (const f of entries) {
+          const s = path.join(dir, f);
+          const r = rel ? rel + '/' + f : f;
+          let st = null;
+          try { st = fs.statSync(s); } catch (e) { continue; }
+          if (st.isDirectory()) { walkD5(s, r); continue; }
+          if (!st.isFile()) continue;
+          const t = path.join(d5dst, r);
+          try {
+            fs.mkdirSync(path.dirname(t), { recursive: true });
+            if (skipMarker) {
+              let ok = false;
+              try { ok = fs.statSync(t).size === st.size; } catch (e2) { ok = false; }
+              if (ok) continue;
+            }
+            fs.copyFileSync(s, t);
+            copied++; names.push('DLSS5/' + r);
+          } catch (e) { console.error('[bundled] 复制失败', r, e.message); }
+        }
+      };
+      walkD5(d5src, '');
+      for (const f of []) {
         const s = path.join(d5src, f);
         const t = path.join(d5dst, f);
         try {
