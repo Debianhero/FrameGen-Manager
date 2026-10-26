@@ -1684,6 +1684,32 @@ fn get_config() -> Value {
     })
 }
 
+/// 扫一遍游戏库：哪些游戏的目录里还是**旧版** Smooth Motion 30 系组件。
+///
+/// 返回 { games: [名字…], prompt: 是否该弹提示 } —— prompt 按程序版本记一次，
+/// 用户忽略后不会每次启动都烦他（换新版会再提醒一次）。
+fn sm_legacy_scan() -> Result<Value, String> {
+    let cache = framegen_core::scan::load_library();
+    let mut games: Vec<String> = Vec::new();
+    for row in cache.scanned.iter().chain(cache.manual.iter()) {
+        if framegen_core::sm::has_legacy_asset(&row.entry.install_dir) {
+            games.push(row.entry.name.clone());
+        }
+    }
+    let cfg = framegen_core::util::load_config();
+    let prompt = !games.is_empty()
+        && !cfg.sm_legacy_prompt_version.eq(framegen_core::update::SELF_VERSION);
+    Ok(json!({ "games": games, "prompt": prompt }))
+}
+
+/// 记录「旧版组件提示」已经按当前版本弹过了。
+fn sm_legacy_prompt_done() -> Result<Value, String> {
+    let mut cfg = framegen_core::util::load_config();
+    cfg.sm_legacy_prompt_version = framegen_core::update::SELF_VERSION.to_owned();
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({ "ok": true }))
+}
+
 /// 保存「启动时自动扫描游戏库」开关（默认**关**）。
 fn set_auto_scan(on: bool) -> Result<Value, String> {
     let mut cfg = framegen_core::util::load_config();
@@ -1979,6 +2005,8 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             arg_opt_str(args, "legacyPrompted")?,
         ),
         "set_auto_scan" => set_auto_scan(args.get("on").and_then(Value::as_bool).unwrap_or(false)),
+        "sm_legacy_scan" => sm_legacy_scan(),
+        "sm_legacy_prompt_done" => sm_legacy_prompt_done(),
         "check_self_update" => check_self_update(),
         "self_update_download" => self_update_download(id, args),
 

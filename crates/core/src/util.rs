@@ -405,6 +405,10 @@ pub struct AppConfig {
     /// 第一次使用（库是空的）无论开关如何都会自动扫一次。
     #[serde(default)]
     pub auto_scan_on_start: bool,
+    /// 「Smooth Motion 组件有新版本」这个提示是按哪个程序版本弹的。
+    /// 记版本号而不是布尔值：每次发新版应该再提醒一次。
+    #[serde(default)]
+    pub sm_legacy_prompt_version: String,
 }
 
 // 这两个是**业务默认**（2 / 3），不是 u8 的类型默认（0），所以 AppConfig 的 Default
@@ -432,6 +436,7 @@ impl Default for AppConfig {
             legacy_prompt_version: String::new(),
             window_size: None,
             auto_scan_on_start: false,
+            sm_legacy_prompt_version: String::new(),
         }
     }
 }

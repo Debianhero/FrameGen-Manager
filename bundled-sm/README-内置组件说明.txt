@@ -2,11 +2,17 @@ FrameGen Manager —— Smooth Motion 内置组件说明（20/30 系）
 
 本目录按显卡系列分两套解锁组件，部署时按用户显卡自动选择：
 
-rtx30\version.dll —— RTX 30 系
+rtx30\version.dll —— RTX 30 系（SmoothMotion-next，上游 sm8792 起）
   · 在 30 系（SM86）显卡上解锁 NVIDIA 驱动自带的 Smooth Motion（平滑运动）。
-  · 组件自称：RTXMFG Smooth Motion Quality for RTX 3000/4000, version 0.30.3.2
-  · SHA256  4091efe2db3dc8dbb671a187b3904c36a58da18149b309021c5367d1646c21cb
-  · 大小    1053696 字节
+  · 组件自称：RTXMFG-SmoothMotion-next（无版本资源、无签名）。
+    与旧版 version (34).dll 相比：默认帧率上限由 60 改为不限制（仅 3 字节差异）。
+  · SHA256  0a9684288be14cdfa44a042c6e2f4c490f0114dca1729aef925be95490b74a50
+  · 大小    1064448 字节
+  · **依赖 VC++ 2015-2022 运行时（msvcp140.dll 14.40+）**：游戏目录里的 msvcp140.dll
+    太旧或系统缺运行库时游戏会启动即崩 —— 本工具部署前会检查并拒绝。
+  · 首次运行会为每个游戏创建 NVIDIA 驱动配置，可能自动重启游戏一次（上游行为）。
+  · 旧版（0.30.3.2 / version (34).dll）的安装会被原地覆盖升级；本工具两版指纹都认。
+  · 上一版 SHA256（历史）：4091efe2db3dc8dbb671a187b3904c36a58da18149b309021c5367d1646c21cb（1053696 字节）
 
 rtx20\ —— RTX 20 系（实验性）
   · version.dll        Ultimate-ASI-Loader 9.7.4（通用 ASI 加载器）

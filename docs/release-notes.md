@@ -1,17 +1,11 @@
-【改进】
-1.改进扫描游戏库的性能表现，加快扫描游戏库的时间。从这一版本开始启动软件时不再扫描游戏库。【关于】页面下可以手动选择是否每次启动软件时自动扫描游戏库
-2.清理废弃的配置字段
-3.游戏库列表分批渲染
-4.游戏库封面按需加载
+【更新】
+1.Smooth Motion 30 系组件跟进上游最新版（sm8792 / SmoothMotion-next）
+2.部署 SM 前新增 VC++ 运行库检查（msvcp140.dll 14.40 以上）：不满足时明确拦截并提示，避免游戏启动崩溃
 
-【新增】
-1.关于页面下增加【每次启动时自动扫描游戏库】开关。默认是关闭。
+**建议对已开启Smooth Motion的游戏先关闭，软件升级完成后再重新打开Smooth  Motion**
 
-[Improvements]
-1. Improved the performance of scanning the game library, reducing the time required for scanning. Starting from this version, the software will no longer scan the game library upon startup. Users can manually choose whether to automatically scan the game library at each startup on the 'About' page.
-2. Removed deprecated configuration fields.
-3. Implemented batch rendering for the game library list.
-4. Game library covers are now loaded on demand.
+[Update]
+1. The Smooth Motion 30 series components have been updated to follow the latest upstream version (sm8792 / SmoothMotion-next).
+2. Before deploying SM, a new VC runtime check has been added (msvcp140.dll version 14.40 or above): if not met, the system will clearly block and prompt, preventing game startup crashes.
 
-[New Features]
-1. Added a 'Automatically scan game library at startup' toggle on the 'About' page. It is off by default.
+**It is recommended to turn off Smooth Motion for games that have it enabled first, and then re-enable Smooth Motion after the software upgrade is completed.**

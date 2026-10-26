@@ -1487,7 +1487,13 @@ pub const SM_ASSET_DIR: &str = "bundled-sm";
 pub const SM_ASSET_FILE: &str = "version.dll";
 
 /// 内置解锁组件的 SHA256（固定值；用它就能在任意游戏目录里认出"这是 SM 放的"）。
+/// 当前 = 上游 sm8792 的 RTXMFG-SmoothMotion-next（version (5).dll，默认帧率上限改为不限制）。
 pub const SM_ASSET_SHA256: &str =
+    "0a9684288be14cdfa44a042c6e2f4c490f0114dca1729aef925be95490b74a50";
+
+/// 历史版本的 30 系组件（sm8791 的 0.30.3.2 / version (34).dll）。
+/// 老用户游戏目录里可能还是它 —— 归属识别必须继续认（部署会原地覆盖成新版）。
+pub const SM_ASSET_LEGACY_SHA256: &str =
     "4091efe2db3dc8dbb671a187b3904c36a58da18149b309021c5367d1646c21cb";
 
 /// RTX 20 运行库（native 三件套）的指纹与文件名（上游 Fix37，source/rtx20 构建）。
@@ -1502,6 +1508,16 @@ pub const SM20_MANIFEST_NAME: &str = "runtime-manifest.json";
 /// 这个目录里的 version.dll 是不是我们的解锁组件？
 pub fn has_our_asset(dir: &std::path::Path) -> bool {
     is_our_asset_file(&dir.join(SM_ASSET_FILE)) || is_our_asset_file(&dir.join("normal.asi"))
+}
+
+/// 这个目录里是不是**旧版**（sm8791 的 version (34).dll）30 系组件？
+/// 用来提醒老用户「组件有新版本，建议先还原后重新部署」。
+pub fn has_legacy_asset(dir: &std::path::Path) -> bool {
+    let p = dir.join(SM_ASSET_FILE);
+    p.is_file()
+        && crate::util::sha256_file(&p)
+            .map(|h| h.eq_ignore_ascii_case(SM_ASSET_LEGACY_SHA256))
+            .unwrap_or(false)
 }
 
 /// 这个游戏「疑似开着 Smooth Motion」吗（给部署帧生成前的那句提醒用）。
@@ -1533,6 +1549,7 @@ pub fn is_our_asset_file(path: &std::path::Path) -> bool {
 /// 归属判定一律走这里，别再单独比某个常量（两个系列的组件都要认）。
 fn is_our_asset_hash(h: &str) -> bool {
     h.eq_ignore_ascii_case(SM_ASSET_SHA256)
+        || h.eq_ignore_ascii_case(SM_ASSET_LEGACY_SHA256)
         || h.eq_ignore_ascii_case(SM20_LOADER_SHA256)
         || h.eq_ignore_ascii_case(SM20_RUNTIME_SHA256)
 }
@@ -1647,6 +1664,73 @@ fn known_asset_rels() -> Vec<&'static str> {
         .collect()
 }
 
+/// 读一个 PE 文件的 FileVersion 主次号（(major, minor)）。读不到返回 None。
+fn file_version_pair(p: &std::path::Path) -> Option<(u16, u16)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    unsafe {
+        let mut dummy = 0u32;
+        let size = GetFileVersionInfoSizeW(wide.as_ptr(), &mut dummy);
+        if size == 0 {
+            return None;
+        }
+        let mut buf: Vec<u8> = vec![0; size as usize];
+        if GetFileVersionInfoW(wide.as_ptr(), 0, size, buf.as_mut_ptr() as *mut _) == 0 {
+            return None;
+        }
+        let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut len: u32 = 0;
+        let sub: [u16; 2] = ['\\' as u16, 0];
+        if VerQueryValueW(buf.as_ptr() as *const _, sub.as_ptr(), &mut ptr, &mut len) == 0
+            || ptr.is_null()
+            || len < 52
+        {
+            return None;
+        }
+        // VS_FIXEDFILEINFO：signature(0) strucVersion(1) FileVersionMS(2) FileVersionLS(3)
+        let info = ptr as *const u32;
+        let ms = *info.add(2);
+        Some(((ms >> 16) as u16, (ms & 0xffff) as u16))
+    }
+}
+
+/// 新版 30 系组件（SmoothMotion-next）**动态链接 VC++ 2015-2022 运行时**：
+/// 游戏目录里带着旧版 msvcp140.dll、或系统里没有 14.40+ 的运行时，游戏会启动即崩。
+/// 上游安装器会直接拒绝安装 —— 这里做同样的拦截（宁可不装，也不让用户的游戏崩）。
+fn check_vcruntime(game_dir: &std::path::Path) -> Result<(), String> {
+    let local = game_dir.join("msvcp140.dll");
+    if local.is_file() {
+        match file_version_pair(&local) {
+            Some((major, minor)) if (major, minor) >= (14, 40) => return Ok(()),
+            Some((major, minor)) => {
+                return Err(format!(
+                    "游戏目录里的 msvcp140.dll 版本太旧（{major}.{minor}）—— 新版 30 系组件需要 14.40 以上，直接装进去游戏会启动即崩。\n\n请先安装微软「Visual C++ 2015-2022 运行库」的最新版（或等游戏更新把它换成新版）再部署。"
+                ))
+            }
+            None => {
+                return Err(
+                    "游戏目录里的 msvcp140.dll 读不出可用版本 —— 新版 30 系组件需要 14.40 以上，为避免游戏启动崩溃已中止部署。"
+                        .to_owned(),
+                )
+            }
+        }
+    }
+    let ok = std::env::var_os("SystemRoot")
+        .map(|r| std::path::PathBuf::from(r).join("System32").join("msvcp140.dll"))
+        .as_deref()
+        .and_then(file_version_pair)
+        .map(|(major, minor)| (major, minor) >= (14, 40))
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err("系统里缺少 VC++ 2015-2022 运行库（msvcp140.dll 14.40 以上）—— 新版 30 系组件需要它，否则游戏会启动即崩。请先安装微软 VC++ 2015-2022 运行库再部署。".to_owned())
+    }
+}
+
 pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
     let comp = component_for_gpu();
     let base = asset_base()?;
@@ -1655,6 +1739,9 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
     }
     if !crate::util::is_writable(game_dir) {
         return Err(format!("没有权限写入 {}", game_dir.display()));
+    }
+    if comp == SmComponent::Rtx30 {
+        check_vcruntime(game_dir)?;
     }
     let files = component_files(comp);
     let mut done: Vec<AssetFileRecord> = Vec::new();
@@ -1695,9 +1782,19 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
             let bdir = rec.parent().unwrap_or(std::path::Path::new(".")).join("originals");
             std::fs::create_dir_all(&bdir).map_err(|e| format!("{e}"))?;
             let bp = bdir.join(format!("{}.bak", rel.replace('/', "_")));
-            std::fs::copy(&dst, &bp).map_err(|e| format!("备份原文件失败：{e}"))?;
-            had_original = true;
-            backup = Some(bp.display().to_string());
+            if is_our_asset_file(&dst) {
+                /* 目录里已经是**我们自己的组件**（老版本部署的）：绝不能拿它去覆盖备份——
+                   否则"关闭"时会把这个旧组件当成原件又还原回来（用户实测踩过：关了组件还在）。
+                   备份里要保留的是**更早的原件**；原件备份不存在就当没有原件（关闭时直接删）。 */
+                if bp.is_file() {
+                    had_original = true;
+                    backup = Some(bp.display().to_string());
+                }
+            } else {
+                std::fs::copy(&dst, &bp).map_err(|e| format!("备份原文件失败：{e}"))?;
+                had_original = true;
+                backup = Some(bp.display().to_string());
+            }
         }
         std::fs::copy(&src, &dst).map_err(|e| format!("复制到 {} 失败：{e}", dst.display()))?;
         let got = crate::util::sha256_file(&dst).map_err(|e| format!("{e:#}"))?;
@@ -1726,7 +1823,7 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
         .map_err(|e| format!("写部署记录失败：{e}"))?;
     crate::log::line(&format!("[sm] 已部署解锁组件到 {}", game_dir.display()));
     let label = match comp {
-        SmComponent::Rtx30 => "RTX 30 系组件",
+        SmComponent::Rtx30 => "RTX 30 系组件（SmoothMotion-next）",
         SmComponent::Rtx20 => "RTX 20 系运行库（加载器 + 运行库 + 清单）",
     };
     let size = body
@@ -1906,9 +2003,21 @@ pub fn asset_restore(game_dir: &std::path::Path) -> Result<String, String> {
         let p = game_dir.join(&f.rel);
         if f.had_original {
             if let Some(bp) = &f.backup {
-                if std::path::Path::new(bp).is_file() {
-                    std::fs::copy(bp, &p).map_err(|e| format!("还原原文件失败：{e}"))?;
-                    let _ = std::fs::remove_file(bp);
+                let bp_path = std::path::Path::new(bp);
+                if bp_path.is_file() {
+                    /* 备份本身如果是**我们的组件**（老版本部署时被误备份进去的），
+                       不能"还原"——那等于把组件又装回去（用户实测：关了组件还在）。
+                       这种情况直接删掉目标文件，让目录回到干净状态。 */
+                    if is_our_asset_file(bp_path) {
+                        if p.is_file() {
+                            remove_with_retry(&p)?;
+                            removed.push(f.rel.clone());
+                        }
+                        let _ = std::fs::remove_file(bp_path);
+                        continue;
+                    }
+                    std::fs::copy(bp_path, &p).map_err(|e| format!("还原原文件失败：{e}"))?;
+                    let _ = std::fs::remove_file(bp_path);
                     restored.push(f.rel.clone());
                     continue;
                 }

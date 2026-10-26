@@ -850,7 +850,7 @@
     var s = label || '';
     if (/^已部署/.test(s)) return 'deployed';
     if (/^已安装，本工具无记录/.test(s)) return 'manual';
-    if (/^入口被占用/.test(s)) return 'occupied';
+    if (/^已有同名单文件/.test(s)) return 'occupied';
     if (/Smooth Motion/.test(s)) return 'sm';
     return 'none';
   }
@@ -858,7 +858,10 @@
   function stateCls(label) {
     switch (deployKind(label)) {
       case 'deployed': return 'ok';
-      case 'occupied': case 'sm': return 'err';
+      case 'sm': return 'err';
+      // 同名单文件大多是**游戏自带的**（dxgi.dll / 微软签名的 dbghelp.dll）：
+      // 用中性灰，别再像错误一样标红（用户反馈这是措辞误报）。
+      case 'occupied': return 'dim';
       case 'manual': return 'warn';
       default: return 'dim';
     }
@@ -884,8 +887,8 @@
         m = /^已安装，本工具无记录（([\s\S]*)）$/.exec(s);
         return m ? t('已安装，本工具无记录（{files}）', { files: m[1] }) : s;
       case 'occupied':
-        m = /^入口被占用: ([\s\S]*)$/.exec(s);
-        return m ? t('入口被占用: {files}', { files: m[1] }) : s;
+        m = /^已有同名单文件: ([\s\S]*)$/.exec(s);
+        return m ? t('已有同名单文件: {files}', { files: m[1] }) : s;
       case 'sm':
         return t('已被 Smooth Motion 占用');
       default:
@@ -1071,7 +1074,7 @@
     }).then(function (c) { CFG = c; }).catch(function () {  })
       .then(function () {
         return uiConfirm({
-          title: t('检测到还在用旧版帧生成的游戏'),
+          title: t('检测到还在使用旧版本帧生成的游戏，是否重新部署新版本文件？'),
           ok: t('全部清理并重新部署'),
           cancel: t('稍后再说'),
           rows: [
@@ -2073,6 +2076,24 @@
   }
 
 
+  // 检测游戏目录里还是**旧版** Smooth Motion 组件的游戏，提醒一次「先还原后重新部署」。
+  // 按程序版本记一次（用户忽略后不反复烦，发新版再提醒）。
+  function checkSmLegacy() {
+    return invoke('sm_legacy_scan').then(function (r) {
+      if (!r || !r.prompt || !(r.games || []).length) return;
+      var names = r.games.slice(0, 6).join('\n· ');
+      var more = r.games.length > 6 ? t('\n…还有 ') + (r.games.length - 6) + t(' 个') : '';
+      uiConfirm({
+        title: t('Smooth Motion 组件有新版本'),
+        ok: t('我知道了'),
+        single: true,
+        body: t('Smooth Motion 组件有新版本，建议先还原后重新部署。\n\n以下游戏目录里还是旧版组件：\n· ') + names + more +
+          t('\n\n操作：进入「Smooth Motion」页，先对该游戏点「关闭」，再点「开启」即可换上新组件。'),
+      });
+      invoke('sm_legacy_prompt_done').catch(function () {  });
+    }).catch(function () {  });
+  }
+
   function autoScanLibrary() {
     var before = (GAMES || []).map(function (g) { return g.dir; });
     showBar(t('正在扫描游戏库…'), 0.05, 'scan');
@@ -2311,8 +2332,11 @@
         var msg = on ? t('已开启') : t('已关闭');
         if (!ok || tailBad) msg += (tailText ? t('；') + tailText : '');
         toast(msg, ok ? 'ok' : 'warn', ok ? 9000 : 14000);
-        var done = ok ? refreshLibrary().catch(function () { }) : Promise.resolve();
-        done.then(function () { return paintSmList(); }).catch(function () { });
+        // 开关成功后重绘列表（按钮文案/驱动配置行都跟着变）。
+        // 驱动侧状态生效偶尔有延迟：800ms 后再兜底重绘一次，避免按钮停在旧状态（用户反馈）。
+        var refresh = function () { return paintSmList(); };
+        refreshLibrary().catch(function () { }).then(refresh).catch(function () { });
+        setTimeout(refresh, 800);
         return r;
       });
     }).catch(function (e) {
@@ -2560,6 +2584,7 @@
     loadSpoof().catch(function () { });
     loadCovers()
       .then(function () { return refreshLibrary(); })
+      .then(function () { checkSmLegacy(); })
       .then(function () {
         // 默认不自动扫描（用户要求，开关在「关于」页，默认关）；
         // 第一次使用（库是空的）扫一次，避免新用户一进来看到空列表。

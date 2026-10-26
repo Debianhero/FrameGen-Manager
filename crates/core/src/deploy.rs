@@ -144,7 +144,10 @@ impl DeployState {
                 // 「非本工具部署」容易被读成「部署失败了」，这里说清是「没有本工具的记录」
                 format!("已安装，本工具无记录（{}）", files.join("、"))
             }
-            DeployState::Occupied { files } => format!("入口被占用: {}", files.join(", ")),
+            // 「入口被占用」听起来像有外来模组在抢占 —— 但实际大多是**游戏自带的同名文件**
+            // （玩家反馈：霍格沃茨自带 dxgi.dll、CS2 自带微软签名的 dbghelp.dll）。
+            // 改成中性描述：占名是事实（部署该入口会先备份再覆盖），但不该像异常。
+            DeployState::Occupied { files } => format!("已有同名单文件: {}", files.join(", ")),
             DeployState::SmDeployed => "已被 Smooth Motion 占用".to_owned(),
         }
     }
