@@ -570,6 +570,12 @@
   "已自动清除旧版帧生成（{n} 个游戏），请重新部署新版本": "Old frame-generation deployments were cleared automatically ({n} game(s)). Please redeploy the new version.",
   "部分未清除：": "Some could not be cleared: ",
   "备用": "Spare",
+  "帧生成需要 NVIDIA 580.0（R580）以上驱动，当前为 ": "Frame generation requires NVIDIA 580.0 (R580) or newer; current: ",
+  " —— 低于该版本时帧生成会被驱动拒绝（表现为“部署成功但游戏里没效果”）。请先更新显卡驱动。": " — below that version the driver refuses frame generation (it looks deployed but does nothing in game). Please update your GPU driver first.",
+  "已自动清除 {n} 个游戏的旧版帧生成部署，原件已还原：": "Cleared the old frame-generation deployment for {n} game(s); original files were restored: ",
+  "请到「帧生成」页重新部署新版本（0.4.1）。": "Please redeploy the new version (0.4.1) on the Frame generation page.",
+  "旧版帧生成已清除": "Old frame generation cleared",
+  "旧版帧生成已清除（部分失败）": "Old frame generation cleared (partly failed)",
   "已有": "Present",
   "缺少": "Missing",
   "缺少 ": "Missing "

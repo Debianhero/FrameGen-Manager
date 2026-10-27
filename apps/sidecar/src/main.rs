@@ -425,6 +425,7 @@ fn sm_info(args: &Value) -> Result<Value, String> {
 fn sm_set_game(args: &Value) -> Result<Value, String> {
     let name = arg_str(args, "name")?;
     let exe = arg_str(args, "exe")?;
+    let _ = checked_exe(&exe)?;
     let on = args.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
     // 备份记录的名字取自**游戏目录**。界面传的是库里那个目录；没传时按 EXE 的上一级推 ——
     // 渲染 EXE 常常在子目录里（…\Binaries\Win64\x.exe）。
@@ -606,6 +607,7 @@ fn sm_asset_deploy(args: &Value) -> Result<Value, String> {
 /// 取回内置解锁组件（还原原文件或删除我们放的那份）。
 fn sm_asset_restore(args: &Value) -> Result<Value, String> {
     let dir = arg_str(args, "dir")?;
+    let _ = checked_dir(&dir)?;
     let exe = arg_opt_str(args, "exe")?.unwrap_or_default();
     let path = std::path::Path::new(&dir);
     let before = framegen_core::sm::has_our_asset(path);
@@ -776,6 +778,7 @@ fn fg_assets_json(dir: &std::path::Path) -> Value {
 
 /// 清掉目录里 0.3.x 的遗留文件（用户点按钮时才走这里，逐个核对哈希再删）。
 fn clean_legacy(dir: String) -> Result<Value, String> {
+    let _ = checked_dir(&dir)?;
     let p = std::path::Path::new(&dir);
     let (deleted, failed) = framegen_core::deploy::clean_legacy_leftovers(p);
     framegen_core::log::line(&format!(
@@ -1437,6 +1440,7 @@ fn dlss5_detect(dir: String) -> Result<Value, String> {
 /// **永久删除、不进回收站** —— 界面必须先拿到用户二次确认才允许调这里。
 fn dlss5_uninstall(id: u64, args: &Value) -> Result<Value, String> {
     let dir = arg_str(args, "dir")?;
+    let _ = checked_dir(&dir)?;
     let exe = arg_opt_str(args, "exe")?;
     let dir_p = PathBuf::from(&dir);
     let exe_p = exe.as_ref().map(PathBuf::from);
@@ -1590,6 +1594,44 @@ fn save_sr_mode(mode: &str) -> Result<(), String> {
     framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))
 }
 
+/// 所有“会往某个目录写/删文件”的命令都必须过这一关（P0-12）：
+/// 必须是已存在、绝对路径、非系统目录。防止 IPC 参数被伪造或被脚本误调用时误伤系统。
+fn checked_dir(dir: &str) -> Result<std::path::PathBuf, String> {
+    if dir.trim().is_empty() {
+        return Err("目标目录为空".to_owned());
+    }
+    let p = std::path::PathBuf::from(dir);
+    if !p.is_absolute() {
+        return Err(format!("目标目录必须是绝对路径：{dir}"));
+    }
+    let canon = p
+        .canonicalize()
+        .map_err(|e| format!("目标目录不存在或不可访问：{dir}（{e}）"))?;
+    if !canon.is_dir() {
+        return Err(format!("目标不是目录：{}", canon.display()));
+    }
+    let low = canon.to_string_lossy().to_ascii_lowercase();
+    if low.contains("\\windows\\") {
+        return Err(format!("拒绝在系统目录操作：{}", canon.display()));
+    }
+    Ok(canon)
+}
+
+/// 校验 exe 路径（SM 命令按 exe 定位游戏）。
+fn checked_exe(exe: &str) -> Result<std::path::PathBuf, String> {
+    if exe.trim().is_empty() {
+        return Err("缺少 exe 路径".to_owned());
+    }
+    let p = std::path::PathBuf::from(exe);
+    if !p.is_absolute() {
+        return Err(format!("exe 必须是绝对路径：{exe}"));
+    }
+    if !p.is_file() {
+        return Err(format!("exe 不存在：{exe}"));
+    }
+    Ok(p)
+}
+
 fn deploy_impl(
     dir: &str,
     proxy: &str,
@@ -1601,6 +1643,7 @@ fn deploy_impl(
     xess_flow: &str,
     xess_hudless: &str,
 ) -> Result<(String, Vec<String>), String> {
+    let _ = checked_dir(dir)?;
     let gpu = framegen_core::scan::detect_gpu().unwrap_or_default();
     let route = framegen_core::scan::classify_gpu(&gpu);
     if let Some(why) = route.gate() {
@@ -1687,6 +1730,7 @@ fn deploy_game(
 ///   * 没有记录、但目录里有**本项目的**帧生成文件（用户自己手动装的）-> cleanup_manual：
 ///     没有备份可恢复，所以只把认得出的那些文件删掉，删完复查并如实报告。
 fn restore(dir: String) -> Result<String, String> {
+    let _ = checked_dir(&dir)?;
     let p = Path::new(&dir);
     match framegen_core::deploy::restore(p) {
         Ok(m) => Ok(m),

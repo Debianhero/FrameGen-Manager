@@ -776,3 +776,74 @@ pub fn open_url(url: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// 把清单里的**相对路径**安全地拼到基准目录上（P0-11）。
+///
+/// 部署记录（manifest）是磁盘上的 JSON，可能被篡改或损坏。直接 `base.join(rel)` 会允许
+/// `..\\..\\Windows\\System32\\x.dll` 或绝对路径，等于让一个 JSON 文件决定“往哪写、删哪”。
+/// 这里拒绝：空、绝对路径、盘符/UNC、含 `..` 的组件、Windows 保留名与控制字符。
+pub fn safe_join(base: &std::path::Path, rel: &str) -> anyhow::Result<std::path::PathBuf> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        anyhow::bail!("清单里的路径为空");
+    }
+    if rel.len() > 512 {
+        anyhow::bail!("清单里的路径过长");
+    }
+    if rel.chars().any(|c| (c as u32) < 0x20) {
+        anyhow::bail!("清单里的路径含控制字符");
+    }
+    let p = std::path::Path::new(rel);
+    if p.is_absolute() {
+        anyhow::bail!("清单里的路径是绝对路径：{rel}");
+    }
+    if rel.contains(":") {
+        anyhow::bail!("清单里的路径含盘符或 UNC：{rel}");
+    }
+    if rel.starts_with('\\') {
+        anyhow::bail!("清单里的路径是 UNC：{rel}");
+    }
+    let mut out = base.to_path_buf();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::Normal(seg) => {
+                let s = seg.to_string_lossy();
+                let up = s.to_ascii_uppercase();
+                let stem = up.split('.').next().unwrap_or("");
+                const RESERVED: [&str; 22] = [
+                    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
+                    "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7",
+                    "LPT8", "LPT9",
+                ];
+                if RESERVED.contains(&stem) {
+                    anyhow::bail!("清单里的路径含保留名：{rel}");
+                }
+                out.push(seg);
+            }
+            _ => anyhow::bail!("清单里的路径非法（含 . / .. / 前缀）：{rel}"),
+        }
+    }
+    if !out.starts_with(base) {
+        anyhow::bail!("清单里的路径越界：{rel}");
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod safe_join_tests {
+    use super::safe_join;
+    use std::path::Path;
+
+    #[test]
+    fn rejects_escapes() {
+        let base = Path::new("C:\\games\\demo");
+        assert!(safe_join(base, "version.dll").is_ok());
+        assert!(safe_join(base, "dlssg_sm86\\kernels\\fg_kernels.dll").is_ok());
+        assert!(safe_join(base, "..\\evil.dll").is_err());
+        assert!(safe_join(base, "a\\..\\..\\evil.dll").is_err());
+        assert!(safe_join(base, "C:\\Windows\\x.dll").is_err());
+        assert!(safe_join(base, "\\\\server\\share\\x.dll").is_err());
+        assert!(safe_join(base, "con.txt").is_err());
+        assert!(safe_join(base, "").is_err());
+    }
+}
