@@ -189,8 +189,5 @@
     RMDir /r "$LOCALAPPDATA\FrameGen-Manager"
     DeleteRegKey HKCU "${FGM_OLD_UNINSTKEY}"
 
-    MessageBox MB_YESNO|MB_ICONINFORMATION "提示：本次卸载会删除本程序及其全部数据（游戏库、备份、已下载的内置资产）。$\r$\n$\r$\n注意：已经部署到游戏目录里的帧生成 / Smooth Motion / DLSS5 文件不会自动移除——如需清理，请先打开软件点对应页面的【还原】或【卸载】，再卸载本程序。$\r$\n$\r$\n是否继续卸载？" IDYES fgm_uninst_go
-    Quit
-    fgm_uninst_go:
   fgm_uninst_keep:
 !macroend
