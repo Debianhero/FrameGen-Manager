@@ -273,6 +273,8 @@
         })));
       }
       if (opts.body) body.push(h('p', { class: 'note', text: opts.body }));
+  // 长文本（如更新日志）：独立的可滚动区域，完整展示不截断
+  if (opts.scrollBody) body.push(h('div', { class: 'ov-scroll', text: opts.scrollBody }));
       var foot = [h('div', { class: 'spacer' })];
       if (!single) {
         foot.push(h('button', { class: 'btn', type: 'button', text: opts.cancel || t('取消'), on: { click: function () { finish(false); } } }));
@@ -352,6 +354,55 @@
     EV.listen('progress', function (e) {
       var p = (e && e.payload) || {};
       queueBar(p.msg, p.fraction);
+    });
+    // 仅预览（DEV + --fgm-sim-assets）：伪造三类旧资产，弹统一提示
+    EV.listen('sim-assets-legacy', function (e) {
+      var md = (e && e.payload && e.payload.mode) ? e.payload.mode : 'fg';
+      if (md === 'sm') return showAssetsLegacyDialog([], ['霍格沃茨之遗'], []);
+      if (md === 'dlss5') return showAssetsLegacyDialog([], [], ['霍格沃茨之遗']);
+      showAssetsLegacyDialog(['示例游戏 A（帧生成 0.4.1）', '示例游戏 B（帧生成 0.3.x）'], [], []);
+    });
+    // 仅预览（DEV + --fgm-sim-download）：把下载框摆成"下载中"的样子（数字是示例值）
+    EV.listen('sim-download', function () {
+      var box = $('upd');
+      if (!box) return;
+      box.classList.remove('hidden');
+      setUpdBlur(true);
+      if ($('upd-fill')) $('upd-fill').style.width = '62%';
+      if ($('upd-stop')) $('upd-stop').disabled = false;
+      // 稍等一拍再写文案（下载框自己的初始化会覆盖一次）
+      var write = function () {
+        if ($('upd-msg')) $('upd-msg').textContent = t('正在下载安装包') + ' 62% · 6.2 MB/s';
+      };
+      write();
+      setTimeout(write, 400);
+      setTimeout(write, 1200);
+    });
+    // 仅预览（DEV + --fgm-sim-legacy）：伪造两条旧版游戏，弹「旧版帧生成」提示看样式
+    EV.listen('sim-legacy-fg', function () {
+      maybePromptLegacyUpgrade([{ name: '示例游戏 A（旧版资产）' }, { name: '示例游戏 B（旧版资产）' }]);
+    });
+    // 「发现新版本」：主进程不再用原生 MessageBox（风格不符、长日志被截断），改由界面自绘
+    EV.listen('selfupdate-offer', function (e) {
+      var p = (e && e.payload) || {};
+      if (!p.latest) return;
+      UPD_NOTES = p.notes || '';
+      uiConfirm({
+        title: t('发现新版本'),
+        ok: t('下载并安装'),
+        cancel: t('稍后'),
+        rows: [
+          [t('新版本'), 'v' + p.latest, 'ok'],
+          [t('当前版本'), 'v' + (p.current || '')],
+        ],
+        scrollBody: p.notes ? String(p.notes) : '',
+        body: t('安装过程会关闭本程序，装完会自动重新打开。'),
+      }).then(function (yes) {
+        if (!yes) return;
+        invoke('self_update_download').catch(function (err) {
+          toast(t('下载失败：') + errText(err), 'err', 12000);
+        });
+      });
     });
   }
 
@@ -573,12 +624,14 @@
     [3, t('3 · 最快，全部有损')]
   ];
   var FRAME_LABELS = [
+    [2, t('3X')],
     [3, t('4X（出厂默认）')],
     [5, t('6X（要游戏自带的插件也支持）')]
   ];
   var PRESET_LABELS = [
-    ['Auto', t('跟随游戏/驱动（Auto）')],
-    ['C', t('C · FG Lite：开销更低，画质略低（默认）')]
+    ['A', 'A'],
+    ['B', 'B'],
+    ['C', t('C · FG Lite：开销更低，画质略低')]
   ];
 
   function optLabelOf(v) {
@@ -587,9 +640,9 @@
     }
     return String(v);
   }
-  function frmLabelOf(v) { return Number(v) >= 5 ? '6X' : '4X'; }
+  function frmLabelOf(v) { var n = Number(v); if (n >= 5) return '6X'; if (n === 2) return '3X'; return '4X'; }
   function presetLabelOf(v) {
-    var want = String(v || (CFG && CFG.defaultPreset) || 'Auto');
+    var want = String(v || (CFG && CFG.defaultPreset) || 'A');
     for (var i = 0; i < PRESET_LABELS.length; i++) {
       if (String(PRESET_LABELS[i][0]) === want) return PRESET_LABELS[i][1];
     }
@@ -1015,7 +1068,7 @@
               sr: deployLsGet('sr', '0') === '1',
               engine: deployLsGet('engine', 'DLSS'),
               flow: deployLsGet('flow', 'Middle'),
-              hudless: deployLsGet('hudless', '1') !== '0'
+              hudless: deployLsGet('hudless', 'Auto')
             });
           })
           .then(function () { ok.push(g.name); })
@@ -1061,11 +1114,12 @@
 
   var LEGACY_PROMPT_DONE = false;
 
-  function maybePromptLegacyUpgrade() {
-    if (!CFG || LEGACY_PROMPT_DONE) return Promise.resolve();
-    var ver = CFG.version || '';
-    if (!ver || CFG.legacyPrompted === ver) return Promise.resolve();
-    var list = legacyGamesNow();
+  // forceList 仅用于开发预览（--fgm-sim-legacy）：跳过配置判断，直接弹同一个提示
+  function maybePromptLegacyUpgrade(forceList) {
+    if (!forceList && (!CFG || LEGACY_PROMPT_DONE)) return Promise.resolve();
+    var ver = CFG && CFG.version ? CFG.version : '';
+    if (!forceList && (!ver || CFG.legacyPrompted === ver)) return Promise.resolve();
+    var list = forceList || legacyGamesNow();
     if (!list.length) return Promise.resolve();
     LEGACY_PROMPT_DONE = true;
     var optimized = CFG.optimized;
@@ -1099,7 +1153,7 @@
       REMOVED = (data && data.removed) || [];
       SCANNED_AT = (data && data.scannedAt) || '';
       paintLibrary();
-      setTimeout(function () { maybePromptLegacyUpgrade(); }, 1500);
+      // 帧生成 + SM + DLSS5 的旧资产提示已合并到 checkAssetsLegacy（启动后 3.5 秒统一弹一次）
       // 图标是逐个 exe 从 Shell 读的（每个几十~几百毫秒）：延后一点，别抢首屏
       setTimeout(function () { loadGameIcons(); }, 2500);
       return GAMES;
@@ -1367,6 +1421,7 @@
     OPT_LABELS.forEach(function (p) { optSel.appendChild(h('option', { value: p[0], text: p[1] })); });
     var frmSel = h('select', { class: 'input' });
     FRAME_LABELS.forEach(function (p) { frmSel.appendChild(h('option', { value: p[0], text: p[1] })); });
+    frmSel.value = '3';   // 默认仍选 4X（3X 只是新增选项，别抢默认）
     var preSel = h('select', { class: 'input' });
     PRESET_LABELS.forEach(function (p) { preSel.appendChild(h('option', { value: p[0], text: p[1] })); });
     if (CFG) {
@@ -1377,17 +1432,21 @@
 
     // 进阶开关：超分加速 / 帧生成引擎（XeSS 的两个附属键只在选了 XeSS 时显示）
     var srSel = h('select', { class: 'input' });
-    [['0', t('关（默认）')], ['1', t('开')]].forEach(function (p) { srSel.appendChild(h('option', { value: p[0], text: p[1] })); });
-    srSel.value = deployLsGet('sr', '0');
+    [['Off', t('关（默认）')], ['M-INT8', 'M-INT8'], ['L-INT8', 'L-INT8'], ['M-FP16', 'M-FP16'], ['L-FP16', 'L-FP16']].forEach(function (p) { srSel.appendChild(h('option', { value: p[0], text: p[1] })); });
+    var srSaved = deployLsGet('sr', 'Off');
+    if (srSaved === '1') srSaved = 'L-INT8';
+    if (srSaved === '0') srSaved = 'Off';
+    srSel.value = srSaved;
+    if (srSel.value !== srSaved) srSel.value = 'Off';
     var engSel = h('select', { class: 'input' });
     [['DLSS', t('DLSS（默认）')], ['XeSS', t('XeSS（实验）')]].forEach(function (p) { engSel.appendChild(h('option', { value: p[0], text: p[1] })); });
     engSel.value = deployLsGet('engine', 'DLSS');
     var flowSel = h('select', { class: 'input' });
-    [['Coarse', t('粗糙（最快）')], ['Middle', t('中等（默认）')], ['Fine', t('精细（最慢）')]].forEach(function (p) { flowSel.appendChild(h('option', { value: p[0], text: p[1] })); });
+    [['Coarse', t('粗糙（最快）')], ['Middle', t('中等（默认）')], ['Fine', t('精细（最慢）')], ['CoarseAt4K', 'CoarseAt4K']].forEach(function (p) { flowSel.appendChild(h('option', { value: p[0], text: p[1] })); });
     flowSel.value = deployLsGet('flow', 'Middle');
     var hudSel = h('select', { class: 'input' });
-    [['1', t('开（默认）')], ['0', t('关')]].forEach(function (p) { hudSel.appendChild(h('option', { value: p[0], text: p[1] })); });
-    hudSel.value = deployLsGet('hudless', '1');
+    [['Auto', t('自动（默认）')], ['1', t('强制使用')], ['0', t('不用 HUD-less')]].forEach(function (p) { hudSel.appendChild(h('option', { value: p[0], text: p[1] })); });
+    hudSel.value = deployLsGet('hudless', 'Auto');
     var flowRow = h('div', { class: 'kv hidden' }, [h('span', { text: t('光流分辨率') }), flowSel]);
     var hudRow = h('div', { class: 'kv hidden' }, [h('span', { text: t('无 HUD 合成') }), hudSel]);
     function syncXessRows() {
@@ -1395,8 +1454,26 @@
       flowRow.classList.toggle('hidden', !on);
       hudRow.classList.toggle('hidden', !on);
     }
+    // 倍率上限随引擎联动：XeSS 在 0.4.1 里最多 3（=4X），6X 会导致帧生成不启用
+    function syncFrameOptions() {
+      var xess = engSel.value === 'XeSS';
+      var cur = frmSel.value || '3';
+      frmSel.innerHTML = '';
+      FRAME_LABELS.forEach(function (p) {
+        if (xess) { if (Number(p[0]) > 3) return; }
+        frmSel.appendChild(h('option', { value: p[0], text: p[1] }));
+      });
+      var has = false;
+      for (var i = 0; i < frmSel.options.length; i++) {
+        if (frmSel.options[i].value === cur) has = true;
+      }
+      frmSel.value = has ? cur : '3';
+      frmSel.title = xess ? t('XeSS 最多 4X（6X 不支持）') : '';
+    }
     engSel.addEventListener('change', syncXessRows);
+    engSel.addEventListener('change', syncFrameOptions);
     syncXessRows();
+    syncFrameOptions();
 
     var stateLabel = deployLabel(g.deployed);
     var stateEl = h('b', { text: stateLabel, class: stateCls(stateLabel) });
@@ -1593,12 +1670,12 @@
     closeBtn.addEventListener('click', function () { ov.close(); });
     deployBtn.addEventListener('click', function () {
       doDeploy(g, targetDir, sel.value, stateEl, deployBtn, ov, Number(optSel.value), Number(frmSel.value), String(preSel.value || ''), smOn,
-        srSel.value === '1', engSel.value, flowSel.value, hudSel.value === '1');
+        srSel.value, engSel.value, flowSel.value, hudSel.value === '1');
     });
     restoreBtn.addEventListener('click', function () { doRestore(g, targetDir, stateEl, ov); });
   }
 
-  function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset, smOn, srOn, engine, flow, hudless) {
+  function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset, smOn, srMode, engine, flow, hudless) {
     var body = t('会先备份被覆盖的原件，之后可以一键还原。');
     if (smOn) body += '\n\n' + SM_CONFLICT_TEXT;
     var dfltPreset = (CFG && CFG.defaultPreset) || 'C';
@@ -1618,7 +1695,7 @@
         [t('优化等级'), optLabelOf(optimized)],
         [t('倍率上限'), frmLabelOf(frames)],
         [t('DLSS-G 预设'), presetLabelOf(preset)],
-        [t('超分加速'), srOn ? t('开') : t('关')],
+        [t('超分预设'), srMode === 'Off' ? t('关（默认）') : srMode],
         [t('帧生成引擎'), engine],
         [t('部署目标'), targetDir || t('（未指定）')]
       ],
@@ -1631,15 +1708,15 @@
       showBar(t('正在安装…'), 0.35);
       invoke('deploy_game', {
         dir: targetDir, proxy: proxy, optimized: optimized, frames: frames, preset: preset,
-        sr: srOn, engine: engine, flow: flow, hudless: hudless
+        sr: srMode !== 'Off', srMode: srMode, engine: engine, flow: flow, hudless: hudless
       }).then(function (r) {
         rememberDeployLevels(optimized, frames, preset);
-        deployLsSet('sr', srOn ? '1' : '0'); deployLsSet('engine', engine);
+        deployLsSet('sr', srMode); deployLsSet('engine', engine);
         deployLsSet('flow', flow); deployLsSet('hudless', hudless ? '1' : '0');
         stateEl.textContent = t('已部署（') + proxy + t('）');
         stateEl.className = 'ok';
         var msg = t('安装完成（优化等级 ') + optLabelOf(optimized) + t('、倍率上限 ') + frmLabelOf(frames) +
-          (srOn ? t('、超分加速 开') : '') +
+          (srMode === 'Off' ? '' : t('、超分预设 ') + srMode) +
           (engine === 'XeSS' ? t('、引擎 XeSS') : '') +
           (preset ? t('、DLSS-G 预设 ') + presetLabelOf(preset) : '') + t('）');
         if (r && r.msg) msg += '\n' + r.msg;
@@ -2117,6 +2194,126 @@
       });
       invoke('sm_legacy_prompt_done').catch(function () {  });
     }).catch(function () {  });
+  }
+
+  // 统一弹窗：列出命中的类别与游戏，【全部清除】串行清理，【暂不处理】按版本记一次。
+  function showAssetsLegacyDialog(fgNames, smNames, d5Names) {
+    var NL = String.fromCharCode(10);
+    var any = fgNames.length > 0;
+    if (smNames.length > 0) any = true;
+    if (d5Names.length > 0) any = true;
+    if (!any) return Promise.resolve();
+    var fmt = function (arr) {
+      var head = arr.slice(0, 6).join('、');
+      if (arr.length <= 6) return head;
+      return head + t('…等 ') + arr.length + t(' 个');
+    };
+    var lines = [];
+    if (fgNames.length) lines.push(t('· 帧生成：') + fmt(fgNames));
+    if (smNames.length) lines.push(t('· Smooth Motion：') + fmt(smNames));
+    if (d5Names.length) lines.push(t('· DLSS5：') + fmt(d5Names));
+    // 文案里**只写命中的类别**（用户要求：只有帧生成有更新时，不要再提 SM/DLSS5）
+    var names = [];
+    if (fgNames.length) names.push(t('帧生成'));
+    if (smNames.length) names.push(t('Smooth Motion'));
+    if (d5Names.length) names.push(t('DLSS5'));
+    var body = t('检测到') + names.join('、') +
+      t('资产文件有更新，当前还是旧版本资产文件，是否全部清除后再重新部署？');
+    body = body + NL + NL + lines.join(NL);
+    return uiConfirm({
+      title: t('资产文件有更新'),
+      ok: t('全部清除'),
+      cancel: t('暂不处理'),
+      body: body,
+    }).then(function (yes) {
+      if (!yes) return;
+      var todo = [];
+      var byName = function (n) {
+        return GAMES.filter(function (x) { return x.name === n; })[0];
+      };
+      var exeOf = function (g) {
+        return g.exe ? g.exe : null;
+      };
+      fgNames.forEach(function (n) {
+        var g = byName(n);
+        if (!g) return;
+        // 帧生成：先按部署记录**还原**（放回原件/删掉我们铺的文件），再清旧版遗留文件
+        todo.push({ cmd: 'restore', args: { dir: g.dir } });
+        todo.push({ cmd: 'clean_legacy', args: { dir: g.dir } });
+      });
+      smNames.forEach(function (n) {
+        var g = byName(n);
+        if (!g) return;
+        // SM：必须走「关闭」这条命令 —— 它会先重置 NVIDIA 驱动 profile，再取回组件文件
+        // （只调 sm_asset_restore 会留一个"驱动里还开着"的假状态）
+        todo.push({ cmd: 'sm_set_game', args: { name: g.name, exe: exeOf(g) || '', on: false, dir: g.dir } });
+        // 再取回组件文件（sm_set_game 只动驱动配置；sandbox 实测文件仍在）
+        todo.push({ cmd: 'sm_asset_restore', args: { dir: g.dir, exe: exeOf(g) } });
+      });
+      d5Names.forEach(function (n) {
+        var g = byName(n);
+        if (g) todo.push({ cmd: 'dlss5_uninstall', args: { dir: g.dir, exe: exeOf(g) } });
+      });
+      var done = 0;
+      var runNext = function () {
+        if (done >= todo.length) {
+          // 清完再**复检一次**：还有残留就如实回报，不留"看起来成功其实没清掉"
+          return refreshLibrary().catch(function () { }).then(function () {
+            var fgLeft = legacyGamesNow().length;
+            return Promise.all([
+              invoke('sm_legacy_scan').catch(function () { return { games: [] }; }),
+              invoke('dlss5_legacy_scan').catch(function () { return { games: [] }; }),
+            ]).then(function (arr) {
+              var smLeft = (arr[0] && arr[0].games) ? arr[0].games.length : 0;
+              var d5Left = (arr[1] && arr[1].games) ? arr[1].games.length : 0;
+              var left = fgLeft + smLeft + d5Left;
+              if (left > 0) {
+                toast(t('仍有旧资产未清除（{n} 处），请到对应页面手动处理', { n: left }), 'warn', 15000);
+              } else {
+                toast(t('已清除旧资产，请到对应页面重新部署'), 'ok', 12000);
+              }
+            });
+          });
+        }
+        var job = todo[done++];
+        showBar(t('正在清除旧资产…') + ' (' + done + '/' + todo.length + ')', done / todo.length, 'legacy');
+        return invoke(job.cmd, job.args).catch(function () { }).then(runNext);
+      };
+      return runNext().then(function () { hideBarIfPhase('legacy', 1200); });
+    });
+  }
+
+  // 启动后的统一检查：三类资产任意一类是旧版就弹同一个弹窗（按程序版本只弹一次）。
+  function checkAssetsLegacy() {
+    if (!CFG) return Promise.resolve();
+    var ver = CFG.version ? CFG.version : '';
+    if (ver.length > 0) {
+      if (CFG.assetsLegacyPrompted === ver) return Promise.resolve();
+    }
+    var uniq = function (arr) {
+      var out = [];
+      arr.forEach(function (n) { if (!n) return; if (out.indexOf(n) < 0) out.push(n); });
+      return out;
+    };
+    var fg = legacyGamesNow().map(function (g) { return g.name; });
+    return Promise.all([
+      invoke('assets_update_scan').catch(function () { return { fg: [], sm: [], dlss5: [] }; }),
+      invoke('sm_legacy_scan').catch(function () { return { games: [] }; }),
+      invoke('dlss5_legacy_scan').catch(function () { return { games: [] }; }),
+    ]).then(function (arr) {
+      var u = arr[0] ? arr[0] : {};
+      // 指纹判定（新）+ 旧布局判定（老记录没有哈希时兜底）
+      var fgAll = uniq(fg.concat(u.fg ? u.fg : []));
+      var smLegacy = [];
+      if (arr[1]) { if (arr[1].games) smLegacy = arr[1].games; }
+      var d5Legacy = [];
+      if (arr[2]) { if (arr[2].games) d5Legacy = arr[2].games; }
+      var smAll = uniq(smLegacy.concat(u.sm ? u.sm : []));
+      var d5All = uniq(d5Legacy.concat(u.dlss5 ? u.dlss5 : []));
+      if (!fgAll.length) { if (!smAll.length) { if (!d5All.length) return; } }
+      invoke('assets_legacy_prompt_done').catch(function () { });
+      return showAssetsLegacyDialog(fgAll, smAll, d5All);
+    }).catch(function () { });
   }
 
   function autoScanLibrary() {
@@ -2610,8 +2807,24 @@
     loadCovers()
       .then(function () { return refreshLibrary(); })
       .then(function () {
-        // 旧版扫描放到首屏之后（4 秒）再做，别挡窗口出现
-        setTimeout(function () { checkSmLegacy(); checkDlss5Legacy(); }, 4000);
+        // 升级后**自动清除**旧版帧生成部署（0.3.x 布局 / 0.4.0 资产）：只清不装，
+        // 清完由用户重新部署 0.4.1（按程序版本只做一次）。
+        return invoke('framegen_cleanup_outdated').catch(function () { return null; }).then(function (r) {
+          if (!r) return null;
+          var n = 0;
+          if (r.cleaned) n = r.cleaned.length;
+          if (!n) return null;
+          var bad = false;
+          if (r.failed) { if (r.failed.length) bad = true; }
+          var msg = t('已自动清除旧版帧生成（{n} 个游戏），请重新部署新版本', { n: n });
+          if (bad) msg += '\n' + t('部分未清除：') + r.failed.join('；');
+          toast(msg, bad ? 'warn' : 'ok', 15000);
+          return refreshLibrary();
+        });
+      })
+      .then(function () {
+        // 旧版扫描放到首屏之后（3.5 秒）再做，别挡窗口出现；三类资产合并成**一个**提示
+        setTimeout(function () { checkAssetsLegacy(); }, 3500);
       })
       .then(function () {
         // 默认不自动扫描（用户要求，开关在「关于」页，默认关）；

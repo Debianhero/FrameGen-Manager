@@ -2,6 +2,7 @@
 //!
 //! 迁移进度见 `dev-only/MIGRATION-TAURI.md`：B1.2 已完成 util 的搬入。
 
+pub mod assets_version;
 pub mod util;
 pub mod log;
 pub mod anticheat;

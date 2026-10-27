@@ -390,6 +390,13 @@ pub struct AppConfig {
     /// 默认值，得反复调（真实反馈）。这里记住它，启动时按上次的大小打开。
     #[serde(default)]
     pub window_size: Option<[f32; 2]>,
+    /// 帧生成超分（SR）预设：0.4.1 起是显式五选一
+    /// Off / M-INT8 / L-INT8 / M-FP16 / L-FP16。空串按 Off 处理。
+    #[serde(default)]
+    pub fg_sr_mode: String,
+    /// 「旧版帧生成已自动清除」这个动作按哪个程序版本做过一次
+    #[serde(default)]
+    pub fg_cleanup_version: String,
     /// 每次启动时自动刷新游戏库（默认**关**，用户要求）。
     ///
     /// 关掉后启动只显示上次的缓存（秒开），发现新游戏靠手动点「扫描游戏库」；
@@ -403,13 +410,16 @@ pub struct AppConfig {
     /// 「DLSS5 已更换为 GITC 版，需先卸载再重装」这个提示按哪个程序版本弹过。
     #[serde(default)]
     pub dlss5_legacy_prompt_version: String,
+    /// **统一**的「三类资产有更新」提示按哪个程序版本弹过（帧生成 / SM / DLSS5 合并成一个弹窗）。
+    #[serde(default)]
+    pub assets_legacy_prompt_version: String,
 }
 
 // 这两个是**业务默认**（2 / 3），不是 u8 的类型默认（0），所以 AppConfig 的 Default
 // 必须手写 —— 否则配置文件丢了或者读坏了，会静默变成「档位 0」（原厂内核不加速）。
 fn default_fg_optimized() -> u8 {
-    // 与上游 0.4.0 的出厂 INI 保持一致（0.3.x 时期是 1）
-    2
+    // 0.4.1 出厂 Optimized=1（与官方逐位一致）
+    1
 }
 fn default_fg_frames() -> u8 {
     3
@@ -429,9 +439,12 @@ impl Default for AppConfig {
             optimized_migrated_to_2: false,
             legacy_prompt_version: String::new(),
             window_size: None,
+            fg_sr_mode: String::new(),
+            fg_cleanup_version: String::new(),
             auto_scan_on_start: false,
             sm_legacy_prompt_version: String::new(),
             dlss5_legacy_prompt_version: String::new(),
+            assets_legacy_prompt_version: String::new(),
         }
     }
 }

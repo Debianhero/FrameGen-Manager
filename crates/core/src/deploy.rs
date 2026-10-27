@@ -199,6 +199,54 @@ pub fn load_manifest(dir: &Path) -> Option<BackupManifest> {
     serde_json::from_str(&t).ok()
 }
 
+/// ReShade 6.8.0（Addon）模块本体的指纹：dxgi/d3d11/… 只是换了文件名，内容一致。
+const RESHADE_MODULE_SIZE: u64 = 5_592_064;
+const RESHADE_MODULE_SHA256: &str =
+    "0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7";
+
+/// 这个文件是不是 ReShade 本体（DLSS5 部署时装进去的，不属于帧生成资产）。
+fn is_reshade_module(p: &std::path::Path) -> bool {
+    match std::fs::metadata(p) {
+        Ok(m) if m.len() == RESHADE_MODULE_SIZE => {}
+        _ => return false,
+    }
+    crate::util::sha256_file(p)
+        .map(|h| h.eq_ignore_ascii_case(RESHADE_MODULE_SHA256))
+        .unwrap_or(false)
+}
+
+
+/// 0.4.1 起上游的代理 DLL **不再带数字签名**（旧版靠证书里的签名者名字认归属）。
+/// 这里按内置文件的哈希认定"这是我们铺的代理"，否则新版部署后会被判成"代理被覆盖"。
+pub const PROXY_ASSET_SHA256: &[(&str, u64, &str)] = &[
+    ("version.dll", 815_240, "275ffa781b2d244ad269d1d65d4e5b68a12a3f89ff2baaec58d100eb5a1ff411"),
+    ("d3d12.dll", 815_744, "e188a992d1ff1ef1ebb51bfc544ac132536d717f2fa2ec77642f9d506cdea58e"),
+    ("dbghelp.dll", 832_648, "82c04383044657bcb4bb45b7061d8fb27a753bc222b37f6712c5affb20848f5f"),
+    ("dinput8.dll", 814_216, "8181129b3754bbea4a91bcc61f50a7e28f6fb939b880e2d38eb7a5b4ffbcc8ad"),
+    ("dxgi.dll", 815_752, "96e05da6572f6e4808b7f7402ccc9c584fc2257d7e5ea2478fc725663bdc27b4"),
+    ("winmm.dll", 825_984, "1a584a9b0333e0c3be4ab32e00901c545ca16a620a56784a67cacf003c041739"),
+];
+
+/// 这个文件是不是我们内置的代理（无签名版本，只能靠哈希认）。
+pub fn proxy_is_bundled(path: &std::path::Path) -> bool {
+    // **只按内容认**（不要求文件名）：同一个代理换个名字（winmm→dxgi）仍是我们的文件，
+    // 用户也可能把我们铺的代理改名使用。
+    let size = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(_) => return false,
+    };
+    if !PROXY_ASSET_SHA256.iter().any(|(_, s, _)| *s == size) {
+        return false;
+    }
+    let got = match crate::util::sha256_file(path) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    PROXY_ASSET_SHA256
+        .iter()
+        .any(|(_, _, sha)| got.eq_ignore_ascii_case(sha))
+}
+
 pub fn state_of(dir: &Path) -> DeployState {
     if let Some(m) = load_manifest(dir) {
         // 记录还在 ≠ 文件还在：Smooth Motion 的解锁组件和帧生成的代理同名（version.dll），
@@ -246,6 +294,10 @@ pub fn state_of(dir: &Path) -> DeployState {
         }
         return DeployState::ManuallyInstalled { files: ours };
     }
+
+    // ReShade（DLSS5 装的）本体也叫 dxgi.dll 等名字 —— 它不是帧生成资产，
+    // 不能因此把游戏判成"入口被占用"（否则帧生成页会给出无意义的还原入口）。
+    others.retain(|n| !is_reshade_module(&dir.join(n)));
 
     if others.is_empty() {
         DeployState::NotDeployed
@@ -1160,7 +1212,7 @@ pub fn prepare_deploy(
     fg_sr: bool,
     fg_engine: &str,
     fg_xess_flow: &str,
-    fg_xess_hudless: bool,
+    fg_xess_hudless: &str,
 ) -> Result<PreparedDeploy> {
     let mut files = Vec::new();
     let mut notes = Vec::new();
@@ -1225,12 +1277,16 @@ pub fn prepare_deploy(
     }
 
     let asset_ini = crate::update::asset_path(crate::update::INI_REPO_PATH).unwrap_or_default();
+    // 老 0.4.0 的 ini 里有 Mode=On（= 原本开着超分）：迁移时按“开”处理，避免升级后静默关掉
+    let legacy_sr_on = std::fs::read_to_string(dir.join(INI_NAME))
+        .map(|s| s.lines().any(|l| l.trim().eq_ignore_ascii_case("Mode=On")))
+        .unwrap_or(false);
     let (ini_path, ini_notes) = crate::update::prepare_deploy_ini(
         &asset_ini,
         fg_optimized,
         fg_frames,
         fg_preset,
-        fg_sr,
+        fg_sr || legacy_sr_on,
         fg_engine,
         fg_xess_flow,
         fg_xess_hudless,
@@ -1292,23 +1348,23 @@ pub fn prepare_deploy(
 pub const ASSET_INVENTORY: &[(&str, u64, &str)] = &[
     (
         "version.dll",
-        853_280,
-        "7b3f90435be4f94348bf8d128c84871c7f904c704f7690601a263277c327a7b2",
+        815_240,
+        "275ffa781b2d244ad269d1d65d4e5b68a12a3f89ff2baaec58d100eb5a1ff411",
     ),
     (
         "dlssg_sm86.ini",
-        6_810,
-        "1f780afbd480e1ec14044e17c37f29c22affaf4cc8da322acde927e987106136",
+        10_092,
+        "97713bfa9032121a6acfadf3fe1ec9aca467f27ee9d8f80095d3bf0f1267d298",
     ),
     (
         "dlssg_sm86\\backend\\sm86_backend.dll",
-        2_109_728,
-        "30ffc6e09a347ccde87ecc6fa54fd7818f5ed8a9353f5c31c2a90835c7f0ca9b",
+        2_312_840,
+        "d1b56f6ee9a58ba6284804303cf903535c7acbf4fdce3320f6fd21f50569d357",
     ),
     (
         "dlssg_sm86\\kernels\\fg_kernels.dll",
-        18_318_624,
-        "1394c2d5d9cc8938ba3e52b043048d20d6d4c13a019c161b11a3dfd16343ec24",
+        11_875_464,
+        "f59a45a04eddda2f2ebae4b8685b05af4432a80ce87cc78d83e4b9414e079a20",
     ),
     (
         "dlssg_sm86\\runtime\\nvngx_dlssg.dll",
@@ -1317,23 +1373,21 @@ pub const ASSET_INVENTORY: &[(&str, u64, &str)] = &[
     ),
     (
         "dlssg_sm86\\xefg\\xefg_kernels.dll",
-        5_360_928,
-        "1b354c42596f6fad71dbe6ddd600ad2bf637f906ee6adb3de1b3dad01cd7e3f9",
+        16_351_880,
+        "e72ed96bd5ea51743ca9e3b07a7d8af522eeb6a34cf4143f0ff1147d7dff13bf",
     ),
 ];
 
-/// 超分（sr\）那两个是**可选**的：上游完整包里才有，我们内置了；缺了不影响帧生成，
-/// 但要在部署备注里如实说一句，免得用户以为"超分开不了是工具的问题"。
 pub const SR_INVENTORY: &[(&str, u64, &str)] = &[
     (
         "dlssg_sm86\\sr\\sr_kernels.dll",
-        106_570_528,
-        "d9721fc273fccc1fee95c20dc4aac9c38da18e704bc89ff960357bd531d489f4",
+        106_570_376,
+        "b8d5d4cac3142647630b72a4a29271de35679646d48bdd2b70a71876da0fae78",
     ),
     (
         "dlssg_sm86\\sr\\nvngx_dlss.dll",
-        74_208_880,
-        "d202b024cf5a809d4f6cb57b698ca61cdf7e7f664915a3794942042066d7cf72",
+        74_187_376,
+        "858ccff96360c3098db9264cd6f13d04a027e09b6ce7ad5bbc297570e824b4f2",
     ),
 ];
 
@@ -1504,6 +1558,8 @@ pub fn is_legacy_artifact_like(name: &str, bytes: &[u8]) -> bool {
 pub enum AssetFamily {
     /// 0.4.0 那一套：代理由 dlssg_sm86\ 目录 + INI 组成，代理不到 1 MB
     V040,
+    /// 0.4.1 那一套（布局相同，内核/后端/xefg/sr 全部更新）
+    V041,
     /// 0.3.x 那一套：代理 28.6 MB，运行库铺在游戏根目录
     Legacy03x,
 }
@@ -1512,12 +1568,25 @@ impl AssetFamily {
     pub fn version(self) -> &'static str {
         match self {
             AssetFamily::V040 => "0.4.0",
+            AssetFamily::V041 => "0.4.1",
             AssetFamily::Legacy03x => "0.3.x",
         }
     }
     /// 这一套是不是"旧的那一套"（界面上要用黄色提醒重新部署）
     pub fn is_legacy(self) -> bool {
         matches!(self, AssetFamily::Legacy03x)
+    }
+}
+
+/// 同一套布局下区分 0.4.0 / 0.4.1：看内核大小（18.3 MB vs 11.9 MB）。
+fn modern_family(dir: &Path) -> AssetFamily {
+    let k = dir
+        .join(RUNTIME_DIR)
+        .join("kernels")
+        .join("fg_kernels.dll");
+    match std::fs::metadata(&k) {
+        Ok(m) if m.len() == 11_875_464 => AssetFamily::V041,
+        _ => AssetFamily::V040,
     }
 }
 
@@ -1568,7 +1637,7 @@ pub fn deployed_assets(dir: &Path) -> Option<DeployedAssets> {
             .iter()
             .any(|e| e.rel_path.starts_with(RUNTIME_DIR))
         {
-            Some(AssetFamily::V040)
+            Some(modern_family(dir))
         } else if !m.files.is_empty() {
             Some(AssetFamily::Legacy03x)
         } else {
@@ -1577,7 +1646,7 @@ pub fn deployed_assets(dir: &Path) -> Option<DeployedAssets> {
     });
     let family = from_manifest.unwrap_or({
         if has_runtime_dir {
-            AssetFamily::V040
+            modern_family(dir)
         } else {
             // 没有记录、也没有新目录：看代理多大。0.4.0 的代理不到 1 MB，
             // 0.3.x 的是 28.6 MB —— 差两个数量级，不会认错。
@@ -1587,7 +1656,7 @@ pub fn deployed_assets(dir: &Path) -> Option<DeployedAssets> {
                 .map(|m| m.len() < 1_000_000)
                 .unwrap_or(false);
             if small {
-                AssetFamily::V040
+                modern_family(dir)
             } else {
                 AssetFamily::Legacy03x
             }
@@ -1753,7 +1822,7 @@ pub fn deploy_game(
     fg_sr: bool,
     fg_engine: &str,
     fg_xess_flow: &str,
-    fg_xess_hudless: bool,
+    fg_xess_hudless: &str,
 ) -> Result<(String, Vec<String>)> {
     let prep = prepare_deploy(
         dir,
@@ -1768,4 +1837,27 @@ pub fn deploy_game(
     )?;
     let msg = deploy(dir, proxy, &prep.files, &[])?;
     Ok((msg, prep.notes))
+}
+
+/// 部署的帧生成资产是否旧于当前内置：0.3.x 布局，或运行库版本与内置不一致。
+pub fn is_outdated(dir: &Path) -> bool {
+    let Some(a) = deployed_assets(dir) else { return false };
+    if a.family.is_legacy() {
+        return true;
+    }
+    // 0.4.0 → 0.4.1：布局一样但文件全换了，要求用户先清除再部署
+    if a.family == AssetFamily::V040 {
+        return true;
+    }
+    let bundled = crate::assets_version::FRAMEGEN_RUNTIME;
+    if a.runtime_version.is_empty() {
+        return false;
+    }
+    if bundled.is_empty() {
+        return false;
+    }
+    if a.runtime_version != bundled {
+        return true;
+    }
+    false
 }

@@ -694,7 +694,7 @@ pub fn asset_path(name: &str) -> Result<PathBuf> {
 
 
 /// 出厂默认的「优化等级」（上游 0.4.0 的出厂 INI：Optimized=2；0.3.x 时期是 1）
-pub const DEFAULT_OPTIMIZED: u8 = 2;
+pub const DEFAULT_OPTIMIZED: u8 = 1;
 
 /// 出厂默认的 DLSS-G 渲染预设。
 ///
@@ -705,10 +705,10 @@ pub const DEFAULT_OPTIMIZED: u8 = 2;
 /// 为什么默认值必须写在这里、而不是改内置 INI：资产目录里的 dlssg_sm86.ini 是**用户可改**
 /// 的一份拷贝，老用户升级上来时它可能还是 Autou 那份 stock 文件 —— 默认值放在代码里，
 /// 每次部署都按它写进游戏目录，结果才是确定的。
-pub const DEFAULT_PRESET: &str = "C";
+pub const DEFAULT_PRESET: &str = "A";
 
 /// 预设的合法取值（空串按出厂默认处理）。A/B 是上游 0.4.0 里就有的正式档位。
-pub const PRESETS: [&str; 4] = ["Auto", "A", "B", "C"];
+pub const PRESETS: [&str; 3] = ["A", "B", "C"];
 /// 出厂默认的「倍率上限」（3 = 最高 4X；5 = 最高 6X）
 pub const DEFAULT_MAX_FRAMES: u8 = 3;
 
@@ -815,7 +815,7 @@ pub fn prepare_deploy_ini(
     sr: bool,
     engine: &str,
     xess_flow: &str,
-    xess_hudless: bool,
+    xess_hudless: &str,
 ) -> Result<(PathBuf, Vec<String>)> {
     if !upstream.is_file() {
         bail!("缺少 {INI_REPO_PATH} —— 资产随安装包内置，请检查安装是否完整（或重新安装本程序）");
@@ -829,7 +829,16 @@ pub fn prepare_deploy_ini(
     let preset = if preset.is_empty() { DEFAULT_PRESET } else { preset };
     let engine = if engine.is_empty() { "DLSS" } else { engine };
     let flow = if xess_flow.is_empty() { "Middle" } else { xess_flow };
-    if preset == "Auto"
+    // 0.4.1：Engine=XeSS 时最多 3（=4X），选 5（6X）会导致帧生成不启用（max_generated_frames_unsupported）
+    let mut max_frames = max_frames;
+    let mut xess_clamped = false;
+    if engine == "XeSS" {
+        if max_frames > 3 {
+            max_frames = 3;
+            xess_clamped = true;
+        }
+    }
+    if preset == "A"
         && optimized == DEFAULT_OPTIMIZED
         && max_frames == DEFAULT_MAX_FRAMES
         && !sr
@@ -839,6 +848,9 @@ pub fn prepare_deploy_ini(
     }
     let mut out = std::fs::read_to_string(upstream).context("读取 INI 失败")?;
     let mut notes: Vec<String> = Vec::new();
+    if xess_clamped {
+        notes.push("XeSS 引擎最多 4X（MaxGeneratedFrames 1-3），已自动降到 4X".to_owned());
+    }
     /* 段名跟着上游 0.4.0：Optimized 与 Preset 在 [DLSSG]，MaxGeneratedFrames 在
        [FrameGeneration]。找不到段时退回"不限段"查找，这样老版 INI 也还能改。 */
     let preset_value = preset.to_owned();
@@ -849,7 +861,7 @@ pub fn prepare_deploy_ini(
         (Some("[DLSSG]"), "Optimized", optimized.to_string(), "优化等级"),
         (None, "MaxGeneratedFrames", max_frames.to_string(), "倍率上限"),
     ];
-    if preset != "Auto" {
+    if preset != DEFAULT_PRESET {
         jobs.push((Some("[DLSSG]"), "Preset", preset_value, "DLSS-G 预设"));
     }
     /* 三个进阶开关：只在**与出厂值不同**时才写。deploy.ini 每次都从 stock 重新生成，
@@ -857,16 +869,40 @@ pub fn prepare_deploy_ini(
        - [SuperResolution] Mode：超分加速（只对游戏用 DLSS Performance/Ultra 档时生效）
        - [FrameGeneration] Engine：第二引擎 XeSS（本项目自己的运行器，只 2X）
        - [XeSSFG] FlowResolution / UseHudless：只对 XeSS 引擎有意义 */
-    if sr {
-        jobs.push((Some("[SuperResolution]"), "Mode", "On".to_owned(), "超分加速"));
+    /* 0.4.1 起 [SuperResolution] Mode 是**显式预设**（Off/M-INT8/L-INT8/M-FP16/L-FP16），
+       0.4.0 的 Mode=On 已删除。这里按配置写入；空值/非法值回落到 Off。
+       老 ini 里遗留的 Mode=On 也会被这次改写顺手迁移。 */
+    let sr_mode = {
+        let cfg = crate::util::load_config();
+        let v = cfg.fg_sr_mode.trim().to_owned();
+        const OK: [&str; 5] = ["Off", "M-INT8", "L-INT8", "M-FP16", "L-FP16"];
+        if OK.iter().any(|x| x.eq_ignore_ascii_case(&v)) {
+            let mut out = String::new();
+            for x in OK {
+                if x.eq_ignore_ascii_case(&v) {
+                    out = x.to_owned();
+                }
+            }
+            out
+        } else if sr {
+            // 0.4.0 的 Mode=On 语义 ≈ 用本项目 INT8 内核、预设 L/M → 取 L-INT8
+            "L-INT8".to_owned()
+        } else {
+            "Off".to_owned()
+        }
+    };
+    // 只在**真的要开超分**时才写：Opt Off 且原 ini 已是 Off 时不产生改动（也不多加一条说明）
+    if !sr_mode.eq_ignore_ascii_case("Off") {
+        jobs.push((Some("[SuperResolution]"), "Mode", sr_mode, "超分预设"));
     }
     if engine == "XeSS" {
         jobs.push((None, "Engine", "XeSS".to_owned(), "帧生成引擎"));
         if flow != "Middle" {
             jobs.push((Some("[XeSSFG]"), "FlowResolution", flow.to_owned(), "光流分辨率"));
         }
-        if !xess_hudless {
-            jobs.push((Some("[XeSSFG]"), "UseHudless", "0".to_owned(), "无 HUD 合成"));
+        // 三态：Auto（不写，出厂）/ 1（强制）/ 0（不用）
+        if !xess_hudless.eq_ignore_ascii_case("Auto") {
+            jobs.push((Some("[XeSSFG]"), "UseHudless", xess_hudless.to_owned(), "无 HUD 合成"));
         }
     }
     for (section, key, value, what) in jobs {

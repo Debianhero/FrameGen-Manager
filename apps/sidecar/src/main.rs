@@ -1507,6 +1507,57 @@ fn proxy_advice(dir: String) -> Result<Value, String> {
 ///
 /// 抽出来是为了让**命令行自测**（--deploytest）和界面走的是同一段代码 ——
 /// 否则「自测过了」和「界面上能用」是两件事。sidecar 里这条同样成立。
+/// 把「超分预设」（0.4.1 五选一）落到配置；部署前调用，同一进程内先写后读。
+/// 升级后**自动清除旧版帧生成部署**（0.3.x 布局或 0.4.0 资产）：还原原件 + 清残留。
+/// 返回清掉的游戏清单；每个程序版本只做一次（写 fg_cleanup_version）。
+fn framegen_cleanup_outdated() -> Result<Value, String> {
+    let mut cfg = framegen_core::util::load_config();
+    if cfg.fg_cleanup_version == framegen_core::update::SELF_VERSION {
+        return Ok(json!({ "cleaned": [], "failed": [], "already": true }));
+    }
+    let cache = framegen_core::scan::load_library();
+    let mut cleaned: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for row in cache.scanned.iter().chain(cache.manual.iter()) {
+        let dir = row
+            .render_exe
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| row.entry.install_dir.clone());
+        if !framegen_core::deploy::is_outdated(&dir) {
+            continue;
+        }
+        match framegen_core::deploy::restore(&dir) {
+            Ok(_) => {
+                let (_del, bad) = framegen_core::deploy::clean_legacy_leftovers(&dir);
+                if !bad.is_empty() {
+                    failed.push(format!("{}：残留 {} 个文件", row.entry.name, bad.len()));
+                }
+                cleaned.push(row.entry.name.clone());
+            }
+            Err(e) => failed.push(format!("{}：{e}", row.entry.name)),
+        }
+    }
+    cfg.fg_cleanup_version = framegen_core::update::SELF_VERSION.to_owned();
+    let _ = framegen_core::util::save_config(&cfg);
+    Ok(json!({ "cleaned": cleaned, "failed": failed }))
+}
+
+fn save_sr_mode(mode: &str) -> Result<(), String> {
+    let v = mode.trim().to_owned();
+    if v.is_empty() {
+        return Ok(());
+    }
+    const OK: [&str; 5] = ["Off", "M-INT8", "L-INT8", "M-FP16", "L-FP16"];
+    if !OK.iter().any(|x| x.eq_ignore_ascii_case(&v)) {
+        return Err(format!("不支持的超分预设：{v}"));
+    }
+    let mut cfg = framegen_core::util::load_config();
+    cfg.fg_sr_mode = v;
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))
+}
+
 fn deploy_impl(
     dir: &str,
     proxy: &str,
@@ -1516,7 +1567,7 @@ fn deploy_impl(
     sr: bool,
     engine: &str,
     xess_flow: &str,
-    xess_hudless: bool,
+    xess_hudless: &str,
 ) -> Result<(String, Vec<String>), String> {
     let gpu = framegen_core::scan::detect_gpu().unwrap_or_default();
     let route = framegen_core::scan::classify_gpu(&gpu);
@@ -1573,7 +1624,7 @@ fn deploy_game(
     sr: bool,
     engine: Option<String>,
     xess_flow: Option<String>,
-    xess_hudless: Option<bool>,
+    xess_hudless: Option<String>,
 ) -> Result<Value, String> {
     let preset = preset.unwrap_or_default();
     match deploy_impl(
@@ -1585,7 +1636,7 @@ fn deploy_game(
         sr,
         engine.unwrap_or_default().as_str(),
         xess_flow.unwrap_or_default().as_str(),
-        xess_hudless.unwrap_or(true),
+        xess_hudless.as_deref().unwrap_or("Auto"),
     ) {
         Ok((msg, notes)) => Ok(json!({ "msg": msg, "notes": notes })),
         Err(e) => {
@@ -1664,6 +1715,8 @@ fn get_config() -> Value {
         "frames": cfg.fg_frames,
         "preset": cfg.fg_preset,
         "autoScanOnStart": cfg.auto_scan_on_start,
+        "srMode": cfg.fg_sr_mode,
+        "assetsLegacyPrompted": cfg.assets_legacy_prompt_version,
         "legacyPrompted": cfg.legacy_prompt_version,
         "defaultPreset": framegen_core::update::DEFAULT_PRESET,
         "presets": framegen_core::update::PRESETS,
@@ -1727,12 +1780,63 @@ fn dlss5_legacy_prompt_done() -> Result<Value, String> {
     Ok(json!({ "ok": true }))
 }
 
+/// 扫一遍游戏库：三类资产里哪些游戏的部署文件**旧于当前内置**（按文件指纹判定）。
+/// 统一提示（assets_update_scan）用它一次性拿三类结果。
+fn assets_update_scan() -> Result<Value, String> {
+    let cache = framegen_core::scan::load_library();
+    let mut fg: Vec<String> = Vec::new();
+    let mut sm: Vec<String> = Vec::new();
+    let mut d5: Vec<String> = Vec::new();
+    for row in cache.scanned.iter().chain(cache.manual.iter()) {
+        let d = &row.entry.install_dir;
+        if framegen_core::deploy::is_outdated(d) {
+            fg.push(row.entry.name.clone());
+        }
+        if framegen_core::sm::is_outdated(d) {
+            sm.push(row.entry.name.clone());
+        }
+        if framegen_core::dlss5::is_outdated(d) {
+            d5.push(row.entry.name.clone());
+        }
+    }
+    let cfg = framegen_core::util::load_config();
+    let mut any = false;
+    if !fg.is_empty() { any = true; }
+    if !sm.is_empty() { any = true; }
+    if !d5.is_empty() { any = true; }
+    let mut prompt = any;
+    if cfg.assets_legacy_prompt_version == framegen_core::update::SELF_VERSION {
+        prompt = false;
+    }
+    Ok(json!({ "fg": fg, "sm": sm, "dlss5": d5, "prompt": prompt }))
+}
+
+/// 记录「三类资产有更新」这个统一提示已经按当前版本弹过了。
+fn assets_legacy_prompt_done() -> Result<Value, String> {
+    let mut cfg = framegen_core::util::load_config();
+    cfg.assets_legacy_prompt_version = framegen_core::update::SELF_VERSION.to_owned();
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({ "ok": true }))
+}
+
 /// 记录「旧版组件提示」已经按当前版本弹过了。
 fn sm_legacy_prompt_done() -> Result<Value, String> {
     let mut cfg = framegen_core::util::load_config();
     cfg.sm_legacy_prompt_version = framegen_core::update::SELF_VERSION.to_owned();
     framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
     Ok(json!({ "ok": true }))
+}
+
+/// 保存帧生成的超分预设（0.4.1 起五选一）。
+fn set_sr_mode(mode: String) -> Result<Value, String> {
+    const OK: [&str; 5] = ["Off", "M-INT8", "L-INT8", "M-FP16", "L-FP16"];
+    if !OK.iter().any(|x| x.eq_ignore_ascii_case(mode.trim())) {
+        return Err(format!("不支持的超分预设：{mode}"));
+    }
+    let mut cfg = framegen_core::util::load_config();
+    cfg.fg_sr_mode = mode.trim().to_owned();
+    framegen_core::util::save_config(&cfg).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({ "srMode": cfg.fg_sr_mode }))
 }
 
 /// 保存「启动时自动扫描游戏库」开关（默认**关**）。
@@ -1840,13 +1944,30 @@ fn self_update_download(id: u64, args: &Value) -> Result<Value, String> {
     // 用**共享**的取消标志（cancel_self_update 命令置位的就是它），每次开始前复位。
     let cancel = selfupdate_cancel();
     cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    // 实时下载速度：每 0.5 秒用「字节增量 / 时间增量」算一次，直接拼进进度文案
+    // （用户要求下载弹窗显示速度；不新增事件字段，界面无需改动即可看到）。
+    let mut last_done = 0u64;
+    let mut last_at = std::time::Instant::now();
+    let mut speed_bps = 0f64;
     let staged = match framegen_core::update::stage_self_update(
         &client,
         &version,
         &cancel,
         &mut |done, total, msg| {
             let f = if total > 0 { done as f32 / total as f32 } else { 0.0 };
-            progress(id, msg, f);
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(last_at).as_secs_f64();
+            if dt >= 0.5 && done >= last_done {
+                speed_bps = (done - last_done) as f64 / dt;
+                last_done = done;
+                last_at = now;
+            }
+            let text = if speed_bps > 0.0 {
+                format!("{msg} · {:.1} MB/s", speed_bps / 1048576.0)
+            } else {
+                msg.to_string()
+            };
+            progress(id, &text, f);
         },
     ) {
         Ok(s) => s,
@@ -1983,7 +2104,12 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
 
         "clean_legacy" => clean_legacy(arg_str(args, "dir")?),
         "proxy_advice" => proxy_advice(arg_str(args, "dir")?),
-        "deploy_game" => deploy_game(
+        "framegen_cleanup_outdated" => framegen_cleanup_outdated(),
+        "deploy_game" => {
+            if let Some(m) = arg_opt_str(args, "srMode")? {
+                save_sr_mode(&m)?;
+            }
+            deploy_game(
             arg_str(args, "dir")?,
             arg_str(args, "proxy")?,
             arg_u8(args, "optimized")?,
@@ -1992,8 +2118,9 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             args.get("sr").and_then(Value::as_bool).unwrap_or(false),
             arg_opt_str(args, "engine")?,
             arg_opt_str(args, "flow")?,
-            args.get("hudless").and_then(Value::as_bool),
-        ),
+            args.get("hudless").and_then(Value::as_str).map(str::to_owned),
+            )
+        }
         "restore" => Ok(Value::String(restore(arg_str(args, "dir")?)?)),
 
         "gpu_spoof_state" => gpu_spoof_state(),
@@ -2029,9 +2156,12 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             arg_opt_str(args, "preset")?.unwrap_or_default(),
             arg_opt_str(args, "legacyPrompted")?,
         ),
+        "set_sr_mode" => set_sr_mode(arg_str(args, "mode").unwrap_or_default()),
         "set_auto_scan" => set_auto_scan(args.get("on").and_then(Value::as_bool).unwrap_or(false)),
         "sm_legacy_scan" => sm_legacy_scan(),
         "sm_legacy_prompt_done" => sm_legacy_prompt_done(),
+        "assets_legacy_prompt_done" => assets_legacy_prompt_done(),
+        "assets_update_scan" => assets_update_scan(),
         "dlss5_legacy_scan" => dlss5_legacy_scan(),
         "dlss5_legacy_prompt_done" => dlss5_legacy_prompt_done(),
         "check_self_update" => check_self_update(),
@@ -2226,7 +2356,7 @@ fn gpu_spoof_state() -> Result<Value, String> {
 fn selftest(argv: &[String]) -> bool {
     if let Some(i) = argv.iter().position(|a| a == "--deploytest") {
         if let Some(dir) = argv.get(i + 1) {
-            match deploy_impl(dir, "version.dll", 1, framegen_core::update::DEFAULT_MAX_FRAMES, "", false, "DLSS", "Middle", true) {
+            match deploy_impl(dir, "version.dll", 1, framegen_core::update::DEFAULT_MAX_FRAMES, "", false, "DLSS", "Middle", "Auto") {
                 Ok((msg, notes)) => {
                     framegen_core::log::line(&format!("[deploytest] 部署成功：{msg}"));
                     for n in &notes {

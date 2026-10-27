@@ -2005,3 +2005,45 @@ pub fn restore(dir: &Path) -> Result<String> {
     let _ = std::fs::remove_dir_all(&base);
     Ok(format!("已还原 DLSS5：{msg}{vulkan_note}"))
 }
+
+/// 部署的 DLSS5 资产是否旧于当前内置（比关键文件的指纹；效果包不参与，避免每次哈希 108 个文件）。
+pub fn is_outdated(game_dir: &Path) -> bool {
+    let Some(m) = load_manifest(game_dir) else { return false };
+    let Ok(dir) = asset_dir() else { return false };
+    let pairs: [(&str, &str); 4] = [
+        (ADDON_PREFIX, ADDON_PREFIX),
+        (ADDON32_NAME, ADDON32_NAME),
+        (HELPER_NAME, HELPER_NAME),
+        ("nvngx_dlssnr.dll", MODEL_NAME),
+    ];
+    for e in &m.files {
+        let rel = e.rel_path.replace('/', "\\");
+        let Some((_, src_name)) = pairs
+            .iter()
+            .find(|(k, _)| rel.to_ascii_lowercase().ends_with(&k.to_ascii_lowercase()))
+        else {
+            continue;
+        };
+        let src = dir.join(src_name);
+        let dst = game_dir.join(&e.rel_path);
+        if !dst.is_file() {
+            continue;
+        }
+        let (Ok(sm1), Ok(sm2)) = (std::fs::metadata(&src), std::fs::metadata(&dst)) else { continue };
+        if sm1.len() != sm2.len() {
+            return true;
+        }
+        // 小于 8MB 的文件比全量哈希；模型（几百 MB）只比大小
+        if sm1.len() <= 8 * 1024 * 1024 {
+            match (util::sha256_file(&src), util::sha256_file(&dst)) {
+                (Ok(a), Ok(b)) => {
+                    if !a.eq_ignore_ascii_case(&b) {
+                        return true;
+                    }
+                }
+                _ => return true,
+            }
+        }
+    }
+    false
+}

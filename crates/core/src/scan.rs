@@ -1385,6 +1385,12 @@ fn pe_certificate_blob(path: &Path) -> Vec<u8> {
 
 /// 判断一个 DLL 的来源身份。任何异常都返回 Unknown，不 panic。
 pub fn identify_dll(path: &Path) -> FileIdentity {
+    // **先按内置资产哈希认归属**：0.4.1 的代理虽然带证书，但签名者不是我们、
+    // 且证书链在多数机器上不可验证 → 只看证书会把它判成"别人的文件"，
+    // 部署后立刻显示"代理文件已被覆盖或丢失"。
+    if crate::deploy::proxy_is_bundled(path) {
+        return FileIdentity::ThisProject;
+    }
     let blob = pe_certificate_blob(path);
     if blob.is_empty() {
         return match std::fs::metadata(path) {

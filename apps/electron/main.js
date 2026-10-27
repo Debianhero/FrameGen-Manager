@@ -430,6 +430,8 @@ const UPDATE_FROM = (function () {
 })();
 const UPDATE_YES = DEV && process.argv.includes('--fgm-update-yes');
 const SIMULATE_UPDATE = DEV && process.argv.includes('--fgm-simulate-update');
+// 仅预览「发现新版本」弹窗（不进入下载）：--fgm-simulate-offer
+const SIMULATE_OFFER = DEV && process.argv.includes('--fgm-simulate-offer');
 const THEME = (function () {
   if (process.argv.includes('--fgm-dark')) return 'dark';
   if (process.argv.includes('--fgm-light')) return 'light';
@@ -468,6 +470,16 @@ async function offerSelfUpdate(info) {
   const version = info.latest;
   let proceed = UPDATE_YES || SIMULATE_UPDATE || !!(info && info.simulate);
   if (!proceed && !UPDATE_FROM) {
+    // 用**应用内自绘弹窗**（原生 MessageBox 与本软件风格不符，长日志还会被截断）：
+    // 主进程只把版本与完整日志发给界面，由界面决定是否下载。
+    if (mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('fgm:event:selfupdate-offer', {
+        latest: version,
+        current: info.current,
+        notes: info.notes || '',
+      });
+      return;
+    }
     const r = await dialog.showMessageBox(mainWin, {
       type: 'question',
       buttons: ['下载并安装', '稍后'],
@@ -476,7 +488,7 @@ async function offerSelfUpdate(info) {
       title: '发现新版本',
       message: '发现新版本 v' + version + '（当前 v' + info.current + '）。',
       detail: '现在下载并安装吗？\n\n安装过程会关闭本程序，装完会自动重新打开。' +
-        (info.notes ? '\n\n—— 更新内容 ——\n' + String(info.notes).slice(0, 1200) + (String(info.notes).length > 1200 ? '…' : '') : ''),
+        (info.notes ? '\n\n—— 更新内容 ——\n' + String(info.notes) : ''),
       noLink: true,
     });
     proceed = r.response === 0;
@@ -600,7 +612,94 @@ function createWindow() {
 
   mainWin.once('ready-to-show', function () { mainWin.show(); });
   mainWin.webContents.on('did-finish-load', function () {
-    if (SIMULATE_UPDATE) { setTimeout(function () { offerSelfUpdate({ latest: '9.9.9', current: app.getVersion(), simulate: true }); }, 1500); }
+    if (SIMULATE_OFFER) {
+    setTimeout(function () {
+      offerSelfUpdate({
+        latest: '9.9.9',
+        current: app.getVersion(),
+        notes: [
+          '【更新】',
+          '1. DLSS5 插件更换为 GITC 版（原生支持 DX9/10/11/12、Vulkan、OpenGL，32 位/64 位游戏；不自带 DLSS 的游戏也能部署）。',
+          '2. 内置 ReShade 效果包（无需联网下载）：标准效果 + SweetFX + iMMERSE 免费套件 + lilium HDR，共 108 个文件。',
+          '',
+          '【改进】',
+          '1. 部署/还原/卸载提示简化：成功只显示【已完成】/【已还原】/【已卸载】，完整明细在“复制”按钮里。',
+          '2. 更新窗口改为应用内自绘弹窗，长日志可滚动完整展示。',
+          '',
+          '【优化】',
+          '1. 部署提速：不再备份自己的资产、大文件快速校验、效果包增量铺、安装器哈希缓存。',
+          '2. 启动提速：旧版扫描与图标加载延后，游戏库缩略图不再跳变。',
+          '',
+          '【升级提醒】',
+          '1. 已部署旧版 DLSS5（RenoDX）的用户：请先卸载再重新部署。',
+          '2. 「彻底卸载」会删除整个 reshade-shaders 目录，自备 fx/预设请先备份。',
+          '3. 这一段是故意写长的，用来验证滚动区域是否正常工作——如果你能一路看到这里，说明日志没有被截断。',
+        ].join('\n'),
+      });
+    }, 1500);
+  }
+  // 仅预览「三类资产有更新」统一弹窗：--fgm-sim-assets
+  if (DEV && (process.argv.includes('--fgm-sim-assets') ||
+              process.argv.includes('--fgm-sim-assets-sm') ||
+              process.argv.includes('--fgm-sim-assets-dlss5'))) {
+    var simMode = process.argv.includes('--fgm-sim-assets-sm') ? 'sm'
+      : (process.argv.includes('--fgm-sim-assets-dlss5') ? 'dlss5' : 'fg');
+    setTimeout(function () {
+      if (mainWin && !mainWin.isDestroyed()) {
+        mainWin.webContents.send('fgm:event:sim-assets-legacy', { mode: simMode });
+      }
+    }, 3000);
+  }
+  // 仅预览下载弹窗（含速度示例）：--fgm-sim-download
+  // 走的是**真实进度事件**（与线上同一条渲染路径），只是数值是示例
+  if (DEV && process.argv.includes('--fgm-sim-download')) {
+    setTimeout(function () {
+      if (!mainWin || mainWin.isDestroyed()) return;
+      mainWin.webContents.send('fgm:event:selfupdate', { phase: 'start' });
+      setTimeout(function () {
+        mainWin.webContents.send('fgm:event:selfupdate', {
+          msg: '正在下载安装包 62% · 6.2 MB/s',
+          fraction: 0.62,
+        });
+      }, 400);
+    }, 2500);
+  }
+  // 仅预览「旧版帧生成」提示弹窗：--fgm-sim-legacy
+  if (DEV && process.argv.includes('--fgm-sim-legacy')) {
+    setTimeout(function () {
+      if (mainWin && !mainWin.isDestroyed()) {
+        mainWin.webContents.send('fgm:event:sim-legacy-fg');
+      }
+    }, 2500);
+  }
+  if (SIMULATE_UPDATE) {
+    setTimeout(function () {
+      // 模拟数据带一段**长日志**：用于预览新弹窗的排版与滚动效果（仅 DEV）
+      offerSelfUpdate({
+        latest: '9.9.9',
+        current: app.getVersion(),
+        simulate: true,
+        notes: [
+          '【更新】',
+          '1. DLSS5 插件更换为 GITC 版（原生支持 DX9/10/11/12、Vulkan、OpenGL，32 位/64 位游戏；不自带 DLSS 的游戏也能部署）。',
+          '2. 内置 ReShade 效果包（无需联网下载）：标准效果 + SweetFX + iMMERSE 免费套件 + lilium HDR，共 108 个文件。',
+          '',
+          '【改进】',
+          '1. 部署/还原/卸载提示简化：成功只显示【已完成】/【已还原】/【已卸载】，完整明细在“复制”按钮里。',
+          '2. 更新窗口改为应用内自绘弹窗，长日志可滚动完整展示。',
+          '',
+          '【优化】',
+          '1. 部署提速：不再备份自己的资产、大文件快速校验、效果包增量铺、安装器哈希缓存。',
+          '2. 启动提速：旧版扫描与图标加载延后，游戏库缩略图不再跳变。',
+          '',
+          '【升级提醒】',
+          '1. 已部署旧版 DLSS5（RenoDX）的用户：请先卸载再重新部署。',
+          '2. 「彻底卸载」会删除整个 reshade-shaders 目录，自备 fx/预设请先备份。',
+          '3. 这一段是故意写长的，用来验证滚动区域是否正常工作——如果你能一路看到这里，说明日志没有被截断。',
+        ].join('\n'),
+      });
+    }, 1500);
+  }
     if (blurAllowed()) {
       mainWin.webContents.executeJavaScript("document.body.classList.add('glass')").catch(function () {});
     }

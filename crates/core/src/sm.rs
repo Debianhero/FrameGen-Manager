@@ -1634,37 +1634,32 @@ fn file_version_pair(p: &std::path::Path) -> Option<(u16, u16)> {
     }
 }
 
-/// 新版 30 系组件（SmoothMotion-next）**动态链接 VC++ 2015-2022 运行时**：
-/// 游戏目录里带着旧版 msvcp140.dll、或系统里没有 14.40+ 的运行时，游戏会启动即崩。
-/// 上游安装器会直接拒绝安装 —— 这里做同样的拦截（宁可不装，也不让用户的游戏崩）。
-fn check_vcruntime(game_dir: &std::path::Path) -> Result<(), String> {
+/// 新版 30 系组件（SmoothMotion-next）**动态依赖 VC++ 2015-2022 运行库**。
+///
+/// 以前版本不够就**直接拒绝部署**，实测有用户被卡住（系统里其实能跑）。
+/// 现在改成**只提醒不拦截**：照常部署，把提醒附在结果里。
+fn vcruntime_warning(game_dir: &std::path::Path) -> Option<String> {
     let local = game_dir.join("msvcp140.dll");
-    if local.is_file() {
-        match file_version_pair(&local) {
-            Some((major, minor)) if (major, minor) >= (14, 40) => return Ok(()),
-            Some((major, minor)) => {
-                return Err(format!(
-                    "游戏目录里的 msvcp140.dll 版本太旧（{major}.{minor}）—— 新版 30 系组件需要 14.40 以上，直接装进去游戏会启动即崩。\n\n请先安装微软「Visual C++ 2015-2022 运行库」的最新版（或等游戏更新把它换成新版）再部署。"
-                ))
-            }
-            None => {
-                return Err(
-                    "游戏目录里的 msvcp140.dll 读不出可用版本 —— 新版 30 系组件需要 14.40 以上，为避免游戏启动崩溃已中止部署。"
-                        .to_owned(),
-                )
-            }
-        }
-    }
-    let ok = std::env::var_os("SystemRoot")
-        .map(|r| std::path::PathBuf::from(r).join("System32").join("msvcp140.dll"))
-        .as_deref()
-        .and_then(file_version_pair)
-        .map(|(major, minor)| (major, minor) >= (14, 40))
-        .unwrap_or(false);
-    if ok {
-        Ok(())
+    let mut ver = if local.is_file() {
+        file_version_pair(&local)
     } else {
-        Err("系统里缺少 VC++ 2015-2022 运行库（msvcp140.dll 14.40 以上）—— 新版 30 系组件需要它，否则游戏会启动即崩。请先安装微软 VC++ 2015-2022 运行库再部署。".to_owned())
+        None
+    };
+    if ver.is_none() {
+        ver = std::env::var_os("SystemRoot")
+            .map(|r| std::path::PathBuf::from(r).join("System32").join("msvcp140.dll"))
+            .as_deref()
+            .and_then(file_version_pair);
+    }
+    match ver {
+        Some((major, minor)) if (major, minor) >= (14, 40) => None,
+        Some((major, minor)) => Some(format!(
+            "提醒：检测到 msvcp140.dll 版本较旧（{major}.{minor}），新版 30 系组件建议 14.40 以上；若进游戏后闪退，请安装微软「Visual C++ 2015-2022 运行库」最新版后重试。"
+        )),
+        None => Some(
+            "提醒：没读到 msvcp140.dll 的版本（可能没装 VC++ 2015-2022 运行库）。已照常部署；若进游戏后闪退，请安装微软「Visual C++ 2015-2022 运行库」最新版后重试。"
+                .to_owned(),
+        ),
     }
 }
 
@@ -1677,8 +1672,9 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
     if !crate::util::is_writable(game_dir) {
         return Err(format!("没有权限写入 {}", game_dir.display()));
     }
+    let mut vc_warn: Option<String> = None;
     if comp == SmComponent::Rtx30 {
-        check_vcruntime(game_dir)?;
+        vc_warn = vcruntime_warning(game_dir);
     }
     let files = component_files(comp);
     let mut done: Vec<AssetFileRecord> = Vec::new();
@@ -1769,12 +1765,17 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
         .filter_map(|f| f.sha.as_deref())
         .count();
     let _ = size;
-    Ok(format!(
+    let mut msg = format!(
         "已放入解锁组件（{}，{} 个文件）{}",
         label,
         files.len(),
         if had_any { "，原文件已备份" } else { "" }
-    ))
+    );
+    if let Some(w) = vc_warn {
+        msg.push_str("\n\n");
+        msg.push_str(&w);
+    }
+    Ok(msg)
 }
 
 /// 在"这个游戏可能把组件放在哪"的几个目录里挨个找我们的解锁组件，找到就取回。
@@ -2016,3 +2017,44 @@ pub fn open_session_for_probe() -> Result<nv::Session, String> {
     nv::Session::open()
 }
 
+
+/// 这个目录里部署的 SM 组件是不是**旧于**当前内置资产？
+///
+/// 判定不看版本号，而是拿部署记录里的文件哈希和当前内置文件比 —— 20/30 系
+/// 哪一系列真变了才提示（记录缺哈希视为旧）。
+pub fn is_outdated(game_dir: &std::path::Path) -> bool {
+    let Ok(rec_path) = asset_record_path(game_dir) else { return false };
+    let Ok(text) = std::fs::read_to_string(rec_path) else { return false };
+    let Ok(rec) = serde_json::from_str::<AssetRecord>(&text) else { return false };
+    let files = if rec.files.is_empty() {
+        vec![AssetFileRecord {
+            rel: SM_ASSET_FILE.to_string(),
+            had_original: rec.had_original,
+            backup: rec.backup.clone(),
+            sha: rec.sha.clone(),
+        }]
+    } else {
+        rec.files.clone()
+    };
+    if files.is_empty() {
+        return false;
+    }
+    let comp = if files.iter().any(|f| f.rel == "normal.asi") {
+        SmComponent::Rtx20
+    } else {
+        SmComponent::Rtx30
+    };
+    let Ok(base) = asset_base() else { return false };
+    for f in &files {
+        let Some(cur) = f.sha.as_ref() else { return true };
+        let Some((_, src_rel, _)) = component_files(comp).into_iter().find(|(rel, _, _)| *rel == f.rel) else {
+            continue;
+        };
+        let src = base.join(src_rel.replace('/', "\\"));
+        let Ok(want) = crate::util::sha256_file(&src) else { continue };
+        if !want.eq_ignore_ascii_case(cur) {
+            return true;
+        }
+    }
+    false
+}

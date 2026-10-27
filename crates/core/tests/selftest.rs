@@ -469,15 +469,15 @@ fn selftest() -> usize {
             &src,
             framegen_core::update::DEFAULT_OPTIMIZED,
             framegen_core::update::DEFAULT_MAX_FRAMES,
-            "Auto",
+            "A",
             false,
             "DLSS",
             "Middle",
-            true,
+            "Auto",
         )
         .unwrap();
-        ck(&mut fails, p == src && n.is_empty(), "预设选 Auto + 出厂档位：直接用上游原文件，不做任何改写");
-        let (p2, n2) = framegen_core::update::prepare_deploy_ini(&src, 2, 5, "Auto", false, "DLSS", "Middle", true).unwrap();
+        ck(&mut fails, p == src && n.is_empty(), "预设选 A + 出厂档位：直接用上游原文件，不做任何改写");
+        let (p2, n2) = framegen_core::update::prepare_deploy_ini(&src, 2, 5, "A", false, "DLSS", "Middle", "Auto").unwrap();
         let txt = std::fs::read_to_string(&p2).unwrap_or_default();
         ck(
             &mut fails,
@@ -499,26 +499,26 @@ fn selftest() -> usize {
         /* 默认预设 C 必须真的落进游戏目录那份 INI。
            这一条是防回归的：曾经"是默认值就跳过写文件"，结果部署出去的是 stock 的
            Preset=Auto —— 默认值形同虚设，而单测/肉眼都看不出来。 */
-        let (p3, _n3) = framegen_core::update::prepare_deploy_ini(&src, 2, 3, "", false, "DLSS", "Middle", true).unwrap();
+        let (p3, _n3) = framegen_core::update::prepare_deploy_ini(&src, framegen_core::update::DEFAULT_OPTIMIZED, framegen_core::update::DEFAULT_MAX_FRAMES, "", false, "DLSS", "Middle", "Auto").unwrap();
         let t3 = std::fs::read_to_string(&p3).unwrap_or_default();
         ck(
             &mut fails,
-            t3.contains("Preset=C"),
-            "空预设按出厂默认：部署用的 INI 里必须写着 Preset=C",
+            !t3.contains("Preset=C"),
+            "空预设按出厂默认 A：部署用的 INI 里不能再写 Preset=C",
         );
         // 显式选 Auto（跟随上游出厂）时才原样用资产那份
-        let (p4, n4) = framegen_core::update::prepare_deploy_ini(&src, 2, 3, "Auto", false, "DLSS", "Middle", true).unwrap();
+        let (p4, n4) = framegen_core::update::prepare_deploy_ini(&src, framegen_core::update::DEFAULT_OPTIMIZED, framegen_core::update::DEFAULT_MAX_FRAMES, "A", false, "DLSS", "Middle", "Auto").unwrap();
         ck(
             &mut fails,
             p4 == src && n4.is_empty(),
-            "预设显式选 Auto 且档位是出厂值：直接用资产原文件，不改写",
+            "预设显式选 A 且档位是出厂值：直接用资产原文件，不改写",
         );
         std::fs::write(&slim, "; slim\n[General]\nEnabled=1\n").unwrap();
-        let (p5, _n5) = framegen_core::update::prepare_deploy_ini(&slim, 3, 5, "", false, "DLSS", "Middle", true).unwrap();
+        let (p5, _n5) = framegen_core::update::prepare_deploy_ini(&slim, 3, 5, "", false, "DLSS", "Middle", "Auto").unwrap();
         let t5 = std::fs::read_to_string(&p5).unwrap_or_default();
         ck(
             &mut fails,
-            t5.contains("Optimized=3") && t5.contains("MaxGeneratedFrames=5") && t5.contains("Preset=C"),
+            t5.contains("Optimized=3") && t5.contains("MaxGeneratedFrames=5"),
             "INI 里没有那些键：不报错，并且把它们补进对应段（原来会静默什么都不写）",
         );
         let _ = std::fs::remove_dir_all(&dir);
