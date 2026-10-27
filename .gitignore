@@ -15,3 +15,10 @@
 /apps/electron/node_modules
 /apps/electron/FrameGen Manager Sidecar.exe
 /apps/electron/build/*.png
+target/
+node_modules/
+dist-electron/
+dist-preview/
+bundled-assets/
+bundled-dlss5/
+*.blockmap

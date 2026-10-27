@@ -179,9 +179,18 @@
 ; 就等于每次更新都把用户的设置和资产清空（我们踩过这个坑，见 installSection.nsh 的注释）。
 ; electron-builder 自己的卸载器负责装目录、开始菜单项和它自己的注册表键；这里只补数据目录。
 !macro customUnInstall
+  ; 自更新暂存目录：里面可能是上次下载的安装包（最大几百 MB），静默卸载也一并清掉
+  RMDir /r "$TEMP\fgm-selfupdate"
+
   IfSilent fgm_uninst_keep
+    ; 用户数据（游戏库 / 备份 / 内置资产 ~213MB）：只在**手动卸载**时删除。
+    ; 自动更新走静默卸载，这里必须保留，否则每次升级用户的库和备份都会被清空。
     RMDir /r "$APPDATA\FrameGen-Manager"
-    ; 旧版 Inno 的卸载键（正常卸载时一并清掉，免得多出一条幽灵条目）
+    RMDir /r "$LOCALAPPDATA\FrameGen-Manager"
     DeleteRegKey HKCU "${FGM_OLD_UNINSTKEY}"
+
+    MessageBox MB_YESNO|MB_ICONINFORMATION "提示：本次卸载会删除本程序及其全部数据（游戏库、备份、已下载的内置资产）。$\r$\n$\r$\n注意：已经部署到游戏目录里的帧生成 / Smooth Motion / DLSS5 文件不会自动移除——如需清理，请先打开软件点对应页面的【还原】或【卸载】，再卸载本程序。$\r$\n$\r$\n是否继续卸载？" IDYES fgm_uninst_go
+    Quit
+    fgm_uninst_go:
   fgm_uninst_keep:
 !macroend
