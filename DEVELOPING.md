@@ -1,0 +1,842 @@
+# 开发说明
+
+面向改代码的人。用户只需要看 [README](README.md)。
+
+> **1.0.0 起界面/架构变了**：退役的 egui 版与 Tauri 版、Inno 安装器、以及根包
+> （含 `build.rs` 编图标、`src/main.rs` 的界面与自测）都已删除。本文档里如果还有
+> 描述 egui/Tauri 实现细节、旧命令行自测、旧图标流程的段落，一律只作**历史参考** ——
+> 那些代码已经不在树里了。
+
+## 技术栈与硬约束
+
+三层，各自独立：
+
+| 层 | 在哪 | 说明 |
+|---|---|---|
+| 界面 | `apps/electron/` | Electron 外壳 + 纯 HTML/CSS/JS（`ui/`），**没有前端构建步骤** |
+| 命令层 | `apps/sidecar/` | Rust sidecar（自带 `[workspace]`）：一行一条 JSON 走 stdio，只搬运参数与返回值 |
+| 业务核心 | `crates/core/` | **无 UI 依赖**，界面与 sidecar 共用；`cargo test` / `cargo clippy` 都在这里跑 |
+
+调用链：`ui/*.js → window.__TAURI__（preload 桥）→ main.js → stdio → framegen-sidecar.exe → crates/core`
+
+目标：装完即用（资产随包内置）、关闭即退出（不驻留、不轮询、不自动全盘扫描）。
+体积与启动开销现在由 Electron 决定，`< 10 MB` 那条老指标已随 egui 版作废。
+
+## 构建 / 测试 / 打包
+
+> 本文档里的命令示例统一用 **PowerShell 7（`pwsh`）** 写。它们在 Windows PowerShell 5.1 下也能跑
+> （两个引擎并存，命令名不同：`pwsh` = 7、`powershell` = 5.1），但 7 更省事：UTF-8 不用 BOM、
+> `Invoke-RestMethod` 发 JSON 不会退化成 ANSI。仓库里带中文的 `.ps1` 仍然保留 BOM —— 那样两边都安全。
+
+    # 1) 业务核心：测试 + 静态检查（工作区根只有 crates/core）
+    cargo test
+    cargo clippy --all-targets -- -D warnings
+
+    # 2) 命令层（自带 workspace，单独编译）
+    cargo build --release --manifest-path apps\sidecar\Cargo.toml
+
+    # 3) 界面：Electron，无构建步骤；开发期直接跑
+    #    （打包脚本里能看到它怎么被 electron-builder 调起来的）
+    <node.exe> apps\electron\node_modules\electron\dist\electron.exe apps\electron
+
+    # 4) 出安装包（版本校验 → sidecar 冒烟 → electron-builder NSIS → SHA256）
+    pwsh -ExecutionPolicy Bypass -File packaging\build-release.ps1 [-Node <node.exe>]
+
+版本号只有一个真源：`crates/core/Cargo.toml`（core 的 `SELF_VERSION` 取自它）；
+打包脚本会校验它与 `apps/electron/package.json` 一致，对不上就拒绝出包。
+
+### 依赖上的坑（都已在 manifests / .cargo 里规避）
+
+1. **reqwest 默认 TLS 会拉 aws-lc-sys**（要 CMake + NASM）→ 用 native-tls（Windows 走 schannel）。
+2. **`.cargo/config.toml` 开了 +crt-static**，去掉 vcruntime140.dll 依赖。
+3. **electron-builder 的二进制走国内镜像**（`ELECTRON_MIRROR` / `ELECTRON_BUILDER_BINARIES_MIRROR`，见打包脚本）。
+4. **apps/sidecar 是它自己的 workspace**：不改根清单，也不与根共享 target/。
+
+## 自测
+
+测试住在 **`crates/core/tests/selftest.rs`**（1.0.0 从退役的 egui 版 `main.rs` 搬过来）：
+
+    cargo test                     # 三个测试：sourcetest / selftest / deploytest
+    cargo test -- --nocapture      # 看每条 [PASS]/[FAIL] 明细
+
+- 三个测试各自把 `FGM_DATA_DIR` 指到系统临时目录下的独立子目录，**不碰用户真实数据目录**。
+- `selftest` 覆盖：Steam 定位、游戏扫描、反作弊判定、上游更新检查、显卡路由、INI 档位改写、
+  图形 API/引擎识别、路径与版本号工具、导入的版本对照等。
+- `deploytest` 覆盖部署/备份/还原/入口冲突/已装过本项目 的端到端行为（用临时目录构造数据）。
+- 搬迁时删掉了 3 个耦合退役界面的小节（图标 / 手动导入校验 / 旧缓存兼容）与联网类自测
+  （download / cancel / speed）—— 前者测的是 egui 版的资产行状态机，后者本来就不在 CI 里跑。
+- CI（`.github/workflows/ci.yml`）跑：`cargo clippy --all-targets -- -D warnings`、`cargo test`、
+  以及 sidecar 的 clippy + release 构建。
+
+另有几个**只给开发排查**的 sidecar 命令行开关（不进界面）：
+
+    framegen-sidecar.exe --dlss5test <目录> [api] [--restore]   # DLSS5 部署/还原链路
+    framegen-sidecar.exe --gpuspoof-apply <型号> <结果文件>      # 提权子进程入口
+    framegen-sidecar.exe --gpuspoof-restore driver|backup <结果文件>
+
+## 调试开关（环境变量）
+
+正常启动不受影响，只在排查 / 截图时用：
+
+| 变量 | 作用 |
+|---|---|
+| `DLSSG_AUTOSCAN=1` | 启动就扫一次游戏库 |
+| `DLSSG_SPOOF_OPEN=1` | 显卡名称伪装卡片默认展开 |
+| `DLSSG_NO_CJK_FONT=1` | 不加载中文字体，用来量化字体占多少内存 |
+| `DLSSG_FAKE_NEWVER=0.9.9` | 假装远端有新版本，验证标题栏那个下载入口（本地远端同版本时看不到） |
+| `DLSSG_AUTOSPEED=1` | 启动就跑一次测速，省得截图脚本去点按钮 |
+| `DLSSG_IMPORT=<zip>` | 启动就自动跑一次手动导入（多个用 `;` 分开），省得截图 / 排查时每次过一遍文件对话框 |
+
+界面自测只能靠截图像素分析（本机没有可自动化的 GUI 断言框架），所以这些开关很关键。
+**注意**：分析截图时要按窗口标题 FrameGen Manager 找窗口 —— debug 版是控制台程序，
+会额外有一个标题为 exe 路径的控制台窗口，先出现而且尺寸不小，很容易抓错。
+
+## 打包
+
+    pwsh -ExecutionPolicy Bypass -File packaging\build-release.ps1
+
+会自动从 Cargo.toml 读版本号，产出 **dist\FrameGen-Manager-v<版本>-setup.exe** 和 SHA256SUMS.txt。
+装了 Inno Setup 6 的话还会顺带出安装包。
+
+**只发安装版**（用户要求）：以前还会组装一份便携 zip（electron-builder 的 win-unpacked 打包），
+现在这一步已经从脚本里去掉 —— 便携版没有 installed.txt 标记、数据落在程序目录，
+"绿色版"那条路不再发布。运行时仍然保留"没有标记就当便携"的兜底（开发期直接跑 electron 时靠它）。
+
+打包前先跑一遍 release 自测（**不过就不出包**），出包后再查安装包体积（**≥ 10 MB 直接报错**）。
+这样「exe 静默没图标」「安装包悄悄变胖」都流不出去。
+
+内存单独量（会开一个窗口，所以没并进打包流程）：
+
+    pwsh -ExecutionPolicy Bypass -File packaging\check-memory.ps1
+    pwsh -ExecutionPolicy Bypass -File packaging\check-memory.ps1 -BudgetMB 60
+
+它启动 release 版、读「私有工作集」（任务管理器「内存」列那个口径），超预算返回 1。
+
+**注意**：packaging 下的 .ps1 和 .iss 必须保持 **UTF-8 BOM**，
+否则 PowerShell 5.1 和 Inno Setup 会按 ANSI 解码，中文变乱码并报语法错。
+
+## 实测指标（历史：egui 版实测数据）
+
+> ⚠ 下面这张表与字体那一段是 **egui 版**的数据（安装包 4.69 MB、exe 7.16 MB 之类），
+> 1.0.0 起界面换成 Electron + sidecar，这些数字都不再适用，保留只为对照「当年为什么那么做」。
+> 现在的体积/内存该测 `FrameGen Manager.exe` + `framegen-sidecar.exe` 两个进程。
+
+| 指标 | 目标 | 实测 |
+|---|---|---|
+| 安装包体积 | < 10 MB | 4.69 MB |
+| exe 体积 | —— | 7,160,832 字节 |
+| exe 运行库依赖 | 不要求用户装 VC++ | 17 个系统 DLL，无 vcruntime140.dll |
+| 启动 | < 1 s | 约 170 ms |
+| 关闭即退出 | 是 | 是 |
+| 内存 | < 60 MB | 私有工作集约 53 MB，达标 |
+
+内存是怎么降下来的：中文字体原本占两份 —— `std::fs::read` 把 simhei.ttf（9.3 MB）
+读进堆，epaint 的 `blob_from_font_data()` 又对 `Cow::Owned` 的数据整份复制一次
+（就是里面那句 `data.clone().font`），合起来约 18.6 MB。现在字体改成**只读映射**
+（`map_font_readonly()`）并以借用数据交给 egui（`FontData::from_static`）：
+那次复制没有了，而且内核只按需调入真正用到的字形页 —— 字体里 9.29 MB 是 `glyf` 轮廓，
+界面实际只用得到几百个汉字。字体的边际成本从 18.6 MB 降到 0.4 MB。
+设 DLSSG_NO_CJK_FONT=1 可跳过字体加载，用来量化这部分开销。
+
+口径提醒：这里的「内存」指**私有工作集**（任务管理器「内存」列那个数），
+不是 `Process.WorkingSet64` —— 后者含共享 DLL 页，会虚高 30 MB 左右。
+要用 `Get-CimInstance Win32_PerfFormattedData_PerfProc_Process` 的
+`WorkingSetPrivate` 字段读才可比。量它请用 `packaging\check-memory.ps1`，别手抄数。
+
+## 上游（sdli1995/dlssg_for_sm86）的两个事实
+
+1. **上游没有 GitHub Releases，也没有 Tags。** 文件直接提交在 main 分支根目录。
+   所以「查 Releases」这条路本来就不存在；变更指纹改用 raw.githubusercontent.com
+   的 ETag —— 对文件发一次 HEAD 就能拿到，且不占 API 配额。
+2. **备用代理 DLL 不是 version.dll 改个名**，而是导出名不同的独立二进制（体积都不同）。
+   选了非默认入口就必须下载对应那一个。
+3. **上游 0.3.0 换过一次仓库布局**（native 模式改回代理模式），一次断过我们好几处：
+   签名证书、备用入口目录名、INI 键、版本号写法全变了。详见下面「上游 0.3.0 改版」一节。
+
+## 上游 0.3.0 改版（native -> 代理模式）
+
+上游把项目从 native 模式改回代理模式，版本号 0.3.0，旧的 native 版挪进了
+archive/0.2.4/，仓库根目录现在就是新版。这一版变了五处，每一处都会让老代码出错：
+
+| 变了什么 | 老代码的假设 | 现在的样子 | 不改会怎样 |
+|---|---|---|---|
+| 签名证书 | DLSSG Native Project | DLSSG for SM86 | 所有下载被自己的签名校验拒掉 |
+| 备用入口目录 | altnative/ | alternatives/ | 探测 404，备用入口永远下不到 |
+| 备用入口名单 | winmm/dinput8/winhttp/dxgi | winmm/dbghelp/dinput8/dxgi/d3d12 | winhttp 已删、dbghelp/d3d12 漏掉 |
+| INI | 有 Router / KernelImage / HardwareBilinear | 精简成 5 段约 2 KB，没有 Router | SM75 改写抛错，RTX 20 用户部署直接失败 |
+| README 版本号 | "# DLSSG Native 0.2.4" | "# DLSSG for SM86（Proxy）- 0.3.0 版本" | 界面「上游版本」显示未知 |
+
+### 0.3.3：架构改写提前 + 档位 1 去掉「跳过重复真实帧拷贝」
+
+* RTX 20 / 30：向游戏改写显卡架构的动作**提前到游戏启动时**，并改报 **RTX 50**。Streamline 2.8
+  的游戏（如《最终幻想 7 重生》）此前在启动阶段就判定「本显卡不支持 DLSS-G」并卸掉帧生成插件
+  （issue #509 / #528）；这一版赶在那之前装好改写，游戏内的 3X / 4X / 6X 选项也按 RTX 50 放开。
+  **所以文档里"某某游戏要改注册表显卡名"的说法改成了"先试最新版"**（也顺带降低用户封号风险）。
+* `Optimized=1` 不再跳过同一组内重复的真实帧拷贝（`SkipRepeatedRealCopy`，各档位
+  **默认关**，要开得手写 `1`）。该项从未在真实游戏里验证过，0.3.2 上有画面闪烁报告
+  （issue #532）；档位 `1` 的画面仍与官方逐位一致 → 我们在「部署」卡片写
+  `Optimized` / `MaxGeneratedFrames` 两个键的逻辑**完全不受影响**（出厂值仍是 1 / 3）。
+* 核对过：目录结构（`310.1/` 仍在，27,971,360 B）、出厂 INI 的五个段落与全部键、
+  版本号写法（`# DLSSG for SM86（Proxy）- 0.3.3 版本`）、自签证书指纹
+  （`85BA6676…18E6`）**都没变**；`version.dll` 29,996,320 B（0.3.2 是 29,975,840 B）。
+
+### 0.3.2：优化等级 0~3、内核重写、docs 补齐
+
+* 310.9 版的部分推理内核被重写，生成画面与官方 DLSS-G **逐位一致**（不再有损），另有 0~8% 加速。
+* 出厂 INI 的 `[FrameGeneration] Optimized` 从布尔变成 **0~3 四级**：0 原厂不加速 /
+  1 全部加速且逐位一致（**出厂默认**）/ 2 再加有损图像内核 / 3 全部有损；
+  `MaxGeneratedFrames` 仍是 3 = 4X、5 = 6X。
+* 因此「部署」卡片加了两个下拉（`App::fg_optimized` / `App::fg_frames`，存进配置），
+  部署时由 `update::prepare_deploy_ini()` 把这两个键写进**部署到游戏目录的那一份**
+  （`dlssg_sm86.deploy.ini`），资产目录里的原文件不动；**两个都是出厂默认时直接返回原文件、
+  一个字都不改**。INI 里找不到键时不报错，照旧部署并在说明里写一句。
+  （注意：`AppConfig` 的 Default 是**手写**的 —— 这两个字段的业务默认是 1 / 3，不是 u8 的 0。）
+* 上游把 `docs/INSTALL.md` 补上了（0.3.0 / 0.3.1 时 README 里那个链接是坏的），进阶键
+  （Router / SM75Family / KernelImage / SpoofArchToGame / 抓取诊断）现在有官方文档可看。
+
+### 0.3.1：20 系和 30 系共用同一套文件（因此删掉了「版本切换」）
+
+上游 0.3.1（2026-09-15）把 RTX 20 系（Turing / SM75）救回来了：根目录那份 `version.dll`
++ 出厂 `dlssg_sm86.ini` **两种卡都能用，一个键都不用改**（内核族按物理显卡自动选）。
+上游 README 也写明：0.3.0 在任何 RTX 20 上都开不了帧生成（它向 NGX 报告的架构不是真实
+架构，核心直接拒绝，issue #491 / #492）。
+
+于是本工具**删掉**了这些（老代码里那套「给 20 系切 310.1 版」的做法全部作废）：
+
+* 配置里的 `legacy_3101` 开关、`310.1/` 那套下载路径（`LEGACY_PREFIX`、
+  `proxy_repo_path` 的第二个参数、`ini_repo_path`）
+* 「部署」卡片里给 SM75 机器显示的「改用 310.1 版」按钮，以及 `GpuRoute::Sm75` 的特殊处理
+  （这条路由还在，只用来显示「SM75 路由」和在闸门上区分型号）
+* **按显卡改写 INI 的整个子系统**（`ini_get` / `ini_set` / `IniPlan` / `prepare_deploy_ini*`）：
+  出厂 INI 一个键都不用改，部署时直接复制资产里那份原文件
+* 导入压缩包时「按在用的版本挑哪一套同名文件」：现在只按路径排序，
+  根目录最新版（0）> `310.1/` 老目录（1）> `archive/` 归档包（2），见 `importer::build_rank`
+
+**一次性迁移**：曾经切到 310.1 版的用户，本地那份 `version.dll` 是旧的。探测落到镜像时
+指纹不可信，「已是最新」的判定会退化成「比字节数」，旧文件正好和旧记录对得上 → 静默跳过
+下载。所以启动时读一次老配置（`util::config_had_legacy_3101()`），读到就
+`update::clear_download_records()` 清空下载记录，逼它重下一份正确的。
+
+路径统一由 `update::proxy_repo_path(proxy)` 决定，入口名单只有一份 `scan::PROXY_ALL`
+（`PROXY_PRIORITY` / `PROXY_HISTORIC` 是它的两个视图）—— 要改只动这几处，别再散落硬编码
+（0.7.0 那种写死名单的写法正是那次集体 404 的原因）。老名字（winhttp.dll）留在
+`scan::PROXY_HISTORIC` 里，只用于「这算不算代理入口」的判断。
+
+**GTX 16 系仍然单独成一条路（`GpuRoute::Gtx16`）并且禁止部署**：1630 / 1650 / 1660 同样
+没有 Tensor Core，DLSS 帧生成在硬件上就跑不了，换哪个版本都没用。它**不能**落到
+`GpuRoute::Sm75`，否则界面会给出一条根本无效的建议。`scan::classify_gpu()` 里 GTX 16 的
+判断必须排在 RTX 20 前面。
+
+版本号解析（`update::extract_version`）先按 "Native " 锚点找，找不到再取首行第一个
+「带小数点的数字」，两种写法都能认；`--selftest` 里有这两种格式的断言。
+
+## 实现说明
+
+### 自动判断代理入口
+
+每个入口（version.dll，以及备用目录里的 winmm / dbghelp / dinput8 / dxgi / d3d12）
+都是同一个 Mod，选错只会不生效，不会损坏游戏。判断依据不是游戏名字，而是**导入表**：Windows 加载 DLL 时优先搜索 EXE
+所在目录，所以只要游戏会加载的某个模块导入了 version.dll，把代理放进去就会被加载。
+
+判定顺序：
+
+1. 目录里已有本项目的文件 -> 直接复用那个入口（避免同时存在两个代理）
+2. 排除被第三方占用的入口
+3. 按导入表匹配，优先级见 scan::PROXY_PRIORITY：
+   version -> winmm -> dbghelp -> dinput8 -> dxgi -> d3d12
+   （0.3.1 起 20 / 30 系共用这一份清单，不再区分版本）
+4. 都判不出来就用上游默认 version.dll，并在界面上明确说明「未能自动判定」
+
+PE 解析是**随机读取**的：先读头部拿节表，再按节表把 RVA 换算成文件偏移 seek 过去读。
+「读文件前 N MB」这种实现对 232 MB 的 TslGame.exe 和 457 MB 的 HogwartsLegacy.exe
+完全失效。另外必须同时读**延迟导入表**（DataDirectory[13]），否则会漏掉大部分依赖。
+
+### 识别用户是否已经手动装过
+
+本项目的 DLL 都用自签证书签名，这是比文件名或体积可靠得多的身份标记。工具会读目标
+目录里已有文件的 PE 证书表（DataDirectory[4]，注意这一项的 RVA 直接就是文件偏移）：
+
+- **两个证书名都算「本项目的文件」**：DLSSG Native Project（0.2.4 native 包）和
+  DLSSG for SM86（0.3.0 代理包）。上游 0.3.0 换了证书而代码只认旧名字，结果所有
+  下载都被自己的校验拒掉 —— 用户看到的正是「判定为其他签名者，已丢弃并换源重试」。
+- 其他签名者 / 无签名 -> 第三方文件，拒绝覆盖
+
+### 游戏图标
+
+从**渲染 EXE** 提取（Windows Shell API + GDI），不管游戏来自 Steam、Epic 还是手动添加
+都能取到。注意：SHGetFileInfoW 遇到混合分隔符路径（d:/steam\...）会直接失败，
+而 Steam 注册表里的 SteamPath 就是带正斜杠的，所以要先归一化。
+
+### 下载与备用源：正常流程 0 次 API 调用
+
+**这是本模块最重要的一条设计约束：正常使用全程不碰 api.github.com。**
+
+原因：未登录的 GitHub API 按 IP 每小时只有 60 次配额。很多用户走加速器 / 代理，
+出口 IP 是共享的，配额会被别人吃光，于是「检查更新」「下载资产」直接失败，
+而用户自己完全无从排查。所以整套流程都换成了没有配额的通道：
+
+| 用途 | 原来 | 现在 |
+|---|---|---|
+| 变更指纹 | contents API 的 blob sha（1 次/目录） | 对 raw 发 HEAD 读 ETag（0 次） |
+| 下载 Mod 文件 | raw.githubusercontent.com | 同左（0 次） |
+| 下载运行库 | releases API 查资产列表 | 直拼 releases/download/{tag}/{asset}（0 次） |
+
+几条实测结论，别凭直觉改：
+
+* raw 的 ETag 是 64 位十六进制，但它**不是内容的 SHA-256**，也和 git blob sha1 对不上
+  （sha256(blob N\\0+content)、sha256(blob N+content)、sha256(hex(blob sha1)) 三种都试过，
+  全不匹配）。它是 GitHub 内部的不透明哈希，**只能当变更指纹，不能当内容哈希算**。
+* 这个 ETag 在 HEAD 和 GET 上一致；**但只有部分镜像会透传它**。ghproxy.net 会
+  （连 X-Served-By 都带过来），而 **gh-proxy.com 不会** —— 走后者时 ETag 比对会落空，
+  只剩 Content-Length 校验。所以下面「镜像优先就必须配签名校验」是一条硬要求。
+* 运行库的资产名（nvngx_dlssg_310.9.1.zip 等）写死在 DLSS_RUNTIME 表里；
+  上游改名 / 删包导致直链失败时，才回退去问一次 releases API。
+
+#### 镜像排序，以及「快」和「可信」的分工
+
+`MIRRORS` 按**实测速度**排（2026-09，拉 raw 上的 version.dll，8 MB 样本，跑两轮）：
+
+| 源 | 速率 |
+|---|---|
+| gh-proxy.com | 3.9 ~ 5.2 MB/s |
+| ghfast.top | 0.5 ~ 0.9 MB/s |
+| ghproxy.net | 0.02 ~ 0.16 MB/s（原来内置的是它） |
+| raw 官方直连 | 0.00 ~ 0.06 MB/s（基本不通） |
+
+48 MB 资产：ghproxy.net 要十几分钟，gh-proxy.com 十几秒。随时可以用
+`cargo run -- --speedtest` 复测 —— 它走的就是界面那条生产路径。
+
+难点是**快的不可信、可信的不快**，所以探测和下载的优先级是**反的**：
+
+* **探测（HEAD，取 ETag 指纹）走官方优先。** 指纹从 GitHub 自己那里拿才可信；
+  HEAD 很小，官方 raw 就算链路很慢也能秒回。
+* **下载走镜像优先。** 镜像快几十倍，内容再拿官方指纹校验。
+
+gh-proxy.com 不转发 ETag，等于下载侧少了一道校验，所以 `download_auto()` 强制
+要求调用方传 `verify` 回调，并按文件类型分开处理：
+
+* **代理 DLL（15 MB，prefer_mirror = true）**：下完必须
+  `identify_dll().is_ours()` —— 这些 DLL 都由上游自签（两个证书名，见上文），
+  镜像伪造不出来。签名不过就丢弃并换源重试。
+* **ini（2 KB / 581 B，prefer_mirror = false）**：走官方优先。官方再慢也是瞬间，而且**会**
+  返回 ETag，比对能真正生效。ini 没有签名，这是它唯一的校验手段。
+
+界面上的「改用备用源重试」现在只是手动兜底；正常路径会自动多源回退，不用用户点。
+
+**源偏好是有记忆的**：`try_sources()` 记住每个「主机 + 用途」上一次哪个候选成功，
+下次从它开始试（`PREF` 四个槽：raw / github.com × 探测 / 下载）。
+不记的话，release 直链用的 github.com 每次都要先干等连接超时才轮到镜像。
+
+**探测请求必须带单个请求超时。** raw 现在会**间歇性卡十几秒** —— 同一个 HEAD 连测三次：
+19.4s 超时 / 0.6s 成功 / 19.8s 超时。所以「官方优先」只在它答得快时才有意义：
+每个 HEAD 限 6 秒，`fetch_version()` 限 10 秒，超了就换镜像。
+只调连接超时（`connect_timeout`）是没用的 —— 连接建起来了、响应不来，那就卡到总超时。
+实测「取指纹」这一段从 **29.6s 降到 4.8s**。
+
+`fetch_version()` 也走多源回退：它只是给界面显示一个版本号，不该因为 raw 卡住而
+把整个「检查更新」拖住。
+
+### 下载慢：让慢源下完，只在卡死时换源
+
+**先记一条反常识的结论：不要再按速度换源。** 曾经做过「看门狗」—— 下载中一旦实测
+平均速率低于 `min_speed_kbps`（默认 300 KB/s）就立刻放弃这个源换下一个。
+结果有用户反馈「下载到四分之一就断了」：他家线路就是 200 多 KB/s，每个源都被判成
+「太慢」，换完一圈还是下不下来。现在这套阈值逻辑整组删掉了。
+
+**镜像的快慢按用户线路和时间剧烈变化。** 实测同一台机器、同一个 gh-proxy.com，
+相隔一小时能从 6.9 MB/s 掉到 0.34 MB/s；同一时刻 ghfast 0.06、ghproxy 0.026。
+原来的逻辑只记「上次哪个源成功了」，根本察觉不到这种变化，用户就得陪着慢源
+一直等到下完 —— 这就是「备用源也慢」的真正原因。
+
+现在只保留两件事：
+
+1. **实测速率记忆**（`source_speed.json`，在数据目录）。下载成功和手动测速都会记下
+   这个源的实测 KB/s。排序见 `rank_by_scores`：确认够快的在前（越快越前）、没测过的
+   居中、确认太慢的垫底。记录 6 小时后过期 —— 镜像速率变得比这还快。
+   **它只决定先试谁，不决定放弃谁**（排序分界线是 `GOOD_SPEED_KBPS`）。
+2. **测速 + 用户自己选**。界面上「上游资产」卡片里有「测速」，对每个候选源拉 512 KB，
+   把实测速度列出来让用户点。**为什么让用户选而不是程序自动定**：镜像快慢是按用户
+   自己的线路变的，开发者这边测出来的名次对他们没有参考价值。
+
+选中的源排最前面，其余镜像仍然兜底（不是「只用它」）。
+
+**防卡死靠客户端超时，不靠速度阈值。** reqwest 的阻塞读每调用一次就重新计时
+（`blocking::Response::read` 里是 `wait::timeout(..., timeout)`），所以客户端上那个
+300 秒其实是「单次读取」的上限：只要服务器还在往外吐字节，多慢都能慢慢下完；
+连续 300 秒一个字节都没有才判这个源死了、换下一个。
+
+因为不再有「太慢」这个失败原因，`download_auto` / `download_with_mirror` 里那套
+「全部源都太慢 -> 放宽速度要求再走一遍」的第二遍也一并删了 —— 两遍已经完全一样，
+留着只是把同一份文件下两次。
+
+回归用例在 `--sourcetest`：本地起一个约 220 KB/s 的慢源，4 MB 的文件必须完整下完、
+字节数要对。这条就是为了钉死「慢源被掐」这个毛病。
+
+**并发分片为什么没做**：实测过，在当前链路上反而更慢（单流 2 MB = 1.04 MB/s，
+4 × 512 KB 并发 = 0.46 MB/s）。三个镜像都支持 HTTP Range（206），技术上可行，
+但数据说明瓶颈不在单连接被限速，而在镜像侧限速或链路本身，所以不做。
+
+**已知没覆盖的**：服务器以极低速度持续吐字节（比如 1 KB/s）时不会自动放弃，会一直
+慢慢下 —— 这是「速度慢就慢吧」的刻意取舍，用户可以随时点取消。
+
+### 游戏库缓存（下次打开直接显示）
+
+扫描很贵：找渲染 EXE 要遍历游戏目录、反作弊要扫一遍、图标要从 EXE 里提。所以结果存成
+game_library.json（和配置文件放一起，便携版就在 exe 旁边）：条目 + 渲染 EXE 路径 +
+反作弊等级 + 上次扫描时间。启动时读它、重建列表（部署状态和图标现算，很快），
+**不做后台轮询** —— 想刷新还是点按钮。
+
+* 扫出来的条目：安装目录不在了就丢掉（游戏卸载了）。
+* 手动条目（用户自己「存到游戏库」的）：目录不在也留着，让他自己决定要不要移除
+  （可能只是移动硬盘没插）。
+* 两者分开存两个数组：**重新扫描只覆盖 scanned，绝不碰 manual**。
+* 手动条目的部署目标就是用户选的那个目录本身，不去猜「渲染 EXE 在哪一级」；
+  手动条目即使找不到渲染 EXE 也允许部署。
+* **每次部署 / 还原之后必须重算每一行的部署状态**（refresh() 里那段循环）。行上的徽章是
+  建行时算出来的，不重算就会停在部署前：用户明明部署成功（左侧卡片已是「已部署」），
+  行上却还写着「非本工具部署」，看上去就是部署没生效 —— 有用户报过。
+  部署 / 还原的日志里现在会记「备份记录可读=」，这类投诉看一行就能定论。
+
+### 手动导入（网盘救急）与严格签名校验
+
+**为什么要有**：镜像和 raw 全慢到不可用时（实测有 0.02 MB/s 的），程序自己下不动约 95 MB 资产。
+所以给一条绕开网络的路：用户拿 zip，程序负责解压 + 校验 + 落位。
+
+* `importer::stage()` —— 用 `update::zip_list()` / `zip_extract_to()` **流式**解
+  （不能整包读进内存：上游源码包一百多 MB），按**文件名**递归认（大小写不敏感）：
+  7 个代理入口 + ini + 2 个运行库，其它文件一律忽略。认出来的逐个校验。
+* `verify::verify_file()` —— 严格版，和 `scan::identify_dll()` 分工不同，**别混用**：
+  * `identify_dll` 宽松，只回答「能不能安全覆盖」（证书里出现签名字符串就算本项目的）。
+    它**能被自签一张同名证书骗过去**，所以不能拿来做导入校验。
+  * `verify_file` 用 `WinVerifyTrust` 验内容（改一个字节就变 `TRUST_E_BAD_DIGEST`）+
+    `CryptQueryObject` 取**真正签名的那张证书**（不是证书包里随便一张 —— 否则塞入作者证书、
+    再用别人私钥签名就能骗过去）再比 SHA-1 指纹。
+    NVIDIA 走公开 CA：`Trusted` + 主体是 NVIDIA 即可（换证书不用改代码）。
+  * 两个指纹常量在 `verify.rs` 顶部；作者换证书时，那种文件会落到「弹窗可继续」那一档，不会挡死。
+* ini 没签名，只能结构检查（`importer::ini_sanity`）。
+* 策略：签名可信 → 静默；否则 → 弹窗（默认跳过可疑项，可强行导入，选择写日志）。
+* 导入的文件在 `update_state.json` 里标 `imported: true`：判定「已就绪」只比文件在不在、
+  大小对不对，**不再要求官方指纹** —— 用户就是因为下不动才导入的，否则会又去下一遍。
+* **导入时给一张「版本对照」**：这个压缩包哪一版 / 本机已装哪一版 / 上游最新哪一版；
+  包比上游旧就明确提示去更新资产包。三个号码缺一不可 —— 「上游有更新」说的是上游，不代表
+  用户手里这个包是新的；反过来也一样。
+  * **包里的版本**从包内的 README 标题行或 INI 第一行注释读：0.2.4 那代写在 INI 里
+    （`; Native 0.2.4.`），0.3.0 起 INI 不带版本号、只能看 README。上游源码包同时带根目录和
+    `archive/0.2.4/` 两套 README，所以版本候选**也带排名**，取和「真正会被导入的那套文件」
+    同排名的那个（`importer::pick_pack_version`）—— 否则会出现「装的明明是当前版、
+    界面却说这是 0.2.4」。
+  * **本机已装资产的版本**只能读本地 INI，0.3.0 起读不出来 → 界面如实写「未知」，
+    不要编一个数字挂在那里。
+  * **上游那一问**走 `update::fetch_version_quick()`：官方地址 + 第一个镜像、各 5 秒，
+    **有上限**（不能让网络把导入卡住）；查不到就退回 `update_state.json` 里上次检查的号码，
+    并在界面上注明「上次检查的结果」。
+  * 自测用构造数据验这套判定（0.3.0 的包 vs 0.3.5 的上游必须提示「比上游旧」），不依赖网络。
+  * 老版本包（0.2.4 native / 0.3.0）**不拦** —— 那是「网盘救急」这条路的正当用法。
+    但要注意落差：0.2.4 的 INI 里**没有** `Optimized` 键，界面上的「优化等级」档位
+    在那份包上写了也不生效（`prepare_deploy_ini` 会照常部署并在说明里写一句）。
+* 自测：`--importtest <zip>`（只解包 + 校验 + 打印包里的版本，不写资产目录）、
+  `--verifytest <文件>`（打印签名结论、签名者、证书指纹）。
+
+### 下载源列表（为什么改成一行下拉）
+
+平铺按钮在 3 个源时刚好，6 个以上会折成好几行 —— 改成一行 `ComboBox`，「自动」时把实测最快的那个
+写进标题。源列表 2026-09-15 用 `--speedall` 实测两轮共 27 个候选，活下来的只有 6 个（写进
+`MIRRORS` 并注明实测速度）；**死源不留** —— 每次下载都要为它空等一次超时。**下载源只能从这几个
+里挑**（「自动」或指定其中一个），手填地址那个功能已经删掉；`update::normalize_source()` 只负责
+给选中的前缀做归一化（补结尾斜杠）。
+
+### 两个 DLSS 运行库：缺才补，已有不动
+
+**用户反馈**：用工具部署后帧生成不生效，手动只复制「代理 DLL + INI」进游戏目录却正常。
+
+原因就在这：`do_deploy` 以前**无条件**部署 4 个文件（代理 + INI + nvngx_dlssg.dll + nvngx_dlss.dll），
+而目标目录已有同名文件时，只要对方是 NVIDIA 签名就**直接覆盖（先备份）**。可很多游戏自带的那两个
+运行库是跟它自己的 DLSS / Streamline 版本配套的，覆盖之后就对不上套了 —— 而上游 0.3.0 的说明里
+本来也只要「代理 DLL + INI」（运行库/模型/后端都内嵌在代理里）。
+
+现在：`update::runtime_deploy_plan(target)` 返回 (已有的, 缺的)，**已有的一个都不动**、
+缺哪个补哪个，界面上写明「游戏目录已有 xxx，用游戏自带的那份」（`deploy_notes`），
+状态栏也会带上这句。下载行为不变（两个运行库照样下载到资产目录备用）。
+
+实测（霍格沃茨目录，两个运行库是上次部署留下的）：
+
+```
+[04:38:52] 游戏目录已有 nvngx_dlssg.dll，用游戏自带的那份（不覆盖）
+[04:38:52] 游戏目录已有 nvngx_dlss.dll，用游戏自带的那份（不覆盖）
+[04:38:52] 已部署 2 个文件 -> …：version.dll、dlssg_sm86.ini
+（文件时间：ini 与 version.dll 更新了，两个运行库保持原时间 → 确实没被碰）
+```
+
+自测里 `--selftest` 有三条断言覆盖：两个都缺 → 都补；只有一个 → 只补另一个；两个都有 → 一个都不动。
+
+### 日志只留两个文件（framegen.log / framegen.prev.log）
+
+早先是「一次运行一个带时间戳的文件，保留 10 个」，用户反馈说点开一次多一个、看着乱；
+现在改成**固定名字滚动**（`log::rotate`）：启动时把上一次那份改名成 `framegen.prev.log`、
+更早的删掉、本次写 `framegen.log` —— 目录里永远最多两个文件。
+
+为什么不只留一个：用户常常先关掉程序、过一会儿才来反馈，只留一个的话出问题那趟已经被
+这次启动覆盖了。留「上一次」刚好够查又不堆积。
+
+升级兼容：老版本留下的 `framegen-<时间戳>.log` 在第一次滚动时会把**最新的一份**留成
+`framegen.prev.log`，其余删掉 —— 用户升级上来目录立刻从十几个变成两个，而不是继续留着
+（实测：11 个 → 2 个）。`log::rotate` 抽成独立函数就是为了自测能直接验这三种情况
+（升级清理 / 正常滚动 / 连续滚动不堆积）。
+
+### 扫描的日志（用户报「扫不出来」时靠它）
+
+`scan_all_notes()` 把每个平台的过程说明既写进日志、也带回界面的操作日志：
+
+* 每个 Steam 根目录**是从哪来的**（HKCU SteamPath / HKLM 32 位或原生 InstallPath /
+  SteamExe / 卸载项 InstallLocation / 默认路径）。以前只读两个注册表键，装了两份 Steam
+  或键位置不同的机器会整库漏掉。
+* 每个根目录下有几个库目录（来自 libraryfolders.vdf）。**读不了库清单会明确写出来** ——
+  这是「只扫出几个游戏」最可能的成因：读不到库清单就只知道默认库，其它盘的游戏全消失，
+  而旧代码是静默的。
+* 每个被跳过的条目和原因：运行库、目录不存在、清单读不了（含具体文件名）。
+* Steam 运行库过滤改成「固定名 + 版本号前缀」，**不能再用子串匹配**：早先名字里含
+  proton 就丢，把 Proton Bus Simulator 这种真游戏一起误杀了（自测里有这条用例）。
+  WeGame 侧同理：没装 / 看了几个注册表项 / 因「非游戏键 / 没读到目录 / 目录里找不到游戏程序」
+  各跳过多少。
+
+**平台之外的游戏扫不到是设计使然**：鸣潮用官方启动器、网易用游戏中心装的那些，Steam/Epic/WeGame
+的清单里没有它们。别去猜硬盘上哪个目录是游戏 —— 正确做法是让用户用「存到游戏库」手动加。
+
+### 选中反馈：高亮 + 飞行动画
+
+点「用作部署目录」原来只有状态栏一行字，用户感知不强。现在：
+
+1. 被选中的那一行一直带「已选中」徽章 + 主题色边框（长期可见，不是一闪而过）；
+2. 那张卡片缩小后沿缓动曲线飞到「目标目录」卡片上，落地时目标卡片描边闪 0.8 秒；
+3. 点击后的深度反作弊扫描挪到后台线程 —— 以前同步跑，点下去要卡一下，现在立刻有反应
+   （徽章先显示「正在后台分析反作弊」）。
+
+动画只在 0.45 秒里请求重绘，结束就停，空闲时一帧都不多画。插值抽成纯函数
+`fly_lerp`，自测里验端点，不用开窗口。目标卡片滚出可视区时跳过飞行、只闪一下。
+
+### 改版本号
+
+**别用 PS 的 Get-Content / Set-Content 去改 Cargo.toml。** PS 5.1 按 ANSI 码页读无 BOM 的
+UTF-8 文件，中文注释里全角句号后面紧跟 CRLF 时，那个  会被当成双字节字符的尾字节吃掉
+—— 注释行和下一行合并，Cargo.toml 立刻变成非法 TOML（`cargo metadata` 报
+"key with no value, expected ="），而且 Set-Content 还会把已经乱掉的文本再二次编码一遍。
+
+用 .NET 显式指定编码，并且路径给绝对的（Set-Location 不影响 .NET 的当前目录）：
+
+    $noBom = New-Object System.Text.UTF8Encoding($false)
+    $t = [System.IO.File]::ReadAllText($abs, [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($abs, $t.Replace('0.2.0', '0.3.0'), $noBom)
+
+Cargo.toml 用 $false（不加 BOM）；installer.iss 用 $true（要 BOM，Inno Setup 才认中文）。
+改完拿 `cargo metadata --no-deps` 验一下版本号读出来对不对，别等编译到一半才发现。
+
+### 软件自身更新检查（别和上游 Mod 的更新混了）
+
+两套东西：
+
+* **上游 Mod 更新**（sdli1995/dlssg_for_sm86）—— 只在用户点「检查更新」时跑，走 raw 的 ETag。
+* **本软件更新**（XiaoQAQ10086/FrameGen-Manager）—— 启动时自动跑一次，另外标题栏
+  有个「检查更新」可以手动再查。这一项默认就开，界面上不设开关，入口也别放回资产
+  卡片里 —— 放那儿会被当成上游 Mod 的更新。
+
+本软件更新**读的是我们自己仓库 main 分支上的 Cargo.toml 的 version 字段**。为什么不用
+Releases 接口：
+
+* api.github.com 未登录按 IP 限 60 次/小时 —— 正是这个项目一直在躲的东西；
+* gh-proxy 这类镜像**只代理资源文件、拒绝代理网页**（实测直接回
+  "Web page content is not allowed"），所以 releases 页面和 releases.atom 都拿不到；
+* raw 上的 Cargo.toml 只有 2KB，官方源和镜像都拿得到，且不占配额。
+
+**前提**：发布流程必须是「改版本号 -> 提交 -> 打标签 -> 发 Release」一条龙，
+这样 main 上的版本号才等于最新已发布版本。改了发布流程就要回来改这里。
+
+**取所有源里最大的版本号，不只信第一个成功的源。** raw 前面有 CDN 缓存，仓库里刚改完
+Cargo.toml 的那几分钟，缓存还在吐旧内容。实测发 0.4.0 时官方 raw 有约 3 分钟仍然说
+0.3.0 —— 而官方是优先源，一旦它「成功」返回就直接采信了，那段时间 0.3.0 的用户会被
+告知「已是最新」，根本看不到更新提示。所以 `fetch_latest_self_version()` 改成**并发问
+所有源、取最大的那个**（并发所以耗时约等于最慢的那一个请求，不是相加）。挑最大值的
+`pick_latest()` 是纯函数，`--selfupdate` 里有 4 条断言盯着它。
+
+版本号比较用手写的三段数字比较（`0.2.10 > 0.2.9` 这种要正确），解析不出来时
+一律当作「没有新版本」—— 宁可漏报也别误报。`--selfupdate` 里也有边界用例。
+
+### 资产状态与部署的几条规矩
+
+**已经是新版就别重下。** 「下载 / 更新资产」对每个文件先过
+`update::local_is_current()`：必须同时满足「下载记录在 + 指纹和远端一致 + 文件真的还在
+且大小对得上」，三条全中才跳过。只信记录会造成「文件被删了却认为无需下载」——
+和 asset_state 是同一个坑，`--downloadtest` 里两条断言专门盯着它。
+15 MB 的代理 DLL 因此不用每次重拉。
+
+**资产状态以磁盘为准。** `App::asset_state()` 必须先确认文件真的还在 assets 目录里，
+再去看 update_state.json 里的下载记录。只信记录会造成「用户把资产删光了，界面还显示
+已就绪」—— 记录在，文件早没了。判定顺序：文件不存在 -> 未下载；大小与记录不符（被改过
+或没下完）-> 有更新；再比 ETag。
+
+**重部署必须沿用第一次的备份。** 上游更新后用户会再点一次「部署」。如果这时把「我们
+上次部署进去的文件」当成游戏原文件重新备份，就会覆盖掉真正的原件，之后「还原」只能
+还原出我们自己部署的那一版 —— 原件永久丢失。所以 `deploy()` 会先查旧 manifest，
+已经有原始备份的条目直接沿用，绝不重下备份。备份文件本身丢了的才重新备份。
+
+**换代理入口要清掉旧的，而且原件不能失联。** 用户手动换入口再部署时，旧的那个会留在
+游戏目录里 —— 两个代理并存，游戏加载哪个全看运气；而且新 manifest 里没有它，就变成
+「还原也管不到」的孤儿。规则集中在 `plan_orphan()` 里，判定故意保守：必须是旧 manifest
+记过账、文件还在、而且当前内容仍等于我们当初写进去的那份（用户换过就不碰）。分两种：
+
+* 那个位置**本来空着**、是我们放进去的 -> 直接删掉。
+* 那个位置**原本就有文件**（用户手动装过、或旧版本装的同项目文件）-> 也要删掉（否则两个
+  代理并存），但必须把那条 `BackupEntry` **搬进新 manifest 再写回**，否则「还原」就再也
+  放不回原件。
+
+第二种以前是直接 `continue` 跳过的 —— 结果是两个代理并存 + 原件永久失联。改这条时特意
+把 `plan_orphan()` 抽成纯函数，因为真实的代理 DLL 带本项目签名、自测里造不出来：决策靠
+--deploytest 里那 6 条纯逻辑断言覆盖，再用游戏目录里那份真实签名 DLL 跑一遍端到端。
+
+**目录里还有本项目的另一个代理时也要问一句。** 上游 README 明确要求「每次只保留
+本项目的一个代理」。如果旧的那个是用户**手动**装进去的，manifest 里没有记录，第 8 步
+的清理就没有依据可查；而「目录里还有别的东西」那道提醒只针对非本项目文件（怕误删别人
+的）—— 两个代理于是静默并存，用户还以为部署成功了。所以 @@start_deploy()@@ 先用
+@@find_extra_own_proxies()@@ 查一遍，查到就弹窗，用户确认移除才动手；移除前先备份并记成
+@@existed_before=true@@ 的条目，因此「还原」能把原件放回去。（选择"保留并继续"就照旧不动。）
+
+这类记录的**延续**很关键：第 8 步会把「有原件备份、这次又不部署」的条目一直带进新的
+manifest，包括文件已经不在了的 —— 因为「还原」收尾会删掉整个备份目录，记录一丢，
+原件就永久拿不回来了。@@--deploytest@@ 里有一条专门验"再部署一次记录还在"。
+
+### 硬件加速 GPU 计划（只读 + 跳转，绝不写）
+
+DLSS 帧生成要求系统开启「硬件加速 GPU 计划」（CDPR 官方的 DLSS FG 支持页明确写了这一条；
+上游作者的文档反倒一个字没提，所以这是帧生成本身的系统前提，不是这个 Mod 特有的）。
+
+**注册表里只有一个地方记它**：`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers` 的
+`HwSchMode`（2 = 开，1 = 关）。但这个值**可能根本不存在** —— Windows 11 默认就是开启，
+系统不一定往注册表写这一项。实测本机 Win11 26300 **实际开着、值却不存在**，而且把整个
+`HKLM\SYSTEM\CurrentControlSet` 扫了一遍也没有第二个地方记状态。所以：
+
+* 读到 2 -> 已开启；读到 1 -> 已关闭；**读不到 -> 未知**，绝不能当成"关着"。
+* 界面按三态显示，未知时加一句「Win11 默认开启，想确认请点「去设置」」。
+* 部署后的提示**只在明确读到 1 时弹** —— 否则 Win11 那些本来就开着的用户每次部署都会被骚扰。
+
+**为什么不写注册表**：写它要管理员权限（UAC）、而且必须重启才生效，而用户自己在设置里点
+一下只要一秒。所以这个功能只做两件事：读状态、跳转到设置那一页。不碰系统设置、不要提权、
+不涉及重启。跳转走 `ShellExecute`（和打开网址同一套），URI 见微软官方的 ms-settings 列表：
+Win11 用 `ms-settings:display-advancedgraphics-default`（"默认图形设置"，开关在这页上），
+Win10 用 `ms-settings:display-advancedgraphics`。
+
+调试开关 `DLSSG_FAKE_HAGS=on|off|unknown` 可以强制三种状态，用来截图验证显示；
+`--gpuinfo` 里有 5 条断言盯着"值 -> 状态"的翻译；`--openhags` 单独测跳转。
+
+### WeGame 扫描（保守实现，未在真实环境验证）
+
+**上游没有官方文档。** WeGame 把每个游戏的安装位置记在注册表里 —— 网上流传的「重装系统后
+重新关联 WeGame 游戏」的土办法就是手工重建这些键，说明这些键就是 WeGame 判断安装位置的
+依据。所以 `scan_wegame()` 去枚举 `HKLM\SOFTWARE[\WOW6432Node]\Tencent` 的子键，
+从值里找指向真实目录的路径。WeGame 是 32 位程序，所以主要看 WOW6432Node 那一侧。
+
+**开发机上没装 WeGame，所以这部分没有在真实环境验证过**（其他平台都是拿真实机器验的）。
+判定因此保守，而且**每个候选都写进日志**（见下）—— 靠用户反馈的真实日志来收紧规则。
+
+判定链条（`wegame_verdict()`，**纯函数、不碰注册表和磁盘**，所以能用构造数据自测）：
+
+1. `wegame_installed()` —— WeGame 自己没装就直接返回空，不去 Tencent 键下面瞎猜；
+2. `WEGAME_NON_GAME_KEYS` —— 精确匹配（**不**前缀匹配，免得误杀「QQ飞车」「QQ炫舞」这类
+   真游戏）跳过 WeGame / QQ / QQNT / WeChat / Weixin / TIM / QQMusic / QQLive /
+   TencentVideo / TencentMeeting / QQBrowser / QQPinyin / TencentDocs 等客户端与工具；
+3. 值里要能读出一个真实存在的目录；
+4. **`NON_GAME_DIR_MARKERS`** —— 目录（或挑中的 exe）落在已知非游戏产品的安装目录里就跳过。
+   这条是**按路径分量**判的，和键名无关，所以腾讯以后出新客户端（键名我们没见过）
+   也能挡住。别往里加 "Tencent" / "WeGame"：WeGame 自己的 `apps\` 结构里就有这两个词；
+5. 目录里要能找出「像样的可执行文件」（`find_render_exe`）；
+6. `NON_GAME_EXE_STEMS` —— 挑中的 exe 若不是游戏本体（qq / wechat / qqmusic / qqlive /
+   tencentmeeting / qqbrowser…）也跳过。这是兜底：键名也许没进名单，exe 名字会露馅。
+
+**第 4 条是被用户日志逼出来的**。有人报「库里有 QQPCMgr（腾讯电脑管家）」，日志把原因
+写得清清楚楚：
+
+    WeGame 候选 [...\Tencent\QQPCMgr] 判定=收下 目录=C:\Program Files (x86)\Tencent\QQPCMgr\18.1.30302.212
+      来自值=InstallDir 可执行文件=...\QQPCMgr\18.1.30302.212\WeChatOCR_1.0.1.28\WeChatOCR.exe
+
+键名 `QQPCMgr` 当时不在名单里，`find_render_exe` 又在它目录里挑中了捆绑的 `WeChatOCR.exe`
+（exe 名字也没进名单）—— 两道闸全漏。现在三条路一起堵：键名进名单、按目录名判、
+exe 主名也进名单。**加错名字只是不生效，不会误伤真游戏**，所以这份名单可以放心加。
+
+**日志里每个候选一行证据**，形如：
+
+    WeGame 候选 [SOFTWARE\WOW6432Node\Tencent\QQNT] 判定=跳过：非游戏键 目录=D:\QQ
+      来自值=Install 可执行文件=D:\QQ\QQ.exe —— 跳过：键名「QQNT」是已知的非游戏产品（QQ 新版客户端）
+
+用户报「WeGame 列表里出现无关软件」时，让他点「复制诊断信息」发过来，看这几行就能定位：
+是键名没进名单（加 `WEGAME_NON_GAME_KEYS`）、还是 exe 名字没进名单（加
+`NON_GAME_EXE_STEMS`）、还是判定链更前面的哪一步漏了。**加错名字只是不生效，不会误伤
+真游戏**，所以这两份名单可以放心加。
+
+`--selftest` 里有两组断言：一组是**不变式**（扫出来的每条都必须指向真实存在、且能找到
+可执行文件的目录；本机没装 WeGame 时数量恒为 0，验数量没意义），另一组是**用构造数据跑
+真实世界的例子** —— QQ / QQ音乐 / 腾讯会议 / 微信…必须被跳过，而 QQ飞车 / QQ炫舞 /
+王者荣耀 / 穿越火线这些真游戏**必须**被收下。以后改判定规则，这两组会一起拦住。
+
+### 显卡名称伪装（注册表）
+
+只改 `HKLM\SYSTEM\CurrentControlSet\Enum\PCI\<设备>\<实例>\DeviceDesc` 一个值。
+几条不能破的规矩：
+
+1. **只写 DeviceDesc。** `HardwareID`、`CompatibleIDs`、`Driver`、`Service`、`Mfg`
+   一律不碰 —— 改这些会让驱动绑定失效。
+2. **三重过滤定位目标**：`VEN_10DE` 前缀 + `ClassGUID={4d36e968-...}` +
+   `Service=nvlddmkm`。只按 `VEN_10DE` 匹配会把 NVIDIA 高清音频控制器一起改掉
+   （DEV_228B 就是音频设备，ClassGUID 是 {4d36e97d-...}）。
+3. **故意不改类键的 `DriverDesc`。** 本程序自己的 SM86 / SM75 路由判断读的就是它；
+   改掉之后程序会把 RTX 30 系误判成「RTX 50 系，不需要本 Mod」。
+4. **写之前必须备份并读回校验。** 备份落在程序同级的 `backups\gpu-name`，
+   存的是「第一次改动之前」的值，之后重复改不会把它覆盖掉。
+5. **型号只能从 `gpu::PRESETS` 里选**，`apply()` 会再校验一次，不在名单里直接拒绝。
+
+还原有两种目标：`RestoreTo::DriverName`（回到驱动记录的真名，彻底去掉伪装）和
+`RestoreTo::BackupOriginal`（回到本工具动手之前的值）。在「之前已被别的工具改过」的
+机器上这两者不一样，所以界面上必须让用户自己选，不能替他决定。
+
+提权走 `ShellExecuteW("runas")` 重新拉起自身，**不申请 UAC 清单** —— 主程序保持免提权，
+便携运行才不会每次启动都弹框。见 `gpu::run_elevated()`。
+
+驱动版本：优先问 `nvidia-smi`（驱动自报，约 35 ms），读不到就解析注册表
+`DriverVersion`（`32.0.16.1692` -> 取数字后 5 位 -> `616.92`，已用 nvidia-smi 交叉验证）。
+阈值是 `gpu::MIN_FG_DRIVER = (591, 86)`。
+
+### 界面字体与对比度
+
+- **界面中文字体优先「微软雅黑」（msyh.ttc）**，其次黑体 / 宋体。黑体在小字号下明显比
+  雅黑糙；字体改成只读映射之后，文件大一点不再等于多占内存（只按需调入用到的字形页），
+  所以这里把「好看」排在「文件小」前面。
+- **次要文字（`theme::TEXT_MUTED` / `NEUTRAL`）不要调浅**：11~12px 的浅灰落在浅色背景上
+  很难看清。现在取 `#4B5563`（对白底约 7.6:1）；之前用过 `#6B7280`（4.8:1），用户反馈
+  看不清楚。**12px 是这些提示文字的下限**，再小就别怪用户看不清。
+- 判定依据是 WCAG 对比度：正文最低 4.5:1，7:1 是更严的一档。
+
+### 图形 API 与引擎识别（扫描时顺带做）
+
+扫描每个游戏时会顺手判出三件事，显示在游戏库那一行上：**图形 API**、**引擎**、
+**是否自带帧生成（Streamline）**。最后一项对本工具最关键：上游 Mod 靠游戏自带的
+Streamline 工作，**游戏没有它就装了也不会生效** —— 界面会直接给一句橙色提示
+「游戏不自带帧生成！安装无效」，省用户一次白忙。
+
+判定都在 `scan.rs`，逻辑与 I/O 分开：
+
+* `api_from_names(imports, siblings)` —— 纯函数。DX12 > Vulkan > DX11 > DX10 > DX9 > OpenGL；
+  **只有 dxgi.dll 不算数**（10/11/12 都用它）。
+* `engine_from_facts(&LayoutFacts)` —— 纯函数。只用游戏自己带的文件做证据：
+  `*-Win64-Shipping.exe`（+ `.utoc` 判 UE5）、`UnityPlayer.dll`/`*_Data`、`engine2.dll`、
+  `engine.dll`+`vstdlib.dll`、`CrySystem.dll`、`re_chunk_*.pak`、`data.win`、`nw.dll`/RGSS、
+  `MonoGame.Framework.dll`/`XNA*`、`*.pck`，以及根目录资源扩展名 `.rpf`（RAGE）、
+  `.forge`（Anvil）、`.cas`+`.sb`+`.toc` 三选二（Frostbite）、`.ba2`/`.bsa`（Creation）。
+  **认不出来就报 Unknown，不猜** —— 猜错比不报更坏。
+* `detect_tech_report(exe)` —— 负责 I/O：读 PE 导入表、列 exe 同目录、往上看根目录的
+  资源扩展名、在有界的候选路径里找 Streamline，最后返回 `TechReport`（含**判定依据**）。
+
+**两层判定，别删掉第二层。** 很多引擎的游戏 exe 只是个壳：实测一个 Unity 试玩版，
+主 exe 只有 0.6 MB、导入表里只有 `kernel32.dll` + `unityplayer.dll`，真正的渲染在
+`UnityPlayer.dll` 里。所以主 exe 判不出来时，会再去看 `UnityPlayer.dll` / `engine2.dll` /
+`engine.dll` / `CrySystem.dll` 自己的导入表。
+
+**Streamline 的搜索是有界的**（`find_streamline_marker`）：EXE 同目录、`Binaries\Win64`、
+`Engine\Binaries\ThirdParty\NVIDIA[\DLSS]`，往上最多三层。UE 游戏常把它放在后面那几个
+位置 —— 只查 exe 同目录会把「其实自带帧生成」的游戏误报成「安装无效」，而那是很重的结论。
+仍然是尽力而为：**要是用户反馈某游戏其实自带却被提示无效，先看日志里那一行依据**
+（下一步就是把新的真实路径补进候选表）。
+
+**每个游戏在日志里都留一行判定依据**，形如：
+
+    图形/引擎 [游戏名] API=DX12 引擎=Unity 自带帧生成=false | 导入表 2 项；
+    unityplayer.dll 的导入表命中 -> DX12；同目录 16 个文件、根目录扩展名 4 种；
+    同目录可疑文件 [...]; 没找到 Streamline 痕迹（导入表 + exe 同目录 + 几个固定候选路径）；
+    引擎判定：命中 -> Unity
+
+这行就是给「用户说认错了」用的：看到什么、据此得出什么，一眼可查。
+另外 `cargo run -- --techtest <渲染 EXE>` 能单独跑一次判定并打印同一份依据。
+
+结果会**存进游戏库缓存**（`CachedRow` 的三个字段），启动时直接用，不重算；
+计算发生在后台线程（和找渲染 EXE 同一条路径），不占 UI。
+## 审计之后的新规矩（2026-10-04）
+
+一次全量审计（41 条）之后定下的几条不变量。**改代码前先看这一节** —— 这些都是踩过的坑，
+看起来「多余」的那一步往往正是防某类事故的。
+
+1. **信任通道要分开。** 自更新的版本号只认官方源（镜像需 ≥2 家一致才采信）；
+   `SHA256SUMS.txt` 只走官方源；没有签名可验的文件（ini）只走官方源。
+   凡「哈希和文件来自同一个地方」的校验都等于没校验。
+2. **先校验、后落盘。** `download()` 只写 `.part`，校验通过才 `atomic_replace`。
+   否则「所有源都校验失败」时，坏内容已经把资产目录里的好文件顶掉了。
+3. **还原是两段式。** 先校验完所有备份，再动游戏目录；只删 sha 对得上「确实是我们部署的」
+   那一份。用户自己换过的文件绝不删 —— 那没有备份能救。
+4. **manifest 与 update_state 必须原子写。** 「文件在但读不出来」要和「没有这份文件」
+   分开处理：前者会让我们把游戏原件当成自己的文件覆盖掉。
+5. **只要还有原件备份，记录就必须传下去**（`keep_record = has_backup`）。
+   还原收尾会把备份目录整个删掉，记录一丢原件就永久没了。
+6. **重活不进 UI 线程。** 遍历目录、读几十 MB 文件、跑反作弊扫描一律 `spawn` 到后台；
+   部署闸门复用后台那次扫描的结果（`deploy_after_scan`）。
+7. **反作弊判定的证据要够硬。** `.sys` 才算内核级；同名目录、用户态服务只算用户态；
+   `Start=4` 的残留注册项不算；祖先扫描扫到公共目录（Program Files / steamapps\common）就停。
+8. **说不确定就说不确定。** 扫不完要标 `truncated` 并让用户确认；WeGame 没找到安装痕迹
+   就写「没找到」，别写「本机没装」；本机资产版本读不出来就写「未知」，不编数字。
+9. **大文件不整份进内存。** 下载流式写盘、部署只算哈希再复制。
+10. **路径要归一化后再比。** 忽略清单、去重、查重统一用 `scan::path_key()`；
+    写入路径按 `util::long_path()` 处理长路径。
+11. **任务状态用完即复位。** `cancel` / `allow_kernel_ac` / `deploy_in_flight` / 进度字段
+    都要在所有收尾路径（含 `Msg::Failed`）清掉，否则会跨任务串味。
+12. **自更新要等安装程序的退出码**，失败就告诉用户，别自己关掉让人以为装好了。
+## 数据存放策略
+
+assets / backups / 配置文件 / **下载记录**（`assets\update_state.json`）都优先放在
+**exe 同级**（便携，解压即用，拷走就带走全部状态），该目录不可写时才回退 %APPDATA%。
+
+> 注：这条"便携布局"只剩运行时兜底 —— 安装版靠 exe 同级的 installed.txt 标记走 %APPDATA%，
+> 发布也不再提供便携 zip（见上面的「打包」一节）。
+可写性判断走 `util::is_writable()` —— 真去写一个探针文件，而不是只看只读属性，
+因为 ACL 挡住的写操作从只读属性上看不出来。
+
+唯一的例外是 `source_speed.json`（各镜像的实测速率）：它反映的是**用户自己的线路**，
+换台机器就没有意义了，所以固定留在 %APPDATA%。
+早先下载记录也固定写在 %APPDATA%，那会导致「文件都在、记录找不到 → 重下 17~19 MB
+代理 DLL」，已改成跟着资产走；`update::load_state()` 会从两个老位置
+（FrameGen-Manager / DLSSG-Manager）读一次并迁过来，老文件不删。
+
+早期版本把备份放在 `%APPDATA%\FrameGen-Manager\backups`，现在由
+`util::migrate_backups()` 在 `main()` 开头做一次性搬迁：只在「新位置为空」且
+「老位置有东西」时搬，**全部复制成功才删老目录**，任何一步失败都保留老目录。
+结果缓存在 `OnceLock` 里，界面和命令行拿到的是同一份。
+
+## 目录结构
+
+    crates/core/src/
+      lib.rs         对外导出
+      deploy.rs      部署 / 备份 / 还原 / 手动安装清理（manifest + 多文件 + DirLock）
+      dlss5.rs       DLSS5：探测 / 自动部署 / 彻底卸载 / 模型路由（走官方 ReShade 安装器）
+      scan.rs        Steam/Epic/WeGame/本地扫描 + 最小 VDF 解析 + PE 解析 + 入口推荐 + 显卡路由
+      gpu.rs         驱动版本检测 + 显卡注册表实例枚举 + 名称伪装 / 备份 / 还原 + 提权
+      anticheat.rs   反作弊检测（注册表服务 + 游戏目录特征）
+      update.rs      上游更新检查 + 下载 + zip 解压 + INI 改写 + Steam 封面抓取
+      icon.rs        从 EXE 提取图标（RGBA，交给界面画）
+      util.rs        哈希 / 原子替换 / 配置与备份目录（含老版本一次性搬迁、陈旧锁接管）
+    crates/core/tests/selftest.rs   无界面自测（cargo test）
+
+    apps/sidecar/src/main.rs        命令层：命令表 → core，一行一条 JSON 走 stdio
+    apps/electron/main.js           窗口 / IPC / 自更新 / 内置资产铺设 / EcoQoS
+    apps/electron/preload.js        window.__TAURI__ 桥
+    apps/electron/ui/               界面（HTML/CSS/JS，无构建步骤）
+    apps/electron/bundled-*/        随包内置的资产（帧生成 9 个 + DLSS5 三件套）
+    packaging/build-release.ps1     出包：版本校验 → sidecar 冒烟 → electron-builder → SHA256
+
+## 图标
+
+* `packaging/app-icon.png` —— 1024×1024 母版（美术原图另存一份留档）。改图后重跑：
+  `pwsh -ExecutionPolicy Bypass -File packaging\make-ico.ps1`
+* `packaging/make-ico.ps1` —— 从母版生成并**提交** `packaging/app.ico`
+  （16/20/24/32/40/48/64/96/128/256；≤64 存 DIB、≥96 存 PNG）。Cargo 因此**不需要任何
+  图片 / 图标 crate**。脚本顺带把每一档**用 Win32 LoadImage 读回来**验证并出一张预览图。
+  （注意：System.Drawing 自己的 `Icon(path,w,h)` 读不了 PNG 压缩帧、会读出噪点 —— 那是
+  .NET 的老问题，Shell / LoadImage / PrivateExtractIcons 都正常，别被它误导。）
+* `app.ico` 现在**只给安装包与 Electron 用**：`apps/electron/package.json` 的
+  `build.win.icon` 指向它，electron-builder 自己会把图标写进 exe 与快捷方式 ——
+  不再需要 `build.rs` + `rc.exe`（那段随退役的 egui 根包一起删掉了）。
+* 界面里的图标（游戏卡片、DLSS5 卡片墙）不是这张：`icon::icon_of(exe)` 从**游戏自己的 exe**
+  里抠 HICON → RGBA，由 sidecar 的 `game_icons` 命令发给界面（回退顺序：封面 → exe 图标 → 首字母）。
+* README 里用的图标与截图放在 `docs/`（`docs/icon.png` 是 app-icon.png 缩到 256 的版本）。

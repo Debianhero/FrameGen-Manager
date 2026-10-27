@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<title>FrameGen Manager</title>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="dot"></span><span>FrameGen Manager</span></div>
+  <div class="gpu" id="gpu" title="" data-i18n="一键为20和30系显卡部署帧生成及DLSS5">一键为20和30系显卡部署帧生成及DLSS5</div>
+  <div class="spacer"></div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-page="lib" type="button" data-i18n="帧生成">帧生成</button>
+    <button class="tab" data-page="sm" type="button" data-i18n="Smooth Motion（实验）">Smooth Motion（实验）</button>
+    <button class="tab" data-page="dlss5" type="button" data-i18n="DLSS5（实验性）">DLSS5（实验性）</button>
+    <button class="tab" data-page="settings" type="button" data-i18n="关于">关于</button>
+    <button class="tab" data-page="help" type="button" data-i18n="打赏赞助">打赏赞助</button>
+  </nav>
+    <select class="input" id="lang-sel" title="语言" data-i18n-attr="title" data-i18n="语言">
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+    </select>
+    <button class="btn" id="btn-check" type="button" data-i18n="检查更新">检查更新</button>
+</header>
+
+<main class="page" id="page-lib">
+
+  <div class="layout">
+
+    <aside class="side">
+      <section class="panel">
+        <div class="ctitle" data-i18n="显卡驱动及系统设置">显卡驱动及系统设置</div>
+        <div class="chips" id="gpu-chips"><span class="chip gray" data-i18n="读取中…">读取中…</span></div>
+        <div class="kv2"><span data-i18n="驱动版本">驱动版本</span><b id="drv">-</b></div>
+        <div class="kv2"><span data-i18n="硬件加速 GPU 计划">硬件加速 GPU 计划</span><b id="hags">-</b></div>
+        <button class="btn wide" id="btn-hags" type="button" data-i18n="打开硬件加速GPU计划设置">打开硬件加速GPU计划设置</button>
+        <div class="gate hidden" id="gpu-gate"></div>
+      </section>
+
+      <section class="panel" id="panel-spoof">
+        <div class="ctitle" data-i18n="显卡名称伪装">显卡名称伪装</div>
+        <div class="kv2"><span data-i18n="当前显示">当前显示</span><b id="spoof-cur">-</b></div>
+        <div class="kv2"><span data-i18n="驱动记录">驱动记录</span><b id="spoof-drv">-</b></div>
+        <div class="row">
+          <select class="input" id="spoof-sel" data-i18n-attr="title" data-i18n="只提供这两档，避免填错型号" title="只提供这两档，避免填错型号"></select>
+          <button class="btn primary" id="btn-spoof-apply" type="button" data-i18n="应用">应用</button>
+        </div>
+        <button class="btn wide" id="btn-spoof-restore" type="button" data-i18n="还原为原来的名称">还原为原来的名称</button>
+        <div class="hint" id="spoof-note" data-i18n="读取中…">读取中…</div>
+      </section>
+
+      <section class="panel">
+        <div class="ctitle" data-i18n="资产文件夹">资产文件夹</div>
+        <div class="path" id="assets-dir">-</div>
+        <div class="row">
+          <button class="btn" id="btn-open-assets" type="button" data-i18n="打开文件夹">打开文件夹</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="ctitle"><span data-i18n="日志">日志</span><span class="spacer"></span>
+          <button class="btn small" id="btn-log-copy" type="button" data-i18n="复制">复制</button>
+        </div>
+        <pre class="log logslim" id="log-box" data-i18n="正在读取…">正在读取…</pre>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div class="listhead">
+        <div class="lh-text">
+          <h1 data-i18n="游戏库">游戏库</h1>
+          <div class="sub" id="lib-sub" data-i18n="正在载入…">正在载入…</div>
+        </div>
+        <div class="lh-actions">
+          <span class="pickwrap">
+            <button class="btn" id="btn-add-game" type="button" data-i18n-attr="title" data-i18n="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" title="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" data-i18n-text="手动添加游戏">手动添加游戏</button>
+            <span class="qmark" role="img" aria-label="扫描游戏库时没找到你的游戏？点这里手动添加游戏：选择游戏实际启动的 exe（通常在 Win64 文件夹下，根据实际情况选择）！选错 exe 会导致部署帧生成无效！" data-tip="扫描游戏库时没找到你的游戏？点这里手动添加游戏：选择游戏实际启动的 exe（通常在 Win64 文件夹下，根据实际情况选择）！选错 exe 会导致部署帧生成无效！" data-i18n-attr="aria-label data-tip" data-i18n="扫描游戏库时没找到你的游戏？点这里手动添加游戏：选择游戏实际启动的 exe（通常在 Win64 文件夹下，根据实际情况选择）！选错 exe 会导致部署帧生成无效！">?</span>
+          </span>
+          <button class="btn" id="btn-removed-games" type="button" data-i18n-attr="title" data-i18n="看看从游戏库里移除过哪些游戏，可以放回来" title="看看从游戏库里移除过哪些游戏，可以放回来" data-i18n-text="已被移除的游戏">已被移除的游戏</button>
+          <button class="btn hidden" id="btn-redeploy-legacy" type="button" data-i18n="重新部署旧版游戏">重新部署旧版游戏</button>
+          <button class="btn primary" id="btn-scan" type="button" data-i18n-attr="title" data-i18n="扫描 Steam / Epic / WeGame 的游戏库（只读）" title="扫描 Steam / Epic / WeGame 的游戏库（只读）" data-i18n-text="扫描游戏库">扫描游戏库</button>
+        </div>
+      </div>
+      <div class="liblist" id="lib-list"></div>
+    </section>
+
+  </div>
+</main>
+
+<main class="page hidden" id="page-sm">
+  <div class="layout">
+
+    <aside class="side">
+      <section class="panel">
+        <div class="ctitle" data-i18n="Smooth Motion 适用性">Smooth Motion 适用性</div>
+        <div class="chips" id="sm-chips"><span class="chip gray" data-i18n="读取中…">读取中…</span></div>
+        <div class="kv2"><span data-i18n="显卡">显卡</span><b id="sm-gpu">-</b></div>
+        <div class="kv2"><span data-i18n="驱动版本">驱动版本</span><b id="sm-drv">-</b></div>
+        <div class="kv2"><span data-i18n="最低要求">最低要求</span><b id="sm-min">616.64</b></div>
+        <div class="gate hidden" id="sm-gate"></div>
+        <div class="hint" id="sm-note" data-i18n="读取中…">读取中…</div>
+        <button class="btn wide" id="btn-sm-refresh" type="button" data-i18n="重新检测">重新检测</button>
+      </section>
+
+
+      <section class="panel">
+        <div class="ctitle" data-i18n="说明">说明</div>
+        <div class="hint" data-i18n="解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X）。不建议与帧生成同时开启。">解锁 NVIDIA 驱动自带的 Smooth Motion（固定 2X）。不建议与帧生成同时开启。</div>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div class="listhead">
+        <div class="lh-text">
+          <h1>Smooth Motion</h1>
+          <div class="sub" id="sm-sub" data-i18n="正在载入…">正在载入…</div>
+        </div>
+        <div class="lh-actions">
+          <button class="btn primary" id="btn-sm-scan" type="button" data-i18n-attr="title" data-i18n="扫描 Steam / Epic / WeGame 的游戏库（只读）" title="扫描 Steam / Epic / WeGame 的游戏库（只读）" data-i18n-text="扫描游戏库">扫描游戏库</button>
+          <button class="btn" id="btn-sm-pick" type="button" data-i18n-attr="title" data-i18n="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（Smooth Motion 就作用在它身上）" title="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（Smooth Motion 就作用在它身上）" data-i18n-text="手动添加游戏">手动添加游戏</button>
+        </div>
+      </div>
+      <div class="liblist" id="sm-list"></div>
+    </section>
+
+  </div>
+</main>
+<main class="page hidden" id="page-dlss5">
+  <div class="pagehead">
+    <h1 data-i18n="DLSS5 接入">DLSS5 接入</h1>
+    <div class="hint" id="dlss5-note" data-i18n="插件原生支持 DX9/10/11/12、Vulkan、OpenGL，32位/64位游戏；不自带 DLSS 的游戏也能部署（效果为神经渲染叠加，进游戏按 Home → GITC Uplift → 勾选启用）。">插件原生支持 DX9/10/11/12、Vulkan、OpenGL，32位/64位游戏；不自带 DLSS 的游戏也能部署（效果为神经渲染叠加，进游戏按 Home → GITC Uplift → 勾选启用）。</div>
+  </div>
+  <div class="toolbar">
+    <button class="btn primary" id="btn-dlss5-scan" type="button" data-i18n="扫描游戏库">扫描游戏库</button>
+    <button class="btn" id="btn-dlss5-pick" type="button" data-i18n-attr="title" data-i18n="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" title="扫描找不到的游戏？手动添加：选择游戏实际启动的 exe（部署就落在 exe 所在的文件夹）" data-i18n-text="手动添加游戏">手动添加游戏</button>
+    <div class="spacer"></div>
+    <button class="btn" id="btn-dlss5-removed" type="button" data-i18n="已被移除的游戏">已被移除的游戏</button>
+  </div>
+  <section class="section">
+    <h2><span data-i18n="自带 DLSS（可用 DLSS5）">自带 DLSS（可用 DLSS5）</span><span class="count" id="c-dlss">0</span></h2>
+    <div class="wall" id="wall-dlss"></div>
+  </section>
+  <section class="section">
+    <h2><span data-i18n="其它 / 未知">其它 / 未知</span><span class="count" id="c-other">0</span></h2>
+    <div class="wall" id="wall-other"></div>
+  </section>
+</main>
+
+<main class="page hidden" id="page-settings">
+  <div class="pagehead">
+    <h1 data-i18n="关于">关于</h1>
+    <div class="sub" data-i18n="版本 · 路径 · 备份 · 反馈">版本 · 路径 · 备份 · 反馈</div>
+  </div>
+
+  <div class="stack">
+    <section class="panel">
+      <div class="ctitle" data-i18n="自更新">自更新</div>
+      <div class="kv2"><span data-i18n="当前版本">当前版本</span><b id="ver-cur">-</b></div>
+      <div class="kv2"><span data-i18n="最新版本">最新版本</span><b id="ver-latest" data-i18n="未检查">未检查</b></div>
+      <div class="row">
+        <button class="btn primary" id="btn-self-update" type="button" data-i18n="检查新版本">检查新版本</button>
+        <button class="btn" id="btn-netdisk" type="button" data-i18n="网盘下载">网盘下载</button>
+      </div>
+      <div class="hint" id="self-note" data-i18n="还没检查过。点上面的按钮看一眼。">还没检查过。点上面的按钮看一眼。</div>
+    </section>
+
+    <section class="panel">
+      <div class="ctitle" data-i18n="启动">Startup</div>
+      <label class="kv2" style="cursor:pointer"><span data-i18n="每次启动软件时自动扫描游戏库">Scan the game library automatically on every launch</span><input id="auto-scan-tgl" class="switch" type="checkbox"></label>
+      <div class="hint" data-i18n="关闭时启动直接显示上次的缓存（秒开）；需要发现新游戏时手动点「扫描游戏库」。第一次使用会自动扫描一次。">关闭时启动直接显示上次的缓存（秒开）；需要发现新游戏时手动点「扫描游戏库」。第一次使用会自动扫描一次。</div>
+    </section>
+
+
+    <section class="panel">
+      <div class="ctitle" data-i18n="路径">路径</div>
+      <div class="pathrow"><span data-i18n="资产目录">资产目录</span><code id="p-assets">-</code><button class="btn small" id="btn-open-p-assets" type="button" data-i18n="打开">打开</button></div>
+      <div class="pathrow"><span data-i18n="备份目录">备份目录</span><code id="p-backups">-</code><button class="btn small" id="btn-open-p-backups" type="button" data-i18n="打开">打开</button></div>
+      <div class="pathrow"><span data-i18n="日志目录">日志目录</span><code id="p-logs">-</code><button class="btn small" id="btn-open-p-logs" type="button" data-i18n="打开">打开</button></div>
+    </section>
+
+    <section class="panel">
+      <div class="ctitle" data-i18n="备份">备份</div>
+      <div class="kv2"><span data-i18n="已保存的部署备份">已保存的部署备份</span><b id="bk-info">-</b></div>
+      <p class="hint" data-i18n="备份里存的是游戏的原文件，用来支持「还原」。删掉之后，已经部署到游戏里的模组就还原不回去了；显卡名称的备份会保留。">备份里存的是游戏的原文件，用来支持「还原」。删掉之后，已经部署到游戏里的模组就还原不回去了；显卡名称的备份会保留。</p>
+      <div class="row">
+        <button class="btn" id="btn-clean-backups" type="button" data-i18n="清理旧备份">清理旧备份</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="ctitle" data-i18n="反馈">反馈</div>
+      <p class="fbline"><span data-i18n="若在使用途中遇到各种问题，或者您有更好的建议欢迎您进入腾讯QQ群反馈与交流：">若在使用途中遇到各种问题，或者您有更好的建议欢迎您进入腾讯QQ群反馈与交流：</span><b>1125445047</b></p>
+    </section>
+
+  </div>
+</main>
+
+<main class="page hidden" id="page-help">
+  <div class="pagehead">
+    <h1 data-i18n="打赏赞助">打赏赞助</h1>
+    <div class="sub" data-i18n="如果这个工具帮到了你，欢迎请作者喝杯奶茶">如果这个工具帮到了你，欢迎请作者喝杯奶茶</div>
+  </div>
+
+  <div class="donate">
+    <figure class="qr">
+      <img src="img/wechat.png" alt="微信收款码" data-i18n-attr="alt" data-i18n="微信收款码"/>
+      <figcaption data-i18n="微信支付">微信支付</figcaption>
+    </figure>
+    <figure class="qr">
+      <img src="img/alipay.jpg" alt="支付宝收款码" data-i18n-attr="alt" data-i18n="支付宝收款码"/>
+      <figcaption data-i18n="支付宝">支付宝</figcaption>
+    </figure>
+  </div>
+
+  <p class="donate-note" data-i18n="您的打赏是作者持续更新下去的动力(≧◡≦) ♡">您的打赏是作者持续更新下去的动力(≧◡≦) ♡</p>
+</main>
+
+<div class="upd hidden" id="upd">
+  <div class="upd-card">
+    <div class="upd-title" data-i18n="正在下载新版本">正在下载新版本</div>
+    <div class="upd-bar"><div class="upd-fill" id="upd-fill"></div></div>
+    <div class="upd-msg" id="upd-msg" data-i18n="准备中…">准备中…</div>
+    <div class="upd-notes hidden" id="upd-notes"></div>
+    <div class="upd-foot">
+      <button class="btn" id="upd-netdisk" type="button" data-i18n="网盘下载">网盘下载</button>
+      <button class="btn danger" id="upd-stop" type="button" data-i18n="停止更新">停止更新</button>
+    </div>
+  </div>
+</div>
+
+<div id="layers">
+  <div class="progressbar hidden" id="bar">
+    <div id="bar-fill"></div>
+    <span id="bar-text"></span>
+  </div>
+</div>
+
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

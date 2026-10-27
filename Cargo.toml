@@ -1,0 +1,21 @@
+# FrameGen Manager —— 工作区清单
+#
+# 现在只有两个 Rust 组件，各自独立：
+#   · crates/core    业务核心（无 UI 依赖）—— 本工作区成员，cargo test / clippy 都在这里跑
+#   · apps/sidecar   命令层（自带 [workspace]，不在这里）
+# 界面是 apps/electron（Electron + 纯 HTML/CSS/JS，无构建步骤）。
+#
+# 历史：0.9.19 及更早的界面是 egui（eframe），中间还做过一版 Tauri —— 两个退役界面
+# 连同它们的依赖与打包脚本已在 1.0.0 全部删除：自测搬进 crates/core/tests/selftest.rs，
+# 根包（含 build.rs 给 exe 编图标的那段）整个消失。发布产物只有 Electron 安装包。
+[workspace]
+resolver = "2"
+members = ["crates/core"]
+
+# 版本号的真源是 crates/core/Cargo.toml（core 的 SELF_VERSION 取自它）。
+# 这里同步一份**不是给 cargo 用的，是给程序内的「检查新版本」用的**：
+# 它读 main 分支根目录的 Cargo.toml 取 version 字段（旧版本客户端也只认这个位置），
+# 所以这一行必须与 crates/core/Cargo.toml 的版本保持一致 —— 打包脚本会校验，
+# 不一致就拒绝出包。
+[workspace.package]
+version = "1.5.0"

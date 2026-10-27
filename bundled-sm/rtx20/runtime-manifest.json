@@ -1,0 +1,27 @@
+{
+  "runtime_version": "2.8.5-rtx20-rtx30-dx12-preview2-fix37-aliasfree",
+  "artifact_guard": "occlusion_aware_v20",
+  "origin": "Built from source/rtx20: QUA2 v14 shader text with the Fix31 HUD gate, Fix32 split synthesis, Fix33 overlay-boundary/stationarity/Coherence changes, the Fix34 thin-object layer the Fix35 thin-line, overlay and exposure refinements and the Fix36 frame-border/static-occluder band, flow consistency repair and Resolve/overlay read savings; Fix32/Fix33 flow-mode policy; Fix37 merges the fix36-edges and fix36-quality shader changes and adds the Refine alias check, outlier-only flow repair and sharpened candidate weights",
+  "matching_runtime_source_supplied": true,
+  "matching_runtime_symbols_supplied": true,
+  "replaces": {
+    "normal.asi": "80110c675fe665c2152830c24619168093482841893beb67642ab80aa1732838",
+    "version.dll": "0539dca6cc10bfebbb144c66fe8490cd7ac3053b01035ad95d16fbcf6a4dde5a"
+  },
+  "previous": {
+    "normal.asi": "efd49219542ec7256053fb35850bb3572a25308e7b7a0649c840bd134aab9705",
+    "version.dll": "4fd93c3d46ce4ea62d20cf0a0784453058d1ec303fcacbe2737c2982eb9bd1ad"
+  },
+  "GPU_tested": false,
+  "Windows_executed": false,
+  "artifacts": {
+    "normal.asi": {
+      "sha256": "e6fe728f7a97caea87d594aa4bf18b239c1aadb9b245ee92f0390ecaba915016",
+      "bytes": 1434624
+    },
+    "version.dll": {
+      "sha256": "7b6fd97e626c2d55ad0597a68e4f6fb84a76eeee3ee42405b032acbb588dce0f",
+      "bytes": 1441280
+    }
+  }
+}
