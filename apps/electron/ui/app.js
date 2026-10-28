@@ -195,6 +195,11 @@ window.alert = function (m) { toast(String(m), 'info', 9000); };
 window.confirm = function (m) { uiConfirm({ title: t('请确认'), body: String(m) }); return false; };
 var BAR_PHASE = '';
 function showBar(msg, f, phase) {
+  /* 记住最近一次的相位：sidecar 的 progress 事件（queueBar）**不带**相位，
+     如果直接把 data-phase 清空，后面按相位收条的逻辑（hideBarIfPhase）就永远对不上 ——
+     1.6.2 实测：启动清理的 DLSS5 卸载发进度事件后，进度条永远停在最后一条
+     「正在删除插件 / 模型与运行时残留…」，就是这个原因。 */
+  if (phase) BAR_PHASE = phase;
   var bar = $('bar');
   if (!bar) return;
   bar.classList.remove('hidden');
@@ -213,7 +218,11 @@ function hideBarIfPhase(want, ms) {
   if (bt && bt.getAttribute('data-phase') === want) hideBarLater(ms);
 }
 function hideBarLater(ms) {
-  setTimeout(function () { var bar = $('bar'); if (bar) bar.classList.add('hidden'); }, ms || 2500);
+  setTimeout(function () {
+    var bar = $('bar');
+    if (bar) bar.classList.add('hidden');
+    BAR_PHASE = '';   // 条已经收了：别让旧相位赖着，否则下一次 progress 事件会顶着旧相位冒出来
+  }, ms || 2500);
 }
 var barPending = null;
 var barTimer = null;
