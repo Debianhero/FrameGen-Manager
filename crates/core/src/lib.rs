@@ -5,6 +5,8 @@
 pub mod assets_audit;
 pub mod assets_version;
 pub mod util;
+/// 错误码归类（P1-15 折中版）：core 仍返回中文串，这里给每类错误一个稳定编号
+pub mod err;
 pub mod log;
 pub mod anticheat;
 pub mod gpu;

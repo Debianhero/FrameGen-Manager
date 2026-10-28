@@ -65,7 +65,7 @@ if (-not (Test-Path $cov)) {
     $env:PYTHONIOENCODING = 'utf-8'
     $out = & python $cov 2>&1
     $code = $LASTEXITCODE
-    $out | ForEach-Object { if ($_ -match 'app\.js|index\.html') { Write-Output ('  ' + $_.Trim()) } }
+    $out | ForEach-Object { if ($_ -match 'app\.js|index\.html|ERR-CODE') { Write-Output ('  ' + $_.Trim()) } }
     if ($code -ne 0) { $fail += 'i18n coverage'; Write-Output '  [BAD] coverage check failed' }
   }
 }

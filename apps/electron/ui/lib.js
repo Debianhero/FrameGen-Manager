@@ -38,9 +38,21 @@
     [/^缺少 (.+) —— 资产随安装包内置，请检查安装是否完整（或重新安装本程序）$/,
       'Missing $1 - assets ship inside the installer; check that the installation is complete (or reinstall the app)'],
   ];
-  function backText(s) {
-    var str = (s === null || s === undefined) ? '' : String(s);
-    if (!str) return str;
+  /* 后端错误码：main.js 会把 sidecar 给的编号拼在消息末尾（"... [DRV-001]"），
+     用户截图就自带定位信息。**翻译前必须先把它切下来** —— 带着编号的原文永远匹配不到
+     词表（键是纯中文原文），等于把译文憋掉了。
+     编号本身的英文在词表里（`dev-only/en-dict.json` 的 core 段，按 core/src/err.rs 归类），
+     所以「这句中文没译文」时还能按编号出一句英文；词表里连编号都没有就原样返回，
+     绝不把 DRV-001 这种内部编号当成用户可见的正文。 */
+  var ERR_CODE_RE = /^([\s\S]*?)\s*\[([A-Z][A-Z0-9]{0,4}-\d{3})\]\s*$/;
+
+  function errCodeOf(s) {
+    var m = ERR_CODE_RE.exec(s === null || s === undefined ? '' : String(s));
+    return m ? { msg: m[1], code: m[2] } : null;
+  }
+
+  // 纯文本翻译：先查整句，再套后端文案的模式表。都不是就原样返回。
+  function translateText(str) {
     var hit = t(str);
     if (hit !== str) return hit;
     if (!(window.getLang && window.getLang() === 'en')) return str;
@@ -51,6 +63,24 @@
       }
     }
     return str;
+  }
+
+  function backText(s) {
+    var str = (s === null || s === undefined) ? '' : String(s);
+    if (!str) return str;
+    var hit = errCodeOf(str);
+    var code = '';
+    if (hit) {
+      str = hit.msg;
+      code = hit.code;
+    }
+    var out = translateText(str);
+    if (out === str && code && window.getLang && window.getLang() === 'en') {
+      // 整句没有译文：退回按编号翻译。编号在词表里没有条目时 t() 原样返回编号，跳过。
+      var byCode = t(code);
+      if (byCode && byCode !== code) out = byCode;
+    }
+    return code ? out + ' [' + code + ']' : out;
   }
   function h(tag, attrs, kids) {
     var n = document.createElement(tag);

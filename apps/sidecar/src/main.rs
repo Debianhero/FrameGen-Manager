@@ -56,34 +56,7 @@ fn err_line(id: u64, msg: &str) -> Value {
 
 /// 给错误分个**稳定代号**（消息原文不变）：用户截图报障时，一句 `code` 就能定位是哪一类。
 fn err_code(msg: &str) -> &'static str {
-    if msg.contains("驱动") || msg.contains("580") {
-        return "DRV-001";
-    }
-    if msg.contains("正被占用") || msg.contains("被占用") {
-        return "FILE-002";
-    }
-    if msg.contains("没有权限") || msg.contains("只读") {
-        return "ACL-003";
-    }
-    if msg.contains("内置组件不存在") || msg.contains("资产") {
-        return "AST-004";
-    }
-    if msg.contains("没有找到本工具") {
-        return "REC-005";
-    }
-    if msg.contains("回滚") {
-        return "RBK-006";
-    }
-    if msg.contains("下载") {
-        return "NET-007";
-    }
-    if msg.contains("安装器") {
-        return "RSH-008";
-    }
-    if msg.starts_with("unknown command") {
-        return "IPC-009";
-    }
-    "GEN-999"
+    framegen_core::err::classify(msg)
 }
 
 /// 进度事件。core 的回调签名是 FnMut(String, f32)，这里统一写成一行 event JSON。

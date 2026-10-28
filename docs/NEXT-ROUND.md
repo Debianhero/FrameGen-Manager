@@ -81,4 +81,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\bench.ps1
 
 - 驱动闸门在 `nvidia-smi` 缺失时是 `unknown`：**提示但不拦截**。
 - ReShade 识别 = PE 版本串含 `ReShade`；无版本资源的构建退回已知哈希（当前 6.8.0）。
-- core 仍返回中文错误串，英文界面靠 `backText` 词表映射（P1-15 未做）。
+- core 仍返回**中文**错误串（P1-15 只做了「折中版」）：每类错误带一个稳定编号
+  （`crates/core/src/err.rs` 是唯一来源，sidecar 直接转发），英文界面在「整句没有译文」时
+  按编号出英文（`ui/lib.js` 的 `backText`），编号词表在 `dev-only/en-dict.json` 的 `core` 段。
+  **加新错误码时忘了加英文 → `i18n-coverage.py` 直接失败**（preflight 打印 `ERR-CODE` 行）。
+  若要把报错正文也改成「code + 参数」（完整版 P1-15），那是另一轮的事。
