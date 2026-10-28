@@ -121,10 +121,6 @@ pub fn section(title: &str) {
 
 /// 行首的时间（只取时分秒）
 fn clock() -> String {
-    util::now_utc()
-        .split(' ')
-        .nth(1)
-        .unwrap_or_default()
-        .to_owned()
+    util::now_local_hms()
 }
 

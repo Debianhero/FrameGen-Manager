@@ -1571,29 +1571,6 @@
     return ok.indexOf(v) >= 0 ? v : 'Off';
   }
 
-  // 一键复制诊断信息：用户报障时贴这一坨，比截图强
-  function copyDiagnostics() {
-    invoke('log_tail', { lines: 50 }).catch(function () { return ''; }).then(function (tail) {
-      var ver = '';
-      if (CFG) { if (CFG.version) ver = CFG.version; }
-      var gpu = '';
-      if (GPU) { if (GPU.name) gpu = GPU.name; }
-      var drv = '';
-      if (GPU) { if (GPU.driver) drv = GPU.driver; }
-      var txt = 'FrameGen Manager ' + ver + '\n';
-      txt += 'GPU: ' + gpu + '\n';
-      txt += 'driver: ' + drv + '\n';
-      txt += 'lang: ' + getLang() + '\n';
-      var tailTxt = '';
-      if (tail) tailTxt = tail;
-      txt += '--- log tail ---\n' + tailTxt;
-      copyText(txt);
-      toast(t('诊断信息已复制（版本 / 驱动 / 日志尾）'), 'ok', 6000);
-    }).catch(function (e) {
-      toast(t('复制诊断信息失败：') + errText(e), 'err');
-    });
-  }
-
   function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, preset, smOn, srMode, engine, flow, hudless) {
     var body = t('会先备份被覆盖的原件，之后可以一键还原。');
     if (smOn) body += '\n\n' + SM_CONFLICT_TEXT;
@@ -2455,10 +2432,6 @@
     });
   }
   var PAGES = { lib: 'page-lib', sm: 'page-sm', dlss5: 'page-dlss5', settings: 'page-settings', help: 'page-help' };
-  if ($('btn-diag')) {
-    $('btn-diag').addEventListener('click', copyDiagnostics);
-  }
-
   function setupTabs() {
     var tabs = document.querySelectorAll('.tab');
     Array.prototype.forEach.call(tabs, function (b) {

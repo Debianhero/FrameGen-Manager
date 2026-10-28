@@ -729,6 +729,22 @@ pub fn now_utc() -> String {
     )
 }
 
+/// 本地时间 `HH:MM:SS`（日志用）。
+///
+/// 之前日志写的是 UTC，用户看到的时间比自己晚 8 小时，报障时对不上。
+pub fn now_local_hms() -> String {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+        let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = std::mem::zeroed();
+        GetLocalTime(&mut st);
+        return format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond);
+    }
+    #[allow(unreachable_code)]
+    now_utc().split(' ').nth(1).unwrap_or_default().to_owned()
+}
+
+
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

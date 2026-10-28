@@ -44,6 +44,8 @@ windows-sys = { version = "0.61", features = [
     # 映射本身在 Win32_System_Memory。都只是 extern 声明，不会让 exe 变大。
     "Win32_Security",
     "Win32_System_Memory",
+    # 日志时间戳用本地时间（GetLocalTime 在 SystemInformation 下）
+    "Win32_System_SystemInformation",
     # 判断「拿锁的那个进程还在不在」：OpenProcess + GetExitCodeProcess（清陈旧锁用）
     "Win32_System_Threading",
     # 动态加载 nvapi64.dll 读 NVIDIA 驱动配置（LoadLibraryW / GetProcAddress）
