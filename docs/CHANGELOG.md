@@ -21,7 +21,7 @@
 - 工程：`packaging/preflight.ps1`（双 CR / 语法 / 词表 / 单测一键自检）；代理表与真实资产的一致性单测；`safe_join` 去掉不安全回退
 
 - 工程（本轮补齐）：前端公共层拆到 `ui/lib.js`（DOM 工具/回译/格式化/复制/部署选项记忆），`app.js` 2700 → 2596 行；词表检查同步覆盖 `lib.js`
-- 工程（P1-15 折中版）：错误码成为归类**唯一来源**（`crates/core/src/err.rs`，16 个编号；sidecar 不再自己维护一份 `err_code`，补齐了 SM / DLSS5 / 备份 / 扫描 / 配置 / 文件 IO 六类此前一律落到 `GEN-999` 的错误）；英文界面先按中文原文查表，整句没译文时**按编号兜底**（`ui/lib.js` 的 `backText`），编号始终留在消息末尾供报障；`i18n-coverage.py` 新增门禁「core 的每个错误码必须有英文」，preflight 打印 `ERR-CODE` 行
+- 工程（P1-15 折中版）：错误码成为归类**唯一来源**（`crates/core/src/err.rs`，17 个编号；sidecar 不再自己维护一份 `err_code`，补齐了 SM / DLSS5 / 备份 / 扫描 / 配置 / 文件 IO / 系统目录拒绝七类此前一律落到 `GEN-999` 的错误）；英文界面先按中文原文查表，整句没译文时**按编号兜底**（`ui/lib.js` 的 `backText`），编号始终留在消息末尾供报障；`i18n-coverage.py` 新增门禁「core 的每个错误码必须有英文」，preflight 打印 `ERR-CODE` 行
 - 修复：`main.js` 拼在错误末尾的 `[CODE]` 会让原文永远匹配不到词表（键是纯中文原文），等于把译文憋掉 —— 现在翻译前先切掉编号，译完再接回
 - 工程（P1-12）：前端按页拆文件 —— `app.js` 2596 → 594 行，新增 `ui/settings.js`（设置/关于/更新弹窗/日志）、`ui/deploy.js`（详情对话框 + 部署/还原/清理）、`ui/dlss5.js`、`ui/sm.js`、`ui/library.js`（库页 + 封面/瓦片墙/扫描）；函数名与函数体一律不变（只移动不重写），脚本顺序改为 `i18n → lib → settings → deploy → dlss5 → sm → library → app`，e2e 与词表检查改为从 `index.html` 读脚本清单，`preflight` 的语法门禁覆盖整个 `ui/`
 - 工程（P1-7）：备份/还原的公共层抽到 `crates/core/src/backup_restore.rs`（`BackupPlan` + `capture` / `snapshot_one` / `load_originals` / `apply` / `rollback`），帧生成、解锁组件、DLSS5 三处不再各写一份；所有清单路径统一 `safe_join`，备份名统一扁平化，失败回滚如实报告成败（不谎报「已回滚」）
