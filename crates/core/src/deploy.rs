@@ -720,7 +720,13 @@ pub fn deploy(
             if payload.iter().any(|(n, _, _)| *n == e.rel_path) {
                 continue;
             }
-            let p = crate::util::safe_join(target_dir, &e.rel_path).unwrap_or_else(|_| target_dir.join(&e.rel_path));
+            let p = match crate::util::safe_join(target_dir, &e.rel_path) {
+                Ok(p) => p,
+                Err(_) => {
+                    // 清单里的路径非法（被篡改/损坏）：跳过，绝不按原始字符串拼路径去删/写
+                    continue;
+                }
+            };
             let present = p.is_file();
             let still_ours = present
                 && util::sha256_file(&p)
@@ -983,7 +989,13 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
     let mut ours: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     for e in &manifest.files {
-        let p = crate::util::safe_join(target_dir, &e.rel_path).unwrap_or_else(|_| target_dir.join(&e.rel_path));
+        let p = match crate::util::safe_join(target_dir, &e.rel_path) {
+            Ok(p) => p,
+            Err(_) => {
+                skipped.push(e.rel_path.clone());
+                continue;
+            }
+        };
         if !p.is_file() {
             continue;
         }
@@ -1007,7 +1019,13 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
     //    「我们的删了、原件也没回来」的状态。
     let mut restored = 0usize;
     for (e, bytes) in &plan {
-        let dst = crate::util::safe_join(target_dir, &e.rel_path).unwrap_or_else(|_| target_dir.join(&e.rel_path));
+        let dst = match crate::util::safe_join(target_dir, &e.rel_path) {
+            Ok(p) => p,
+            Err(_) => {
+                skipped.push(e.rel_path.clone());
+                continue;
+            }
+        };
         let tmp = target_dir.join(format!(".{}.tmp", e.rel_path));
         std::fs::write(&tmp, bytes)?;
         if let Err(e) = util::atomic_replace(&tmp, &dst) {
