@@ -237,12 +237,17 @@ if (EV) {
     var p = (e && e.payload) || {};
     queueBar(p.msg, p.fraction);
   });
-  // 仅预览（DEV + --fgm-sim-assets）：伪造三类旧资产，弹统一提示
+  // 仅预览（DEV + --fgm-sim-assets）：伪造旧资产，弹统一提示
+  //   fg       = 帧生成（要清除）
+  //   sm       = Smooth Motion（要清除）
+  //   dlss5old = 旧版 RenoDX 插件（要彻底卸载）
+  //   dlss5    = GITC 资产旧了（只告知、重新部署即可）
   EV.listen('sim-assets-legacy', function (e) {
     var md = (e && e.payload && e.payload.mode) ? e.payload.mode : 'fg';
-    if (md === 'sm') return showAssetsLegacyDialog([], ['霍格沃茨之遗'], []);
-    if (md === 'dlss5') return showAssetsLegacyDialog([], [], ['霍格沃茨之遗']);
-    showAssetsLegacyDialog(['示例游戏 A（帧生成 0.4.1）', '示例游戏 B（帧生成 0.3.x）'], [], []);
+    if (md === 'sm') return showAssetsLegacyDialog([], ['霍格沃茨之遗'], [], []);
+    if (md === 'dlss5old') return showAssetsLegacyDialog([], [], ['霍格沃茨之遗'], []);
+    if (md === 'dlss5') return showAssetsLegacyDialog([], [], [], ['霍格沃茨之遗']);
+    showAssetsLegacyDialog(['示例游戏 A（帧生成 0.4.1）', '示例游戏 B（帧生成 0.3.x）'], [], [], []);
   });
   // 仅预览（DEV + --fgm-sim-download）：把下载框摆成"下载中"的样子（数字是示例值）
   EV.listen('sim-download', function () {

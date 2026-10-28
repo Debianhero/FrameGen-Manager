@@ -9,13 +9,20 @@
    它没有任何调用点了，已随本轮代码结构审计删除（见 docs/CHANGELOG.md）—— 里面的 sm_legacy_scan 命令
    仍然被 checkAssetsLegacy 用着，别一起删。 */
 
-// 统一弹窗：列出命中的类别与游戏，【全部清除】串行清理，【暂不处理】按版本记一次。
-function showAssetsLegacyDialog(fgNames, smNames, d5Names) {
+// 统一弹窗：列出三类资产里需要处理的游戏，【全部清除】串行清理，【暂不处理】按版本记一次。
+//
+// **两类 DLSS5 必须分开**（踩过一次）：
+//   · d5Names    —— 旧版 RenoDX 插件：deploy 会直接拒绝，必须先「彻底卸载」；
+//   · d5Outdated —— 已经是 GITC、只是内置资产版本旧了（1.6.2 → 1.7.0 这种）：
+//                    **不用卸载**，到 DLSS5 页再点一次部署就会覆盖成新版本。
+//                   而「彻底卸载」会连整个 reshade-shaders 一起删掉（用户自备的预设 /
+//                   效果包就没了），为一次二进制小升级付这个代价太大 ——
+//                    所以它们只做告知，**绝不进清除清单**。
+function showAssetsLegacyDialog(fgNames, smNames, d5Names, d5Outdated) {
   var NL = String.fromCharCode(10);
-  var any = fgNames.length > 0;
-  if (smNames.length > 0) any = true;
-  if (d5Names.length > 0) any = true;
-  if (!any) return Promise.resolve();
+  d5Outdated = d5Outdated || [];
+  var mustClear = fgNames.length > 0 || smNames.length > 0 || d5Names.length > 0;
+  if (!mustClear && d5Outdated.length === 0) return Promise.resolve();
   var fmt = function (arr) {
     var head = arr.slice(0, 6).join('、');
     if (arr.length <= 6) return head;
@@ -24,7 +31,22 @@ function showAssetsLegacyDialog(fgNames, smNames, d5Names) {
   var lines = [];
   if (fgNames.length) lines.push(t('· 帧生成：') + fmt(fgNames));
   if (smNames.length) lines.push(t('· Smooth Motion：') + fmt(smNames));
-  if (d5Names.length) lines.push(t('· DLSS5：') + fmt(d5Names));
+  if (d5Names.length) lines.push(t('· DLSS5（旧版 RenoDX，必须先卸载）：') + fmt(d5Names));
+  if (d5Outdated.length) lines.push(t('· DLSS5（只是资产旧了，重新部署即可）：') + fmt(d5Outdated));
+
+  /* 只有「资产旧了、重部署就行」这一类：单按钮告知，不执行任何清除动作。
+     （内置资产换了版本是常事，不该每次都用"卸载"这种重手段拦用户一次。） */
+  if (!mustClear) {
+    return uiConfirm({
+      title: t('DLSS5 资产已更新'),
+      ok: t('知道了'),
+      single: true,
+      body: t('内置的 DLSS5 插件已升级到新版本。下面这些游戏部署的还是旧资产：') + NL + NL +
+        lines.join(NL) + NL + NL +
+        t('不需要卸载：到「DLSS5」页对它们各点一次「部署 DLSS5」就会换成新版本（你自备的 ReShade 预设和效果包不会被删）。'),
+    });
+  }
+
   // 文案里**只写命中的类别**（用户要求：只有帧生成有更新时，不要再提 SM/DLSS5）
   var names = [];
   if (fgNames.length) names.push(t('帧生成'));
@@ -33,6 +55,10 @@ function showAssetsLegacyDialog(fgNames, smNames, d5Names) {
   var body = t('检测到') + names.join('、') +
     t('资产文件有更新，当前还是旧版本资产文件，是否全部清除后再重新部署？');
   body = body + NL + NL + lines.join(NL);
+  if (d5Outdated.length) {
+    body = body + NL + NL +
+      t('另有 {n} 个游戏的 DLSS5 只是资产旧了，不在上面的清除清单里 —— 到「DLSS5」页点一次部署即可。', { n: d5Outdated.length });
+  }
   return uiConfirm({
     title: t('资产文件有更新'),
     ok: t('全部清除'),
@@ -121,10 +147,15 @@ function checkAssetsLegacy() {
     var d5Legacy = [];
     if (arr[2]) { if (arr[2].games) d5Legacy = arr[2].games; }
     var smAll = uniq(smLegacy.concat(u.sm ? u.sm : []));
-    var d5All = uniq(d5Legacy.concat(u.dlss5 ? u.dlss5 : []));
-    if (!fgAll.length) { if (!smAll.length) { if (!d5All.length) return; } }
+    /* DLSS5 分成两类（见 showAssetsLegacyDialog 的说明）：
+         d5Legacy   = 旧版 RenoDX 插件 → 必须彻底卸载；
+         d5Outdated = 已是 GITC、只是内置资产旧了 → 重新部署即可，不清除。 */
+    var d5Outdated = (u.dlss5 ? u.dlss5 : []).filter(function (n) {
+      return d5Legacy.indexOf(n) < 0;
+    });
+    if (!fgAll.length && !smAll.length && !d5Legacy.length && !d5Outdated.length) return;
     invoke('assets_legacy_prompt_done').catch(function () { });
-    return showAssetsLegacyDialog(fgAll, smAll, d5All);
+    return showAssetsLegacyDialog(fgAll, smAll, d5Legacy, d5Outdated);
   }).catch(function () { });
 }
 

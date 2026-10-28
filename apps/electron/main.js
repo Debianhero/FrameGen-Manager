@@ -283,7 +283,12 @@ function dropLegacyDocs() {
 
 function ensureBundledAssets() {
   const src = path.join(exeDir, 'bundled-assets');
-  if (!fs.existsSync(src)) return Promise.resolve({ copied: 0, reason: 'no-bundle' });
+  const d5srcEarly = path.join(exeDir, 'bundled-dlss5');
+  // 两个目录各自独立：以前缺一个（bundled-assets）就整段返回，
+  // 结果 bundled-dlss5 也不会被铺 —— 只是缺了帧生成资产，DLSS5 的更新就白带了。
+  if (!fs.existsSync(src) && !fs.existsSync(d5srcEarly)) {
+    return Promise.resolve({ copied: 0, reason: 'no-bundle' });
+  }
   const marker = path.join(dataDir, 'bundled-assets.json');
   let prev = null;
   try { prev = JSON.parse(fs.readFileSync(marker, 'utf8')); } catch (e) {  }
@@ -317,7 +322,8 @@ function ensureBundledAssets() {
         } catch (e) { console.error('[bundled] 复制失败', rel, e.message); }
       }
     };
-    copyTree(src, dst, '');
+    // 缺 bundled-assets 时不能调用 copyTree（readdirSync 会抛，整个启动链断掉 → 窗口不出现）
+    if (fs.existsSync(src)) copyTree(src, dst, '');
 
     for (const legacy of ['nvngx_dlssg.dll', 'nvngx_dlss.dll']) {
       try {
@@ -644,12 +650,16 @@ function createWindow() {
       });
     }, 1500);
   }
-  // 仅预览「三类资产有更新」统一弹窗：--fgm-sim-assets
+  // 仅预览「三类资产有更新」统一弹窗：--fgm-sim-assets[-sm|-dlss5|-dlss5old]
+  //   dlss5    = GITC 资产旧了（只告知、重新部署即可）
+  //   dlss5old = 旧版 RenoDX 插件（要彻底卸载）
   if (DEV && (process.argv.includes('--fgm-sim-assets') ||
               process.argv.includes('--fgm-sim-assets-sm') ||
-              process.argv.includes('--fgm-sim-assets-dlss5'))) {
+              process.argv.includes('--fgm-sim-assets-dlss5') ||
+              process.argv.includes('--fgm-sim-assets-dlss5old'))) {
     var simMode = process.argv.includes('--fgm-sim-assets-sm') ? 'sm'
-      : (process.argv.includes('--fgm-sim-assets-dlss5') ? 'dlss5' : 'fg');
+      : (process.argv.includes('--fgm-sim-assets-dlss5old') ? 'dlss5old'
+        : (process.argv.includes('--fgm-sim-assets-dlss5') ? 'dlss5' : 'fg'));
     setTimeout(function () {
       if (mainWin && !mainWin.isDestroyed()) {
         mainWin.webContents.send('fgm:event:sim-assets-legacy', { mode: simMode });
