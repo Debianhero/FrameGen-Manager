@@ -576,6 +576,9 @@
   "请到「帧生成」页重新部署新版本（0.4.1）。": "Please redeploy the new version (0.4.1) on the Frame generation page.",
   "旧版帧生成已清除": "Old frame generation cleared",
   "旧版帧生成已清除（部分失败）": "Old frame generation cleared (partly failed)",
+  "诊断信息已复制（版本 / 驱动 / 日志尾）": "Diagnostics copied (version / driver / log tail)",
+  "复制诊断信息失败：": "Failed to copy diagnostics: ",
+  "诊断": "Diagnose",
   "已有": "Present",
   "缺少": "Missing",
   "缺少 ": "Missing "

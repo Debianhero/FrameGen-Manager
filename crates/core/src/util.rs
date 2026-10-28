@@ -847,3 +847,49 @@ mod safe_join_tests {
         assert!(safe_join(base, "").is_err());
     }
 }
+
+/// 读 PE 的版本资源块，返回一块**宽松的 ASCII 文本**（仅用于特征判断，不保证完整）。
+///
+/// 用途：识别“这个 dxgi.dll 是不是 ReShade 装进来的”——ReShade 的版本资源里带
+/// `ProductName=ReShade`，而游戏/其它 mod 的代理没有。比写死某个版本的哈希更耐升级。
+#[cfg(windows)]
+pub fn file_version_text(p: &std::path::Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW,
+    };
+    let wide: Vec<u16> = p
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let mut handle = 0u32;
+        let size = GetFileVersionInfoSizeW(wide.as_ptr(), &mut handle);
+        if size == 0 {
+            return None;
+        }
+        if size > 4 * 1024 * 1024 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        if GetFileVersionInfoW(wide.as_ptr(), 0, size, buf.as_mut_ptr() as *mut _) == 0 {
+            return None;
+        }
+        // 版本块里字符串是 UTF-16LE；丢掉 0 字节后按 ASCII 粗读，命中特征即可
+        let mut out = String::with_capacity(buf.len() / 2);
+        let mut i = 0usize;
+        while i + 1 < buf.len() {
+            let ch = buf[i];
+            if ch != 0 {
+                out.push(if ch.is_ascii() { ch as char } else { ' ' });
+            }
+            i += 2;
+        }
+        if out.trim().is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+}

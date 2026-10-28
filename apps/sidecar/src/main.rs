@@ -148,6 +148,12 @@ fn gpu_info(force: bool, fake_name: Option<String>) -> Result<Value, String> {
         .map(|d| d.marketing.clone())
         .unwrap_or_else(|| "未知".to_string());
     let driver_src = drv.as_ref().map(|d| d.source).unwrap_or("未知");
+    let driver_major = drv.as_ref().and_then(|d| {
+        d.marketing
+            .split('.')
+            .next()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+    });
     let out = json!({
         "name": name,
         "driver": driver,
@@ -157,6 +163,8 @@ fn gpu_info(force: bool, fake_name: Option<String>) -> Result<Value, String> {
         "gate": route.gate(),
         "hags": framegen_core::gpu::hags_state().label(),
         "driverSrc": driver_src,
+        // 主版本号（如 621.01 -> 621）：给前端做“R580 门槛”判断，避免前端解析各种格式
+        "driverMajor": driver_major,
     });
     if let Ok(mut g) = GPU_CACHE.lock() {
         *g = Some((std::time::Instant::now(), out.clone()));

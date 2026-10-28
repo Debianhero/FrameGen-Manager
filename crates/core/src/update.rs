@@ -1872,7 +1872,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[test]
     fn version_compare_reads_three_parts() {
         assert!(is_newer("1.2.2", "1.2.0"));
         assert!(!is_newer("1.2.0", "1.2.2"));

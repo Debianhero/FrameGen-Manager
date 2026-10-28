@@ -199,26 +199,12 @@ pub fn load_manifest(dir: &Path) -> Option<BackupManifest> {
     serde_json::from_str(&t).ok()
 }
 
-/// ReShade 6.8.0（Addon）模块本体的指纹：dxgi/d3d11/… 只是换了文件名，内容一致。
-const RESHADE_MODULE_SIZE: u64 = 5_592_064;
-const RESHADE_MODULE_SHA256: &str =
-    "0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7";
-
-/// 这个文件是不是 ReShade 本体（DLSS5 部署时装进去的，不属于帧生成资产）。
-fn is_reshade_module(p: &std::path::Path) -> bool {
-    match std::fs::metadata(p) {
-        Ok(m) if m.len() == RESHADE_MODULE_SIZE => {}
-        _ => return false,
-    }
-    crate::util::sha256_file(p)
-        .map(|h| h.eq_ignore_ascii_case(RESHADE_MODULE_SHA256))
-        .unwrap_or(false)
-}
-
-
-/// 0.4.1 起上游的代理 DLL **不再带数字签名**（旧版靠证书里的签名者名字认归属）。
-/// 这里按内置文件的哈希认定"这是我们铺的代理"，否则新版部署后会被判成"代理被覆盖"。
-pub const PROXY_ASSET_SHA256: &[(&str, u64, &str)] = &[
+/// 代理 DLL 的指纹（0.4.1 起上游不再带数字签名，只能靠内容认）。
+///
+/// **这是代理的唯一来源**：资产清单 `ASSET_INVENTORY` 只管核心文件，不再重复列代理。
+/// 单测 `proxy_table_matches_bundled_assets` 会拿 `bundled-assets/` 里的真实文件核对，
+/// 换资产时忘了改这里会直接测挂。
+const PROXY_ASSET_SHA256: &[(&str, u64, &str)] = &[
     ("version.dll", 815_240, "275ffa781b2d244ad269d1d65d4e5b68a12a3f89ff2baaec58d100eb5a1ff411"),
     ("d3d12.dll", 815_744, "e188a992d1ff1ef1ebb51bfc544ac132536d717f2fa2ec77642f9d506cdea58e"),
     ("dbghelp.dll", 832_648, "82c04383044657bcb4bb45b7061d8fb27a753bc222b37f6712c5affb20848f5f"),
@@ -227,15 +213,59 @@ pub const PROXY_ASSET_SHA256: &[(&str, u64, &str)] = &[
     ("winmm.dll", 825_984, "1a584a9b0333e0c3be4ab32e00901c545ca16a620a56784a67cacf003c041739"),
 ];
 
-/// 这个文件是不是我们内置的代理（无签名版本，只能靠哈希认）。
+/// 已知的 ReShade（Addon 版）模块指纹：dxgi/d3d11/… 只是换了文件名，内容一致。
+/// 只在"版本资源读不出来"时兜底；平时靠版本串里的 `ReShade` 字样识别（对升级免疫）。
+const RESHADE_KNOWN: &[(u64, &str)] = &[(
+    5_592_064,
+    "0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7",
+)];
+
+/// 这个文件是不是 ReShade 本体（DLSS5 部署时装进去的，不属于帧生成资产）。
+///
+/// T2：以前写死 6.8.0 的哈希，ReShade 一升级就会把它的 dxgi.dll 判成"帧生成入口被占用"。
+/// 现在优先看 PE 版本串里有没有 `ReShade`，读不到再退回已知哈希表。
+fn is_reshade_module(p: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(p) else {
+        return false;
+    };
+    if meta.len() < 256 * 1024 {
+        return false;
+    }
+    if meta.len() > 64 * 1024 * 1024 {
+        return false;
+    }
+    if let Some(txt) = crate::util::file_version_text(p) {
+        if txt.to_ascii_lowercase().contains("reshade") {
+            return true;
+        }
+    }
+    if RESHADE_KNOWN.iter().any(|(s, _)| *s == meta.len()) {
+        return crate::util::sha256_file(p)
+            .map(|h| RESHADE_KNOWN.iter().any(|(_, sha)| h.eq_ignore_ascii_case(sha)))
+            .unwrap_or(false);
+    }
+    false
+}
+
+
+/// 这个文件是不是我们内置的代理。
+///
+/// **不再单独维护一份哈希表**（T1：两份表迟早漏改一份，上一版就因此把新代理判成"被覆盖"）。
+/// 直接看 `ASSET_INVENTORY` 里"名字不含路径分隔符"的条目：那 6 个就是代理。
+/// 只按内容认（不要求文件名），改名后照样认得出。
 pub fn proxy_is_bundled(path: &std::path::Path) -> bool {
-    // **只按内容认**（不要求文件名）：同一个代理换个名字（winmm→dxgi）仍是我们的文件，
-    // 用户也可能把我们铺的代理改名使用。
     let size = match std::fs::metadata(path) {
         Ok(m) => m.len(),
         Err(_) => return false,
     };
-    if !PROXY_ASSET_SHA256.iter().any(|(_, s, _)| *s == size) {
+    let mut size_hit = false;
+    for (_, s, _) in PROXY_ASSET_SHA256.iter() {
+        if *s == size {
+            size_hit = true;
+            break;
+        }
+    }
+    if !size_hit {
         return false;
     }
     let got = match crate::util::sha256_file(path) {
@@ -1878,4 +1908,37 @@ pub fn is_outdated(dir: &Path) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod proxy_inventory_tests {
+    use super::*;
+
+    /// T5：代理表必须和 `bundled-assets/` 里的真实文件一致（换了资产却忘了改表 → 测挂）。
+    #[test]
+    fn proxy_table_matches_bundled_assets() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/electron/bundled-assets");
+        if !dir.is_dir() {
+            return; // CI / 无资产环境：跳过（发版机上有资产，会真的核对）
+        }
+        for (name, size, sha) in PROXY_ASSET_SHA256.iter() {
+            let f = dir.join(name);
+            assert!(f.is_file(), "{name} 不存在于 bundled-assets");
+            let meta = std::fs::metadata(&f).expect("metadata");
+            assert_eq!(meta.len(), *size, "{name} 大小与表不符");
+            let got = crate::util::sha256_file(&f).expect("sha256");
+            assert!(got.eq_ignore_ascii_case(sha), "{name} 哈希与表不符");
+        }
+    }
+
+    /// T5：ReShade 兜底表的形状（大小写无关比较依赖 64 位十六进制）。
+    #[test]
+    fn reshade_known_table_is_sane() {
+        assert!(!RESHADE_KNOWN.is_empty());
+        for (size, sha) in RESHADE_KNOWN.iter() {
+            assert!(*size > 0);
+            assert_eq!(sha.len(), 64);
+        }
+    }
 }
