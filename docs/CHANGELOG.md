@@ -1,6 +1,6 @@
 # 变更记录
 
-## v1.5.1（未发布）
+## v1.6.0
 
 **新增**
 
@@ -21,8 +21,8 @@
 - 工程：`packaging/preflight.ps1`（双 CR / 语法 / 词表 / 单测一键自检）；代理表与真实资产的一致性单测；`safe_join` 去掉不安全回退
 
 - 工程（本轮补齐）：前端公共层拆到 `ui/lib.js`（DOM 工具/回译/格式化/复制/部署选项记忆），`app.js` 2700 → 2596 行；词表检查同步覆盖 `lib.js`
-- 升级策略（产品决定）：**任何一类资产（帧生成 / Smooth Motion / DLSS5）有更新，启动后直接清干净已部署的旧版本，不再先问**；清完弹一个**只有【我知道了】**的告知窗，写清「哪类资产更新了 / 清了哪些游戏 / 哪些没清掉」。每类都走「把我们的部署收回去」的命令：帧生成 `restore` + `clean_legacy`；SM `sm_set_game(on:false)` + `sm_asset_restore`；DLSS5（GITC）`dlss5_restore`（只收我们的文件，**不动用户自备的 reshade-shaders**）；DLSS5（旧版 RenoDX）`dlss5_uninstall`（布局不兼容，必须彻底卸载）。清不掉的不阻断其余游戏，逐条列进弹窗；按程序版本只做一次
-- 升级体验：内置资产换版本后，「资产有更新」弹窗**不再对已经是 GITC 的 DLSS5 部署执行「彻底卸载」**（那条路会连整个 `reshade-shaders` 一起删掉，用户自备的预设 / 效果包就没了）。现在分成两类：旧版 RenoDX 插件才需要卸载（保留【全部清除】）；只是资产旧了的，改为单按钮告知「到 DLSS5 页点一次部署即可」，**不提供清除动作**。同时：内置资产铺设不再因为缺 `bundled-assets` 就整段跳过 `bundled-dlss5`
+- 升级策略（产品决定）：**任何一类资产（帧生成 / Smooth Motion / DLSS5）有更新，启动后直接清干净已部署的旧版本，不再先问**；清完弹一个**只有【我知道了】**的告知窗，写清「哪类资产更新了（只写真的更新的那几类）/ 清了哪些游戏 / 哪些没能清除 + 下一步怎么办」。每类都走「把我们的部署收回去」的命令：帧生成 `restore` + `clean_legacy`；SM `sm_set_game(on:false)` + `sm_asset_restore`；DLSS5（GITC）`dlss5_restore`（只收我们的文件，**不动用户自备的 reshade-shaders**）；DLSS5（旧版 RenoDX）`dlss5_uninstall`（布局不兼容，必须彻底卸载）。清不掉的不阻断其余游戏，逐条列进弹窗；按程序版本只做一次
+- 修复：内置资产铺设不再因为缺 `bundled-assets` 就整段跳过 `bundled-dlss5`（两个目录各自判断），并给 `copyTree` 补存在性保护（否则 `readdirSync` 抛异常会中断启动链，窗口都不出来）
 - 资产：DLSS5 插件升级到 **GITC Uplift 1.7.0**（上游 2026-10-27 发布）：`gitc-uplift.addon64` / `gitc-uplift.addon32` / `gitc-uplift-helper64.exe` 三个二进制换新，`Uplift.fx` / `UpliftMask.fx` 与神经网络模型（310.9.16）**未变**；文件名与目录布局不变，`dlss5.rs` 里的常量无需改动。SHA-256 与发布包 `SHA256SUMS.txt` 逐条一致（zip 本体也核过），`THIRD_PARTY_NOTICES.txt` 同步更正 —— 那一节原来还写着 RenoDX v8.5 插件与 310.8 模型，和实际内置的 GITC 1.7.0 / 310.9.16 对不上
 - 工程（代码结构审计）：死代码清理（Rust `sm::orphan_profiles` / `recorded_profile_names`、`BackupPlan::created/summary`；前端 `checkSmLegacy` / `checkDlss5Legacy` —— 两类资产合并成一个清理弹窗后就没有调用点了）；**原子写 JSON 收口**到 `util::write_json_atomic` / `write_text_atomic`，配置 / 游戏库缓存 / GPU 名称备份 / SM 记录 / 测速记忆从"直接 fs::write"改成原子写（写一半崩溃会让下次启动读不出来，游戏库那份甚至会按空库处理）；core 的 `windows-sys` 去掉 4 个已无代码可用的 feature（Crypto/WinTrust/Security/Memory，都是 egui 版字体映射与 WinVerifyTrust 的遗留）；`cargo clippy --all-targets -- -D warnings` 在 core 与 sidecar **双双回到 0 告警**（原来 13 处：过时文档注释、可合并 if、过多参数、多余借用、bool 断言等），CI 那道门禁终于真的能过
 - 工程（P1-15 折中版）：错误码成为归类**唯一来源**（`crates/core/src/err.rs`，17 个编号；sidecar 不再自己维护一份 `err_code`，补齐了 SM / DLSS5 / 备份 / 扫描 / 配置 / 文件 IO / 系统目录拒绝七类此前一律落到 `GEN-999` 的错误）；英文界面先按中文原文查表，整句没译文时**按编号兜底**（`ui/lib.js` 的 `backText`），编号始终留在消息末尾供报障；`i18n-coverage.py` 新增门禁「core 的每个错误码必须有英文」，preflight 打印 `ERR-CODE` 行
