@@ -233,13 +233,6 @@ function openDlss5Dialog(g) {
   });
   var riskText = t('风险提示：本工具会往游戏目录写入文件，所有改动都有备份记录，可一键还原。');
   var riskCls = 'risk';
-  if (g.acKernel) {
-    riskText = t('风险提示：这个游戏检出内核级反作弊。注入式方案有封号风险，强烈建议不要在联机游戏里使用。');
-    riskCls = 'risk strong';
-  } else if (g.acAny) {
-    riskText = t('风险提示：这个游戏检出') + g.ac + t('，联机模式下有被判定为异常的风险，请自行判断。');
-    riskCls = 'risk strong';
-  }
   var dialog = h('div', { class: 'dialog' }, [
     h('div', { class: 'dialog-head' }, [
       gameThumb(g, false),
@@ -254,16 +247,6 @@ function openDlss5Dialog(g) {
       h('div', { class: 'kv' }, [h('span', { text: t('部署目标') }), exeSel]),
       h('div', { class: 'kv' }, [h('span', { text: t('图形 API') }), apiSel]),
       h('div', { class: 'kv' }, [h('span', { text: t('渲染后端') }), beSel]),
-      h('div', { class: 'kv' }, [
-        h('span', { text: t('是否自带DLSS') }),
-        g.streamline
-          ? h('b', { class: 'ok', text: t('是') })
-          : h('b', { class: 'warn', text: t('否——软件检测可能不准确') })
-      ]),
-      h('div', { class: 'kv' }, [
-        h('span', { text: t('反作弊') }),
-        g.acKernel ? h('b', { class: 'err', text: g.ac }) : (g.acAny ? h('b', { class: 'warn', text: g.ac }) : h('b', { class: 'ok', text: g.ac || t('未检出') }))
-      ]),
       h('div', { class: 'kv' }, [h('span', { text: t('部署状态') }), stateEl]),
       h('div', { class: 'kv kvtop' }, [h('span', { text: t('已安装的文件') }), foundEl]),
       readiness,
@@ -283,7 +266,6 @@ function openDlss5Dialog(g) {
     var beLabel = beSel.options[beSel.selectedIndex] ? beSel.options[beSel.selectedIndex].text : beSel.value;
     var body = t('ReShade 会装到上面的目录，DLSS5 插件与神经网络模型铺在同一个目录；') +
       t('被覆盖的原件都会先备份，可以一键还原。');
-    if (g.acAny) body += t('\n\n注意：这个游戏有反作弊（') + g.ac + t('）。');
     var apiText = apiLabel + (apiSel.value === 'auto' ? t('（core 按 EXE 判断：') + (g.api || t('未知')) + t('）') : '');
     uiConfirm({
       title: t('部署 DLSS5 到游戏目录'),

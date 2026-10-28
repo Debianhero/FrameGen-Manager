@@ -287,7 +287,14 @@ function ensureBundledAssets() {
   // 两个目录各自独立：以前缺一个（bundled-assets）就整段返回，
   // 结果 bundled-dlss5 也不会被铺 —— 只是缺了帧生成资产，DLSS5 的更新就白带了。
   if (!fs.existsSync(src) && !fs.existsSync(d5srcEarly)) {
+    shellLog('[bundled] 安装目录里没有 bundled-assets / bundled-dlss5：' + exeDir);
     return Promise.resolve({ copied: 0, reason: 'no-bundle' });
+  }
+  /* 关键代理 version.dll 是「部署」的唯一入口。安装目录里那份被杀毒软件删掉时，
+     界面只会显示「资产目录里还没有 version.dll」—— 用户完全看不出原因。
+     把源头状态先记进 shell.log，用户报障时一眼就能定位。 */
+  if (fs.existsSync(src) && !fs.existsSync(path.join(src, 'version.dll'))) {
+    shellLog('[bundled] 警告：安装目录里的 bundled-assets\\version.dll 不存在（安装/解压时被安全软件删了？）');
   }
   const marker = path.join(dataDir, 'bundled-assets.json');
   let prev = null;
@@ -319,7 +326,10 @@ function ensureBundledAssets() {
           }
           fs.copyFileSync(s, t);
           copied++; names.push(rel);
-        } catch (e) { console.error('[bundled] 复制失败', rel, e.message); }
+        } catch (e) {
+          console.error('[bundled] 复制失败', rel, e.message);
+          shellLog('[bundled] 复制失败 ' + rel + '：' + e.message);
+        }
       }
     };
     // 缺 bundled-assets 时不能调用 copyTree（readdirSync 会抛，整个启动链断掉 → 窗口不出现）
@@ -360,7 +370,10 @@ function ensureBundledAssets() {
             }
             fs.copyFileSync(s, t);
             copied++; names.push('bundled-sm/' + r);
-          } catch (e) { console.error('[bundled] 复制失败', r, e.message); }
+          } catch (e) {
+            console.error('[bundled] 复制失败', r, e.message);
+            shellLog('[bundled] 复制失败 bundled-sm/' + r + '：' + e.message);
+          }
         }
       };
       walk(smsrc, '');
@@ -399,7 +412,10 @@ function ensureBundledAssets() {
             }
             fs.copyFileSync(s, t);
             copied++; names.push('DLSS5/' + r);
-          } catch (e) { console.error('[bundled] 复制失败', r, e.message); }
+          } catch (e) {
+            console.error('[bundled] 复制失败', r, e.message);
+            shellLog('[bundled] 复制失败 DLSS5/' + r + '：' + e.message);
+          }
         }
       };
       walkD5(d5src, '');
@@ -423,12 +439,18 @@ function ensureBundledAssets() {
       fs.writeFileSync(marker, JSON.stringify({ version: app.getVersion(), copied: copied, files: names, at: Date.now() }, null, 2), 'utf8');
     } catch (e) {}
     console.log('[bundled] 铺了 ' + copied + ' 个内置文件 -> ' + dst);
+    shellLog('[bundled] 铺了 ' + copied + ' 个内置文件 -> ' + dst);
+    if (!fs.existsSync(path.join(dst, 'version.dll'))) {
+      shellLog('[bundled] 警告：' + path.join(dst, 'version.dll') +
+        ' 不存在 —— 界面会提示「资产目录里还没有 version.dll」（多半是被安全软件删了/拦了）');
+    }
     if (removedLegacy.length) {
       console.log('[bundled] 已清掉资产目录里的旧运行库：' + removedLegacy.join('、'));
     }
     return { copied: copied, files: names, dir: dst, removedLegacy: removedLegacy };
   }).catch(function (e) {
     console.error('[bundled] 跳过：', e.message);
+    shellLog('[bundled] 跳过：' + e.message);
     return { copied: 0, reason: e.message };
   });
 }

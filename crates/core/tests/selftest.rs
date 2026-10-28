@@ -8,7 +8,6 @@
 //! 它们测的是 egui 版的资产行状态机（`App::asset_state_of` 那一套），那套代码已随界面删除。
 //! 另外丢掉了联网类自测（cancel/download/speed）—— 它们本来就不在 CI 里跑。
 
-use framegen_core::anticheat::AcTier;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -351,26 +350,6 @@ fn selftest() -> usize {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "（没有）".to_owned())
     );
-
-    println!("\n--- 系统反作弊（注册表服务/驱动） ---");
-    let sys = framegen_core::anticheat::scan_system();
-    for h in &sys.hits {
-        println!("  [{:?}] {} <- {}", h.tier, h.name, h.evidence);
-    }
-    println!("系统结论: {}", sys.verdict().label());
-
-    println!("\n--- 各游戏目录反作弊判定 ---");
-    for g in &games {
-        // 和界面里一致：根目录 + 渲染 EXE 所在目录一起看
-        let mut r = framegen_core::anticheat::scan_deep(&g.install_dir);
-        if let Some(dir) = framegen_core::scan::find_render_exe(&g.install_dir).and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-            r.merge(framegen_core::anticheat::scan_game_dir(&dir));
-        }
-        if r.verdict() != AcTier::None {
-            let names: Vec<String> = r.hits.iter().map(|h| format!("{} ({:?})", h.name, h.tier)).collect();
-            println!("  {} -> {} : {}", g.name, r.verdict().label(), names.join(", "));
-        }
-    }
 
     println!("\n--- 显卡与路由 ---");
     let gpu = framegen_core::scan::detect_gpu();
@@ -881,88 +860,6 @@ fn selftest() -> usize {
                 && framegen_core::scan::GraphicsApi::Unknown.frame_gen_possible().is_none(),
             "帧生成只在 DX12 / Vulkan 下有意义，未知时不下结论",
         );
-        let eng = |exe: &str, sib: &[&str], pak: &[&str]| {
-            framegen_core::scan::engine_from_facts(&framegen_core::scan::LayoutFacts {
-                exe_name: exe.to_lowercase(),
-                siblings: s(sib),
-                pak_kinds: s(pak),
-                root_exts: Vec::new(),
-            })
-        };
-        // 靠资源扩展名认的几家（RAGE / Anvil / Frostbite / Creation）
-        let eng_ext = |exts: &[&str]| {
-            framegen_core::scan::engine_from_facts(&framegen_core::scan::LayoutFacts {
-                exe_name: "game.exe".to_owned(),
-                siblings: Vec::new(),
-                pak_kinds: Vec::new(),
-                root_exts: s(exts),
-            })
-        };
-        ck(
-            &mut fails,
-            eng("HogwartsLegacy-Win64-Shipping.exe", &[], &["pak"]) == framegen_core::scan::GameEngine::Unreal4,
-            "*-Win64-Shipping.exe + .pak -> Unreal 4",
-        );
-        ck(
-            &mut fails,
-            eng("SomeGame-Win64-Shipping.exe", &[], &["utoc"]) == framegen_core::scan::GameEngine::Unreal5,
-            "看到 .utoc（IoStore）-> Unreal 5",
-        );
-        ck(
-            &mut fails,
-            eng("MyGame.exe", &["UnityPlayer.dll", "MyGame_Data"], &[]) == framegen_core::scan::GameEngine::Unity,
-            "UnityPlayer.dll -> Unity",
-        );
-        ck(
-            &mut fails,
-            eng("cs2.exe", &["engine2.dll", "tier0.dll"], &[]) == framegen_core::scan::GameEngine::Source2,
-            "engine2.dll -> Source 2",
-        );
-        ck(
-            &mut fails,
-            eng("re4.exe", &["re_chunk_000.pak"], &[]) == framegen_core::scan::GameEngine::ReEngine,
-            "re_chunk_*.pak -> RE Engine",
-        );
-        ck(
-            &mut fails,
-            eng("SomeIndie.exe", &["data.win"], &[]) == framegen_core::scan::GameEngine::GameMaker,
-            "data.win -> GameMaker",
-        );
-        ck(
-            &mut fails,
-            eng("Mystery.exe", &["random.dll"], &[]) == framegen_core::scan::GameEngine::Unknown,
-            "没有证据就报 Unknown，不猜",
-        );
-        ck(
-            &mut fails,
-            eng_ext(&["rpf", "dat"]) == framegen_core::scan::GameEngine::Rage,
-            "根目录有 .rpf -> RAGE（GTA / 荒野大镖客）",
-        );
-        ck(
-            &mut fails,
-            eng_ext(&["forge"]) == framegen_core::scan::GameEngine::Anvil,
-            "根目录有 .forge -> Anvil（刺客信条）",
-        );
-        ck(
-            &mut fails,
-            eng_ext(&["cas", "sb", "toc"]) == framegen_core::scan::GameEngine::Frostbite,
-            ".cas + .sb + .toc -> Frostbite（战地 / FIFA）",
-        );
-        ck(
-            &mut fails,
-            eng_ext(&["cas"]) == framegen_core::scan::GameEngine::Unknown,
-            "只有单个 .cas 不算 Frostbite（宁可报未知）",
-        );
-        ck(
-            &mut fails,
-            eng_ext(&["ba2"]) == framegen_core::scan::GameEngine::Creation,
-            ".ba2 -> Creation Engine（上古卷轴 / 辐射）",
-        );
-        ck(
-            &mut fails,
-            eng_ext(&["pak", "dat", "bin"]) == framegen_core::scan::GameEngine::Unknown,
-            "通用的 .pak/.dat 不算任何引擎",
-        );
     }
 
     // ---- 路径归一化 / 长路径 / 版本号归一 ----
@@ -1247,46 +1144,6 @@ fn deploytest() -> usize {
     check!(t2.join("winmm.dll").is_file(), "替代入口文件已写入");
     let _ = framegen_core::deploy::restore(&t2);
     check!(!t2.join("winmm.dll").exists(), "替代入口已还原");
-
-    // 反作弊闸门
-    println!("
--- 反作弊闸门 --");
-    let t3 = root.join("ac");
-    let _ = fs::create_dir_all(t3.join("EasyAntiCheat"));
-    // 光有一个同名目录不算内核级：那可能只是卸载残留或启动器。
-    // （以前这里按内核级算，于是只剩一个用户态组件的游戏也会弹「封号风险」，
-    //   和同一份文件里服务表的判定自相矛盾。）
-    check!(
-        !framegen_core::anticheat::scan_deep(&t3).is_blocked(),
-        "只有 EasyAntiCheat 目录、没有驱动文件时算用户态，不阻止"
-    );
-    fs::write(t3.join("EasyAntiCheat").join("EasyAntiCheat.sys"), b"x").unwrap();
-    check!(
-        framegen_core::anticheat::scan_deep(&t3).is_blocked(),
-        "目录里有 EasyAntiCheat.sys 才判内核级并阻止"
-    );
-    // scan_game_dir() 会顺带检查最多 4 级**祖先**目录（EAC / BattlEye 通常装在游戏
-    // 根目录，而部署目标可能是 ...\Binaries\Win64）。所以这个「干净目录」必须放得足够深，
-    // 让那 4 级祖先全都落在本次测试自己的目录里 —— 否则会一路扫到系统临时目录的祖先，
-    // 那不受测试控制，换台机器结论就可能反过来。
-    let t4 = root.join("clean").join("a").join("b").join("c").join("d");
-    let _ = fs::create_dir_all(&t4);
-    check!(
-        !framegen_core::anticheat::scan_deep(&t4).is_blocked(),
-        "普通空目录不阻止部署"
-    );
-
-    // 反向也要成立：标记在**祖先**目录里时同样要挡住（这正是 scan_game_dir 扫祖先的理由）
-    let t5 = root.join("anc").join("Binaries").join("Win64");
-    let _ = fs::create_dir_all(&t5);
-    let _ = fs::create_dir_all(root.join("anc").join("EasyAntiCheat"));
-    // 用 EAC 的真实布局：驱动文件就在**游戏根**目录里（部署目标在 Binaries\Win64 下面），
-    // 祖先扫描必须能靠它判出内核级。
-    fs::write(root.join("anc").join("EasyAntiCheat.sys"), b"x").unwrap();
-    check!(
-        framegen_core::anticheat::scan_deep(&t5).is_blocked(),
-        "祖先目录里有驱动文件时同样阻止部署"
-    );
 
     // ---- 已装过本项目：允许覆盖（这是「判断用户是否手动装过」的核心行为）----
     println!("
@@ -1607,6 +1464,72 @@ fn deploytest() -> usize {
         }
         None => println!("  （没有内置的 Smooth Motion 组件，跳过这段）"),
     }
+
+    /* ---- 还原时文件被占用：不能谎报「已还原」、更不能把部署记录删掉 ----
+       1.6.3 实测：游戏（或启动器 / 反作弊）还开着、或杀毒软件正在扫 version.dll 时，
+       删除失败被静默忽略，restore 报「已还原」并把记录删了 —— 目录里留下我们的文件、
+       记录却没了，界面翻成「本工具无记录」，用户只能再点一次「清理」，
+       而「清理」没有原件备份，游戏原件再也放不回来。 */
+    println!("
+-- 还原时文件被占用 --");
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let t10 = root.join("locked");
+        let _ = fs::create_dir_all(&t10);
+        fs::write(t10.join(framegen_core::deploy::INI_NAME), orig_ini).unwrap();
+        match framegen_core::deploy::deploy(&t10, "version.dll", &dep_files, &[]) {
+            Ok(_) => {
+                // 只共享读（游戏 LoadLibrary 的状态）：别的进程能读，但删不掉
+                let held = std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(1)
+                    .open(t10.join("version.dll"))
+                    .unwrap();
+                match framegen_core::deploy::restore_report(&t10) {
+                    Ok(o) => {
+                        check!(!o.complete(), "被占用时报告「部分还原」而不是成功");
+                        check!(
+                            o.leftover.iter().any(|x| x == "version.dll"),
+                            "失败清单里点名 version.dll"
+                        );
+                    }
+                    Err(e) => {
+                        println!("  [FAIL] 还原直接报错（应当是部分还原）: {e}");
+                        fails += 1;
+                    }
+                }
+                check!(
+                    framegen_core::deploy::load_manifest(&t10).is_some(),
+                    "部署记录被保留（还能再点一次还原收尾）"
+                );
+                check!(t10.join("version.dll").exists(), "被占用的文件没有被谎报删掉");
+                drop(held);
+                match framegen_core::deploy::restore(&t10) {
+                    Ok(_) => {
+                        check!(
+                            !t10.join("version.dll").exists(),
+                            "放开占用后再点一次「还原」能删干净"
+                        );
+                        check!(
+                            framegen_core::deploy::load_manifest(&t10).is_none(),
+                            "收干净之后才删掉部署记录"
+                        );
+                    }
+                    Err(e) => {
+                        println!("  [FAIL] 第二次还原报错: {e}");
+                        fails += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  [FAIL] 部署报错: {e}");
+                fails += 1;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    println!("  （非 Windows，跳过文件占用这段）");
 
     let _ = fs::remove_dir_all(&root);
     println!("

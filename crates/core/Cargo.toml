@@ -1,6 +1,6 @@
 [package]
 name = "framegen-core"
-version = "1.6.3"
+version = "1.6.7"
 edition = "2021"
 
 [dependencies]

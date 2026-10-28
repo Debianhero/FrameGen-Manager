@@ -43,6 +43,8 @@ var REMOVED = [];
 var SCANNED_AT = '';
 var ASSETS_DIR = '';
 var ASSET_FILES = [];
+// 内置资产缺文件时，本进程里只自动修复 / 提示一次，别每次窗口聚焦都弹窗
+var ASSET_REPAIR_TRIED = false;
 var ICONS = {};
 var CFG = null;
 var GPU = null;
@@ -395,12 +397,54 @@ function assetHas(name) {
   }
   return false;
 }
+/* 内置资产缺文件：先从安装目录的 bundled-assets 补一次。
+   典型场景：version.dll 这类代理 DLL 没有数字签名，被杀毒软件当注入工具删了 ——
+   用户只会看到「资产目录里还没有 version.dll」，然后反复卸载重装（重装也照样被删）。
+   补不回来的话，把「两份都没有」和两个目录路径讲清楚，让人去加白名单。 */
+function repairAssetsOnce(before) {
+  return invoke('assets_repair').then(function (r) {
+    var fixed = (r && r.repaired) || [];
+    var missing = (r && r.missing) || [];
+    var failed = (r && r.failed) || [];
+    /* 两种提示可以同时出现：补回来 3 个、但 version.dll 两份都没了 ——
+       以前 fixed 非空就直接 return，把「还有文件缺」的告知窗吞掉了，用户只看到
+       「补回 3 个」，页面却还是「资产目录里没有 version.dll」。 */
+    if (fixed.length) {
+      toast(t('已从安装目录补回 {n} 个内置资产文件', { n: fixed.length }), 'ok', 8000);
+    }
+    if (missing.length || failed.length) {
+      uiConfirm({
+        // 标题只做窗口抬头；正文第一行就是用户要的「内置资产缺失：…」，
+        // 标题再写一遍「内置资产缺失」会重复。
+        title: t('提示'),
+        ok: t('我知道了'),
+        single: true,
+        danger: true,
+        body: t('内置资产缺失：{files}\n\n可能的原因：杀毒软件 / Windows Defender 拦截了这些文件', {
+          files: missing.concat(failed).join(t('、'))
+        })
+      });
+    }
+    if (fixed.length) return refreshAssets();   // 已经打过标记，不会递归
+    return before;
+  }).catch(function (e) {
+    // 连修复命令本身都失败（资产目录不可写 / sidecar 异常）：也要让用户看见，
+    // 不能只往控制台打一行 —— 否则页面还是「资产目录里没有 version.dll」，没有任何解释。
+    console.warn(t('修复内置资产失败'), e);
+    toast(t('修复内置资产失败：') + errText(e), 'warn', 15000);
+    return before;
+  });
+}
   function refreshAssets() {
   return invoke('assets_status').then(function (a) {
     ASSETS_DIR = a.dir || '';
     var files = a.files || [];
     ASSET_FILES = files.map(function (f) { return f.name; });
     if ($('assets-dir')) $('assets-dir').textContent = ASSETS_DIR || '-';
+    if ((a.missing || 0) > 0 && !ASSET_REPAIR_TRIED) {
+      ASSET_REPAIR_TRIED = true;
+      return repairAssetsOnce(a);
+    }
     return a;
   }).catch(function (e) {
     var box = $('mod-list');

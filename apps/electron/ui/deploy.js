@@ -197,6 +197,8 @@ var smOwnsDir = /Smooth Motion/.test((g && g.deployed) || '');
   syncFrameOptions();
   var stateLabel = deployLabel(g.deployed);
   var stateEl = h('b', { text: stateLabel, class: stateCls(stateLabel) });
+  // 「部分还原」时把原因摊在弹窗里（toast 只显示一行标题，详细原因看不全）。
+  var restoreHint = h('p', { class: 'hint err hidden restore-hint' });
   var legacyBox = null;
   (function () {
     var fga = g.fgAssets;
@@ -345,13 +347,6 @@ var smOwnsDir = /Smooth Motion/.test((g && g.deployed) || '');
   runAdvice(true);
   var riskText = t('风险提示：本工具会往游戏目录写入文件，所有改动都有备份记录，可一键还原。');
   var riskCls = 'risk';
-  if (g.acKernel) {
-    riskText = t('风险提示：这个游戏检出内核级反作弊。注入式方案有封号风险，强烈建议不要在联机游戏里使用。');
-    riskCls = 'risk strong';
-  } else if (g.acAny) {
-    riskText = t('风险提示：这个游戏检出') + g.ac + t('，联机模式下有被判定为异常的风险，请自行判断。');
-    riskCls = 'risk strong';
-  }
   var dialog = h('div', { class: 'dialog' }, [
     h('div', { class: 'dialog-head' }, [
       gameThumb(g, false),
@@ -362,17 +357,6 @@ var smOwnsDir = /Smooth Motion/.test((g && g.deployed) || '');
       h('div', { class: 'kv kvtop' }, [h('span', { text: t('安装目录') }), h('code', { text: g.dir || '-' })]),
       h('div', { class: 'kv' }, [h('span', { text: t('部署目标') }), targetSel]),
       h('div', { class: 'kv' }, [h('span', { text: t('图形 API') }), h('b', { text: backText(g.api) || t('未知') })]),
-      h('div', { class: 'kv' }, [h('span', { text: t('游戏引擎') }), h('b', { text: backText(g.engine) || t('未知') })]),
-      h('div', { class: 'kv' }, [
-        h('span', { text: t('是否自带DLSS') }),
-        g.streamline
-          ? h('b', { class: 'ok', text: t('是') })
-          : h('b', { class: 'warn', text: t('否——软件检测可能不准确') })
-      ]),
-      h('div', { class: 'kv' }, [
-        h('span', { text: t('反作弊') }),
-        g.acKernel ? h('b', { class: 'err', text: g.ac }) : (g.acAny ? h('b', { class: 'warn', text: g.ac }) : h('b', { class: 'ok', text: g.ac || t('未检出') }))
-      ]),
       h('div', { class: 'kv' }, [h('span', { text: t('代理入口') }), sel]),
       h('div', { class: 'kv' }, [h('span', { text: t('优化等级') }), optSel]),
       h('div', { class: 'kv' }, [h('span', { text: t('倍率上限') }), frmSel]),
@@ -384,7 +368,9 @@ var smOwnsDir = /Smooth Motion/.test((g && g.deployed) || '');
       h('div', { class: 'kv' }, [h('span', { text: t('部署状态') }), stateEl]),
       legacyBox,
       adviceBox,
-      readiness
+      readiness,
+      // 放在最后：e2e 用 '.dialog-body > .hint' 取就绪提示（第一个），别抢在它前面
+      restoreHint
     ]),
     h('div', { class: 'dialog-foot' }, [
       deployBtn,
@@ -400,7 +386,7 @@ var smOwnsDir = /Smooth Motion/.test((g && g.deployed) || '');
     doDeploy(g, targetDir, sel.value, stateEl, deployBtn, ov, Number(optSel.value), Number(frmSel.value), String(preSel.value || ''), smOn,
       srSel.value, engSel.value, flowSel.value, hudSel.value === '1');
   });
-  restoreBtn.addEventListener('click', function () { doRestore(g, targetDir, stateEl, ov); });
+  restoreBtn.addEventListener('click', function () { doRestore(g, targetDir, stateEl, restoreHint, ov); });
 }
 // 上次选择的超分预设（兼容 0.4.0 时代的开关值 0/1）
 function srModeSaved() {
@@ -422,7 +408,6 @@ function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, pres
     body += t('\n\n这个目录里还留着旧版（0.3.x）的 ') + g.fgAssets.leftovers.length +
       t(' 个文件，它们不会被自动清理（无法确认是不是游戏自带的）—— 部署完可以用详情里的「清理旧版文件」处理。');
   }
-  if (g.acAny) body += t('\n\n注意：这个游戏有反作弊（') + g.ac + t('）。');
   uiConfirm({
     title: t('部署到游戏目录'),
     ok: smOn ? t('仍然部署') : t('开始部署'),
@@ -470,14 +455,15 @@ function doDeploy(g, targetDir, proxy, stateEl, btn, ov, optimized, frames, pres
     });
   });
 }
-function doRestore(g, targetDir, stateEl, ov) {
+function doRestore(g, targetDir, stateEl, hintEl, ov) {
   var manual = deployKind(g.deployed) === 'manual';
   var body = manual
     ? t('目录：\n') + (targetDir || '') +
       t('\n\n该目录下的帧生成文件无法判定是否为本工具部署，故没有备份记录。确认清理后会直接删除！')
     : t('目录：\n') + (targetDir || '') + t('\n\n按备份记录把文件恢复原样，并删掉本工具写入的文件，') +
       t('以及插件运行时留下的 dlssg_sm86 目录（日志 / 缓存）。') +
-      t('\n\n注意：本工具写入的文件会被「直接删除」（不进回收站）；如果那个位置原本就有文件，会用备份原样放回去。');
+      t('\n\n注意：本工具写入的文件会被「直接删除」（不进回收站）；如果那个位置原本就有文件，会用备份原样放回去。') +
+      t('\n\n请先完全退出游戏（含启动器 / 反作弊）—— 文件被占用时还原做不完，会留下一部分文件。');
   uiConfirm({
     title: manual ? t('清理手动安装的帧生成') : t('还原到部署前'),
     ok: manual ? t('清理') : t('开始还原'),
@@ -487,16 +473,41 @@ function doRestore(g, targetDir, stateEl, ov) {
     if (!yes) return;
     stateEl.textContent = t('还原中…');
     stateEl.className = '';
+    if (hintEl) hintEl.classList.add('hidden');
     showBar(t('正在还原…'), 0.4);
     invoke('restore', { dir: targetDir }).then(function (r) {
+      /* 后端现在返回 {msg, partial, leftover}：文件被游戏 / 杀毒软件占着时删不掉，
+         那一次只能算「部分还原」—— 部署记录还在，用户退出游戏后再点一次就能收尾。
+         以前这里一律显示「已还原」并翻成「未部署」，用户看到的是「本工具无记录」，
+         只能再去点「清理」，游戏原件就再也放不回来了。 */
+      var partial = !!(r && r.partial);
+      var msg = (r && r.msg) ? String(r.msg) : String(r || '');
+      if (partial) {
+        stateEl.textContent = t('还原未完成');
+        stateEl.className = 'warn';
+        // toast 只显示标题，长篇原因放在弹窗里，用户点「还原」前还能看见要关游戏
+        if (hintEl) {
+          hintEl.textContent = msg;
+          hintEl.classList.remove('hidden');
+        }
+        toast(t('还原未完成'), 'warn', 20000, msg);
+        // 记录还在、按钮仍是「还原」：不关窗，让用户退出游戏后直接再点一次
+        refreshLibrary();
+        return;
+      }
+      if (hintEl) hintEl.classList.add('hidden');
       stateEl.textContent = t('未部署');
       stateEl.className = '';
-      toast(t('已还原'), 'ok', 5000, String(r || ''));
+      toast(t('已还原'), 'ok', 5000, msg);
       if (ov) ov.close();
       refreshLibrary();
     }).catch(function (e) {
       stateEl.textContent = t('还原失败');
       stateEl.className = 'err';
+      if (hintEl) {
+        hintEl.textContent = errText(e);
+        hintEl.classList.remove('hidden');
+      }
       toast(t('还原失败：') + errText(e), 'err', 18000);
     }).then(function () { hideBarLater(1800); });
   });

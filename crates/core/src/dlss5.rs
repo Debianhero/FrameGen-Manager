@@ -813,7 +813,7 @@ pub fn prepare(dir: &Path, exe: Option<&Path>, api_sel: GraphicsApi) -> Result<P
     // **「自动」档认不出图形 API 时不替用户猜**（用户要求）：装错代理等于白装一次，
     // 所以直接拒绝，并明确告诉他去上面手动选一个。界面上点「部署」就会看到这句。
     let detected = if api_sel == GraphicsApi::Unknown {
-        scan::detect_tech(&exe).0
+        scan::detect_tech(&exe)
     } else {
         GraphicsApi::Unknown
     };
@@ -895,6 +895,15 @@ pub fn deploy(
 ) -> Result<(String, Vec<String>)> {
     if backend != BACKEND_RESHADE {
         bail!("暂不支持渲染后端「{backend}」，目前只有 {BACKEND_RESHADE}");
+    }
+    /* 先确认目录写得进去，再去跑官方 ReShade 安装器。
+       实测（用户日志）：目录不可写时 ReShade 安装器只会吐一句乱码的
+       「Failed to install dxgi.dll: 对路径…的访问被拒绝」，用户完全不知道要提权 / 加白名单。 */
+    if !crate::util::is_writable(target_dir) {
+        bail!(
+            "这个目录现在写不进去（{}）。\n\n最常见的原因：游戏装在需要管理员权限的位置，或者杀毒软件拦截了 DLL 写入。\n解决办法：右键本程序 →「以管理员身份运行」再部署；把游戏目录加入杀毒软件白名单；并先完全退出游戏。",
+            target_dir.display()
+        );
     }
     let prep = prepare(target_dir, target_exe, api_sel)?;
     let Prepared {

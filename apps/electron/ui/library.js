@@ -158,16 +158,9 @@ function dlss5Label(s) {
         fga.legacy ? 'warn' : (fga.manual ? 'dim' : 'ok')
       )
     : null;
-  var dlss = g.streamline
-    ? badge(t('自带 DLSS'), 'acc')
-    : badge(g.techScanned ? t('未检出 DLSS') : t('未检测 DLSS'), 'dim');
-  var acBadge = g.acKernel ? badge(t('内核级反作弊'), 'err') : (g.acAny ? badge(g.ac, 'warn') : null);
   var badges = h('div', { class: 'badges' }, [
     badge(g.source || t('未知'), g.manual ? 'dim' : null),
-    dlss,
-    acBadge,
     badge(t('API：') + (backText(g.api) || t('未知')), 'dim'),
-    badge(t('引擎：') + (backText(g.engine) || t('未知')), 'dim'),
     badge(deployLabel(g.deployed), stateCls(g.deployed)),
     assetBadge,
     g.exists ? null : badge(t('目录不存在'), 'err')
@@ -365,7 +358,6 @@ function wallTile(g, idx) {
            : h('div', { class: 'ph', text: (g.name || '?').slice(0, 1) }));
   return h('div', { class: 'tile', style: '--i:' + idx, on: { click: function () { openDlss5Dialog(g); } } }, [
     media,
-    h('div', { class: 'ribbon' + (g.streamline ? ' acc' : ''), text: g.streamline ? t('自带 DLSS') : t('其它') }),
     h('div', { class: 'meta' }, [
       h('div', { class: 'name', text: g.name || t('（无名）') }),
       h('div', { class: 'tag', text: t('图形 API：') + (backText(g.api) || t('未知')) }),
@@ -374,15 +366,12 @@ function wallTile(g, idx) {
   ]);
 }
 function refreshWall() {
-  var a = $('wall-dlss');
   var b = $('wall-other');
-  if (!a || !b) return;
-  a.textContent = '';
+  if (!b) return;
   b.textContent = '';
-  var d = GAMES.filter(function (g) { return !!g.streamline && !dlss5IsRemoved(g); });
-  var o = GAMES.filter(function (g) { return !g.streamline && !dlss5IsRemoved(g); });
-  if ($('c-dlss')) $('c-dlss').textContent = d.length;
-  if ($('c-other')) $('c-other').textContent = o.length;
+  // 不再按「是否自带 DLSS」分组（该检测已移除）：所有游戏一个列表
+  var all = GAMES.filter(function (g) { return !dlss5IsRemoved(g); });
+  if ($('c-other')) $('c-other').textContent = all.length;
   function put(g, i, host) {
     var tile = wallTile(g, i);
     if (tile && tile.appendChild && !dlss5IsRemoved(g)) {
@@ -397,9 +386,7 @@ function refreshWall() {
     }
     host.appendChild(tile);
   }
-  d.forEach(function (g, i) { put(g, i, a); });
-  o.forEach(function (g, i) { put(g, i, b); });
-  if (!d.length) a.appendChild(h('div', { class: 'empty', text: t('没有检测到自带 DLSS 的游戏。') }));
+  all.forEach(function (g, i) { put(g, i, b); });
 }
 function openPath(p) {
   if (!p) return;

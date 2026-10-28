@@ -690,6 +690,159 @@ pub fn asset_path(name: &str) -> Result<PathBuf> {
     Ok(util::assets_dir()?.join(name))
 }
 
+/// 内置资产源目录：安装目录（便携版就是 exe 同级）下的 bundled-assets。
+///
+/// 由 electron-builder 的 extraFiles 原样铺进来（便携版解压后也在同一层）。
+/// 它是「资产目录」的**最后一份拷贝**：这里也没有，就真的没地方补了。
+pub fn bundled_assets_dir() -> Option<PathBuf> {
+    Some(util::exe_dir()?.join("bundled-assets"))
+}
+
+/// 一次「从安装目录补内置资产」的结果。
+#[derive(Debug, Default)]
+pub struct AssetRepair {
+    /// 实际使用的资产目录
+    pub dir: PathBuf,
+    /// 安装目录（exe 同级；bundled-assets / bundled-sm / bundled-dlss5 都在它下面）
+    pub bundle: Option<PathBuf>,
+    /// 这次补回来的文件（相对资产目录的路径，反斜杠分隔）
+    pub repaired: Vec<String>,
+    /// 本来就存在、大小也对（没动）
+    pub present: usize,
+    /// 资产目录和安装目录**都没有**的核心文件 —— 多半被安全软件删了
+    pub missing: Vec<String>,
+    /// 复制 / 校验失败的文件与原因
+    pub failed: Vec<String>,
+}
+
+/// 把安装目录里的三套内置资产（bundled-assets / bundled-sm / bundled-dlss5）中
+/// 缺失（或大小不对）的文件补进资产目录。
+///
+/// **只补不覆盖**：大小一致的文件一律跳过，绝不碰用户自己换过的资产。
+///
+/// 为什么需要它：version.dll 这类代理 DLL 从 0.4.1 起没有数字签名，Windows Defender /
+/// 360 / 火绒经常把它当注入工具删掉。安装目录和资产目录各有一份，两份都没了，界面就只剩
+/// 一句「资产目录里还没有 version.dll」—— 用户完全不知道是被杀软拦了，只会反复卸载重装。
+/// 这里先把能补的补回来；源里也没有的那些由 missing 如实报出来（界面据此提示加白名单）。
+pub fn repair_assets_from_bundle() -> Result<AssetRepair> {
+    let dir = util::assets_dir()?;
+    repair_assets_at(util::exe_dir().as_deref(), &dir)
+}
+
+/// repair_assets_from_bundle 的实现。安装目录与资产目录显式传入，单测才能不碰真实数据目录。
+fn repair_assets_at(app: Option<&Path>, dir: &Path) -> Result<AssetRepair> {
+    std::fs::create_dir_all(dir).with_context(|| format!("创建资产目录失败: {}", dir.display()))?;
+    let mut out = AssetRepair {
+        dir: dir.to_path_buf(),
+        bundle: app.map(Path::to_path_buf),
+        ..Default::default()
+    };
+    let Some(app) = app else {
+        out.missing = expected_asset_files();
+        return Ok(out);
+    };
+    // 三套资产各自铺到不同子目录，和 main.js 的 ensureBundledAssets 完全一致
+    let trees: [(&str, PathBuf, &str); 3] = [
+        ("bundled-assets", dir.to_path_buf(), ""),
+        ("bundled-sm", dir.join("bundled-sm"), "bundled-sm"),
+        ("bundled-dlss5", dir.join("DLSS5"), "DLSS5"),
+    ];
+    for (src_rel, dst, prefix) in trees {
+        let src = app.join(src_rel);
+        if src.is_dir() {
+            copy_missing_tree(&src, &dst, prefix, &mut out);
+        }
+    }
+    for rel in expected_asset_files() {
+        if dir.join(&rel).is_file() {
+            continue;
+        }
+        if app.join("bundled-assets").join(&rel).is_file() {
+            // 源里有、刚才却没补上：复制失败已经记进 failed，不重复报 missing
+            continue;
+        }
+        out.missing.push(rel);
+    }
+    // Smooth Motion 组件也叫 version.dll，而且按显卡系列分了两份 —— 用户日志里
+    // 正是 assets\bundled-sm\rtx30\version.dll 缺失（AST-004）。源里带了这套资产时才检查，
+    // 免得以「便携版没带 SM 组件」的历史布局误报。
+    if app.join("bundled-sm").is_dir() {
+        for rel in [
+            Path::new("bundled-sm").join("rtx30").join("version.dll"),
+            Path::new("bundled-sm").join("rtx20").join("version.dll"),
+        ] {
+            if !dir.join(&rel).is_file() && !app.join(&rel).is_file() {
+                out.missing.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 把 src 里缺失/大小不对的文件补到 dst；reported 前缀只影响结果里的展示路径。
+fn copy_missing_tree(src: &Path, dst: &Path, prefix: &str, out: &mut AssetRepair) {
+    for entry in walkdir::WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(src) else { continue };
+        let rel = rel.to_string_lossy().replace('/', "\\");
+        if rel.is_empty() {
+            continue;
+        }
+        let shown = if prefix.is_empty() {
+            rel.clone()
+        } else {
+            format!("{prefix}\\{rel}")
+        };
+        let want = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let target = dst.join(&rel);
+        if std::fs::metadata(&target).map(|m| m.len() == want).unwrap_or(false) {
+            out.present += 1;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                out.failed.push(format!("{shown}（建目录失败：{e}）"));
+                continue;
+            }
+        }
+        match std::fs::copy(entry.path(), &target) {
+            Ok(_) => {
+                let got = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+                if got == want {
+                    out.repaired.push(shown);
+                } else {
+                    out.failed
+                        .push(format!("{shown}（复制后大小 {got} ≠ {want}）"));
+                }
+            }
+            Err(e) => out.failed.push(format!("{shown}（{e}）")),
+        }
+    }
+}
+
+/// 部署 / 界面真正依赖的核心资产：六个代理 + INI + 运行库/内核分发表。
+fn expected_asset_files() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |rel: &str| {
+        if !out.iter().any(|x: &String| x.eq_ignore_ascii_case(rel)) {
+            out.push(rel.to_owned());
+        }
+    };
+    for n in crate::scan::PROXY_PRIORITY {
+        add(n);
+    }
+    add(INI_REPO_PATH);
+    for (rel, _, _) in crate::deploy::ASSET_INVENTORY
+        .iter()
+        .chain(crate::deploy::SR_INVENTORY.iter())
+    {
+        add(rel);
+    }
+    out
+}
+
 
 /// 出厂默认的「优化等级」（上游 0.4.0 的出厂 INI：Optimized=2；0.3.x 时期是 1）
 pub const DEFAULT_OPTIMIZED: u8 = 1;
@@ -1874,5 +2027,75 @@ mod tests {
         assert!(!is_newer("1.2.0", "1.2.2"));
         assert!(!is_newer("1.2.2", "1.2.2"));
         assert!(is_newer("v1.3.0", "1.2.9"));
+    }
+
+    /// 资产修复：只补缺失/大小不对的，覆盖不碰；源里也没有的核心文件要如实报出来。
+    #[test]
+    fn repair_copies_missing_and_keeps_existing() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!(
+            "fgm-asset-repair-{}-{stamp}",
+            std::process::id()
+        ));
+        // 模拟安装目录：bundled-assets / bundled-sm / bundled-dlss5 三套
+        let app = base.join("app");
+        let assets = base.join("assets");
+        let fg = app.join("bundled-assets");
+        std::fs::create_dir_all(fg.join("dlssg_sm86")).unwrap();
+        std::fs::create_dir_all(app.join("bundled-sm").join("rtx30")).unwrap();
+        std::fs::create_dir_all(app.join("bundled-sm").join("rtx20")).unwrap();
+        std::fs::create_dir_all(app.join("bundled-dlss5")).unwrap();
+        std::fs::create_dir_all(assets.join("dlssg_sm86")).unwrap();
+        std::fs::write(fg.join("version.dll"), b"PROXY-OK").unwrap();
+        std::fs::write(fg.join("dlssg_sm86").join("a.dll"), b"NEW-DLL").unwrap();
+        std::fs::write(fg.join("same.txt"), b"SAME").unwrap();
+        std::fs::write(
+            app.join("bundled-sm").join("rtx30").join("version.dll"),
+            b"SM-DLL",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("bundled-sm").join("rtx20").join("version.dll"),
+            b"SM20",
+        )
+        .unwrap();
+        std::fs::write(app.join("bundled-dlss5").join("Uplift.fx"), b"FX").unwrap();
+        // 资产目录：version.dll 缺失、a.dll 内容坏了一半（大小不对）、same.txt 原样；
+        // SM / DLSS5 两套都没铺
+        std::fs::write(assets.join("dlssg_sm86").join("a.dll"), b"OLD").unwrap();
+        std::fs::write(assets.join("same.txt"), b"SAME").unwrap();
+
+        let r = repair_assets_at(Some(&app), &assets).unwrap();
+        assert!(r.repaired.iter().any(|x| x == "version.dll"), "{:?}", r.repaired);
+        assert!(r.repaired.iter().any(|x| x == "dlssg_sm86\\a.dll"), "{:?}", r.repaired);
+        assert!(
+            r.repaired.iter().any(|x| x == "bundled-sm\\rtx30\\version.dll"),
+            "SM 组件的 version.dll 也要补：{:?}",
+            r.repaired
+        );
+        assert!(r.repaired.iter().any(|x| x == "DLSS5\\Uplift.fx"), "{:?}", r.repaired);
+        assert_eq!(r.present, 1, "same.txt 应该按原样跳过");
+        assert_eq!(std::fs::read(assets.join("version.dll")).unwrap(), b"PROXY-OK");
+        assert_eq!(
+            std::fs::read(assets.join("dlssg_sm86").join("a.dll")).unwrap(),
+            b"NEW-DLL"
+        );
+        assert_eq!(
+            std::fs::read(assets.join("bundled-sm").join("rtx30").join("version.dll")).unwrap(),
+            b"SM-DLL"
+        );
+        // 源里没有的核心代理（winmm.dll 等）必须报 missing，界面才能提示「被杀软删了」
+        assert!(r.missing.iter().any(|x| x == "winmm.dll"), "{:?}", r.missing);
+        // SM 两份都在就不该误报
+        assert!(
+            !r.missing.iter().any(|x| x.contains("rtx30")),
+            "{:?}",
+            r.missing
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

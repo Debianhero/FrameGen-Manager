@@ -49,10 +49,14 @@ function legacyClearJobs(fgNames, smNames, d5Names) {
   (fgNames || []).forEach(function (n) {
     var g = byName(n);
     if (!g) return;
+    // 帧生成装在**渲染 EXE 所在目录**（g.target，常常是 …\Binaries\Win64），
+    // 不是游戏根目录。以前这里用 g.dir，restore 永远「没有部署记录」，
+    // 启动清理对这类游戏等于没做。
+    var dir = g.target || g.dir;
     jobs.push({
       kind: 'fg', name: n, cmds: [
-        { cmd: 'restore', args: { dir: g.dir } },
-        { cmd: 'clean_legacy', args: { dir: g.dir } },
+        { cmd: 'restore', args: { dir: dir } },
+        { cmd: 'clean_legacy', args: { dir: dir } },
       ]
     });
   });
@@ -91,6 +95,13 @@ function runLegacyClear(jobs) {
     job.cmds.forEach(function (c) {
       chain = chain
         .then(function () { return invoke(c.cmd, c.args); })
+        // 还原可能「部分完成」：文件还在（游戏 / 杀毒软件占着），记录也还在。
+        // 这种不能算清理成功，否则告知窗会骗人。
+        .then(function (r) {
+          if (c.cmd === 'restore' && r && r.partial) {
+            errs.push((r.msg && String(r.msg)) || t('还原未完成'));
+          }
+        })
         .catch(function (e) { errs.push(errText(e)); });
     });
     return chain.then(function () {

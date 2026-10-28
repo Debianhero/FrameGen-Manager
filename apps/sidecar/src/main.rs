@@ -255,6 +255,34 @@ fn selfupdate_cancel() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         .clone()
 }
 
+/// 「修复内置资产」：把安装目录 bundled-assets 里缺的（或大小不对的）补进资产目录。
+///
+/// 界面在发现资产缺文件时调用一次；补不回来的（源里也没有）原样返回，
+/// 由界面提示「多半被杀毒软件删了，加白名单后重装」。
+fn assets_repair() -> Result<Value, String> {
+    let r = framegen_core::update::repair_assets_from_bundle()
+        .map_err(|e| format!("{e:#}"))?;
+    framegen_core::log::line(&format!(
+        "[assets] 修复内置资产：补回 {}、原样 {}、两份都缺 {}、失败 {} ｜ 资产 {} ｜ 内置 {}",
+        r.repaired.len(),
+        r.present,
+        r.missing.len(),
+        r.failed.len(),
+        r.dir.display(),
+        r.bundle
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "（无）".to_owned())
+    ));
+    Ok(json!({
+        "dir": r.dir.display().to_string(),
+        "bundle": r.bundle.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        "repaired": r.repaired,
+        "missing": r.missing,
+        "failed": r.failed,
+    }))
+}
+
 fn assets_status() -> Value {
     let dir = framegen_core::util::assets_dir().unwrap_or_default();
     let mut files = Vec::new();
@@ -666,13 +694,32 @@ fn clean_backups() -> Result<Value, String> {
     }))
 }
 
-/// 日志尾部（给「复制诊断信息」用）
+/// 日志尾部（给「复制诊断信息」用）。
+///
+/// 除了 sidecar 自己的 framegen.log，还附上主进程的 shell.log：资产铺设失败
+/// （「[bundled] 复制失败 ...」「version.dll 不存在」）只记在那边，偏偏就是
+/// 「资产目录里没有 version.dll」这类问题最关键的线索。
 fn log_tail(lines: usize) -> String {
-    let Some(p) = framegen_core::log::path() else { return String::new() };
-    let Ok(t) = std::fs::read_to_string(p) else { return String::new() };
-    let all: Vec<&str> = t.lines().collect();
-    let start = all.len().saturating_sub(lines);
-    all[start..].join("\n")
+    let mut out = String::new();
+    if let Some(p) = framegen_core::log::path() {
+        if let Ok(t) = std::fs::read_to_string(p) {
+            let all: Vec<&str> = t.lines().collect();
+            let start = all.len().saturating_sub(lines);
+            out.push_str(&all[start..].join("\n"));
+        }
+    }
+    if let Some(dir) = framegen_core::log::dir() {
+        let p = dir.join("shell.log");
+        if let Ok(t) = std::fs::read_to_string(p) {
+            let all: Vec<&str> = t.lines().collect();
+            let start = all.len().saturating_sub(lines);
+            if !out.is_empty() {
+                out.push_str("\n\n=== 主进程日志（shell.log） ===\n");
+            }
+            out.push_str(&all[start..].join("\n"));
+        }
+    }
+    out
 }
 
 /// 用资源管理器打开一个目录（不存在就打开它的父目录）。
@@ -712,7 +759,6 @@ fn game_row(c: &framegen_core::scan::CachedRow, manual: bool) -> Value {
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "未知".to_string());
-    let ac = c.ac;
     json!({
         "name": c.entry.name,
         "dir": install.display().to_string(),
@@ -720,12 +766,7 @@ fn game_row(c: &framegen_core::scan::CachedRow, manual: bool) -> Value {
         "source": source,
         "appId": c.entry.app_id,
         "api": c.api.label(),
-        "engine": c.engine.label(),
-        "streamline": c.streamline,
         "techScanned": c.tech_scanned,
-        "ac": ac.label(),
-        "acKernel": ac == framegen_core::anticheat::AcTier::Kernel,
-        "acAny": ac != framegen_core::anticheat::AcTier::None,
         "manual": manual,
         "exists": install.is_dir(),
         "deployed": framegen_core::deploy::state_of(&target).label(),
@@ -781,43 +822,7 @@ fn clean_legacy(dir: String) -> Result<Value, String> {
 
 /// 真实游戏库：scanned + manual 合并，去掉用户移除过的，算好部署目标与状态。
 fn list_games() -> Result<Value, String> {
-    let mut cache = framegen_core::scan::load_library();
-    /* 判定结果会跟着库缓存走，而检测只在「添加 / 扫描」时算一次。
-       于是有个坑：**检测逻辑本身升级了，老缓存还是旧结论** —— 用户装上新版打开程序，
-       看到的仍是一年前的判定（实测：「霍格沃茨之遗」自带 DLSS 帧生成，却被旧逻辑判成
-       「未检出」，装了修好的版本也还是错的）。
-
-       这里做一次**廉价自愈**：只对「缓存说不自带 DLSS」的行重算。真没有的游戏，重算
-       也就是再看一遍导入表 + 几个固定目录（每行几毫秒）；被旧逻辑漏掉的，打开程序就对了。
-       缓存里已经是 true 的行不重算，所以正常启动不会多花时间。 */
-    let mut healed = false;
-    for row in cache.scanned.iter_mut().chain(cache.manual.iter_mut()) {
-        if row.streamline {
-            continue;
-        }
-        let Some(exe) = row.render_exe.clone() else { continue };
-        if !exe.is_file() {
-            continue;
-        }
-        let rep = framegen_core::scan::detect_tech_report(&exe);
-        if rep.streamline {
-            row.streamline = true;
-            row.api = rep.api;
-            row.engine = rep.engine;
-            row.tech_scanned = true;
-            healed = true;
-            framegen_core::log::line(&format!(
-                "重新检测到自带 DLSS 帧生成：{}（{}）",
-                row.entry.name,
-                exe.display()
-            ));
-        }
-    }
-    if healed {
-        if let Err(e) = framegen_core::scan::save_library(&cache) {
-            framegen_core::log::line(&format!("自愈后写回游戏库失败：{e}"));
-        }
-    }
+    let cache = framegen_core::scan::load_library();
     let ignored = cache.ignored.clone();
     let is_ignored = |d: &Path| {
         let k = framegen_core::scan::path_key(d);
@@ -879,45 +884,33 @@ fn list_games() -> Result<Value, String> {
     }))
 }
 
-/// 扫出来的条目 -> 缓存行：找渲染 EXE、判图形 API / 引擎 / 自带帧生成、判反作弊。
+/// 扫出来的条目 -> 缓存行：找渲染 EXE、判图形 API。
 ///
-/// 与 egui 版 App::build_row 同一套调用顺序，不能省步骤 ——
-/// 少一步就会写出「api/engine 是 Unknown 却标记成已算过」的坏缓存。
+/// 反作弊 / 游戏引擎 / 是否自带 DLSS 三项检测已移除（用户要求）：
+/// 它们要么误报多、要么对部署没有实际作用，还拖慢扫描。
 fn build_cached(entry: framegen_core::scan::GameEntry) -> framegen_core::scan::CachedRow {
     let render_exe = framegen_core::scan::find_render_exe(&entry.install_dir);
-    let (api, engine, streamline, tech_scanned) = match render_exe.as_deref() {
+    let (api, tech_scanned) = match render_exe.as_deref() {
         Some(p) => {
             let rep = framegen_core::scan::detect_tech_report(p);
             framegen_core::log::line(&format!(
-                "图形/引擎 [{}] API={} 引擎={} 自带帧生成={} | {}",
+                "图形 API [{}] {} | {}",
                 entry.name,
                 rep.api.label(),
-                rep.engine.label(),
-                rep.streamline,
                 rep.evidence.join("；")
             ));
-            (rep.api, rep.engine, rep.streamline, true)
+            (rep.api, true)
         }
         None => (
             framegen_core::scan::GraphicsApi::Unknown,
-            framegen_core::scan::GameEngine::Unknown,
-            false,
             // 连渲染 EXE 都没找到：不是「算过」，等以后找到再算
             false,
         ),
     };
-    // 除了游戏根目录，还要看渲染 EXE 所在目录：BattlEye 经常埋在 Binaries\Win64\BattlEye
-    let mut rep = framegen_core::anticheat::scan_game_dir(&entry.install_dir);
-    if let Some(dir) = render_exe.as_ref().and_then(|p| p.parent()) {
-        rep.merge(framegen_core::anticheat::scan_game_dir(dir));
-    }
     framegen_core::scan::CachedRow {
         entry,
         render_exe,
-        ac: rep.verdict(),
         api,
-        engine,
-        streamline,
         tech_scanned,
         dlss5_api: None,
     }
@@ -1162,18 +1155,10 @@ fn add_library_dir(dir: &Path, exe: Option<PathBuf>) -> Result<Value, String> {
         Some(e) => Some(e),
         None => framegen_core::scan::find_render_exe(dir),
     };
-    let (api, engine, streamline) = render_exe
+    let api = render_exe
         .as_deref()
         .map(framegen_core::scan::detect_tech)
-        .unwrap_or((
-            framegen_core::scan::GraphicsApi::Unknown,
-            framegen_core::scan::GameEngine::Unknown,
-            false,
-        ));
-    let mut rep = framegen_core::anticheat::scan_game_dir(dir);
-    if let Some(d) = render_exe.as_ref().and_then(|p| p.parent()) {
-        rep.merge(framegen_core::anticheat::scan_game_dir(d));
-    }
+        .unwrap_or(framegen_core::scan::GraphicsApi::Unknown);
 
     // 已在库里（扫出来的或手动加的）：就地更新那一行。
     //
@@ -1223,10 +1208,7 @@ fn add_library_dir(dir: &Path, exe: Option<PathBuf>) -> Result<Value, String> {
         }
         row.render_exe = render_exe;
         row.api = api;
-        row.engine = engine;
-        row.streamline = streamline;
         row.tech_scanned = true;
-        row.ac = rep.verdict();
         framegen_core::scan::save_library(&cache).map_err(|e| format!("{e:#}"))?;
         framegen_core::log::line(&format!("更新游戏库条目：{}", dir.display()));
         return Ok(json!({
@@ -1244,10 +1226,7 @@ fn add_library_dir(dir: &Path, exe: Option<PathBuf>) -> Result<Value, String> {
     cache.manual.push(framegen_core::scan::CachedRow {
         entry,
         render_exe,
-        ac: rep.verdict(),
         api,
-        engine,
-        streamline,
         tech_scanned: true,
         dlss5_api: None,
     });
@@ -1546,7 +1525,10 @@ fn framegen_cleanup_outdated() -> Result<Value, String> {
         if !framegen_core::deploy::is_outdated(&dir) {
             continue;
         }
-        match framegen_core::deploy::restore(&dir) {
+        // 用 restore_report：「部分还原」也算没清干净（文件被游戏 / 杀毒软件占着），
+        // 不能报进 cleaned 里骗人。
+        match framegen_core::deploy::restore_report(&dir) {
+            Ok(o) if !o.complete() => failed.push(format!("{}：{}", row.entry.name, o.msg)),
             Ok(_) => {
                 let (_del, bad) = framegen_core::deploy::clean_legacy_leftovers(&dir);
                 if !bad.is_empty() {
@@ -1712,14 +1694,22 @@ fn deploy_game(
 /// 一键还原。
 ///
 /// 两条路（用户要求都要能走通）：
-///   * 有本工具的部署记录 -> deploy::restore：按 manifest 把游戏原件放回去、删掉我们写的文件；
+///   * 有本工具的部署记录 -> deploy::restore_report：按 manifest 把游戏原件放回去、删掉我们写的文件；
 ///   * 没有记录、但目录里有**本项目的**帧生成文件（用户自己手动装的）-> cleanup_manual：
 ///     没有备份可恢复，所以只把认得出的那些文件删掉，删完复查并如实报告。
-fn restore(dir: String) -> Result<String, String> {
+///
+/// 返回 {msg, partial, leftover}：partial=true 表示目录里还有本工具的文件没删掉
+/// （多半是游戏 / 杀毒软件占着），**部署记录仍然保留**。界面必须按「部分还原」显示，
+/// 不能翻成「未部署」—— 否则用户只能去点「清理」，游戏原件就再也放不回来了。
+fn restore(dir: String) -> Result<Value, String> {
     let _ = checked_dir(&dir)?;
     let p = Path::new(&dir);
-    match framegen_core::deploy::restore(p) {
-        Ok(m) => Ok(m),
+    match framegen_core::deploy::restore_report(p) {
+        Ok(o) => Ok(json!({
+            "msg": o.msg,
+            "partial": !o.complete(),
+            "leftover": o.leftover,
+        })),
         Err(e) => {
             // 只有确实找到「本项目的文件」时才走清理那条路；否则把原来的错误原样报出来
             if framegen_core::deploy::manual_files(p).is_empty() {
@@ -1729,7 +1719,8 @@ fn restore(dir: String) -> Result<String, String> {
                 "没有部署记录，按「手动安装清理」处理：{}",
                 p.display()
             ));
-            framegen_core::deploy::cleanup_manual(p).map_err(|x| x.to_string())
+            let msg = framegen_core::deploy::cleanup_manual(p).map_err(|x| x.to_string())?;
+            Ok(json!({ "msg": msg, "partial": false, "leftover": [] }))
         }
     }
 }
@@ -2119,6 +2110,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         ),
         "covers" => Ok(Value::Array(covers())),
         "assets_status" => Ok(assets_status()),
+        "assets_repair" => assets_repair(),
         "cancel_self_update" => {
             // 置位取消标志；下载循环下一块就会退出，然后由 self_update_download 清理半截文件。
             selfupdate_cancel().store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2184,7 +2176,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
             args.get("hudless").and_then(Value::as_str).map(str::to_owned),
             )
         }
-        "restore" => Ok(Value::String(restore(arg_str(args, "dir")?)?)),
+        "restore" => restore(arg_str(args, "dir")?),
 
         "gpu_spoof_state" => gpu_spoof_state(),
         "gpu_spoof_apply" => {

@@ -21,6 +21,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::util;
 
@@ -205,20 +206,47 @@ pub fn apply(dir: &Path, plan: &BackupPlan, items: &[WriteItem]) -> Result<()> {
 /// 失败信息里带上回滚的**真实**结果：回滚失败时不能只写「已回滚」（那是撒谎）。
 fn with_rollback(e: anyhow::Error, dir: &Path, plan: &BackupPlan) -> anyhow::Error {
     match rollback(dir, plan) {
-        Ok(r) => anyhow!(
-            "{e}，已回滚（恢复 {} 个原件、删除 {} 个新文件）",
-            r.restored,
-            r.removed
-        ),
+        Ok(r) => {
+            let mut msg = format!(
+                "{e}，已回滚（恢复 {} 个原件、删除 {} 个新文件）",
+                r.restored, r.removed
+            );
+            if !r.failed.is_empty() {
+                msg.push_str(&format!(
+                    "；另有 {} 个文件没删掉（{}）",
+                    r.failed.len(),
+                    explain_failed(&r.failed)
+                ));
+            }
+            anyhow!(msg)
+        }
         Err(re) => anyhow!("{e}；**回滚也失败了**：{re}（请点「还原」再试一次）"),
     }
 }
 
 /// 回滚结果。两个数字都是**真的做到了**的数量，不是计划里的条数。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackReport {
     pub restored: usize,
     pub removed: usize,
+    /// 没删掉的文件（相对路径 + 系统给的原因）。**非空时调用方不能删部署记录** ——
+    /// 记录一删，目录里剩下的文件就成了「本工具无记录」，用户只能去点「清理」，
+    /// 原件再也放不回来。实测：游戏还开着 / 杀毒软件正在扫，version.dll 删不掉。
+    pub failed: Vec<(String, String)>,
+}
+
+/// 把失败清单压成一句给人看的话（最多列 5 个，剩下的写数量）。
+fn explain_failed(failed: &[(String, String)]) -> String {
+    let names: Vec<String> = failed
+        .iter()
+        .take(5)
+        .map(|(rel, why)| format!("{rel}（{why}）"))
+        .collect();
+    if failed.len() > 5 {
+        format!("{} 等 {} 个", names.join("、"), failed.len())
+    } else {
+        names.join("、")
+    }
 }
 
 /// 把计划里的原件写回 `dir`（原子替换），返回恢复的条数。
@@ -250,24 +278,72 @@ pub fn restore_originals(dir: &Path, plan: &BackupPlan) -> Result<usize> {
     Ok(restored)
 }
 
-/// 删掉计划里「原本不存在」的那些文件（这次新建的），返回真删掉的条数。
+/// 删除重试：游戏 / 杀毒软件对新写入的 DLL 会短暂持有句柄，隔一会儿再删往往就成功了。
 ///
-/// 删不掉只记不报错：文件可能正被游戏 / 杀毒占着，那不是致命错误。
+/// 为什么必须重试而不是删一次就算：删不掉时上层若仍按「还原成功」收尾，会把部署记录
+/// 一起删掉 —— 目录里留下本工具的文件、记录却没了，界面显示「本工具无记录」，
+/// 用户只能去点「清理」，游戏原件再也放不回来（1.6.3 用户实测就是这个现象）。
+const DELETE_ATTEMPTS: usize = 5;
+/// 第 2~5 次尝试前的等待（毫秒）。合计约 2 s，界面还在「还原中…」；够躲过杀毒软件
+/// 对新写入 DLL 的那阵扫描，又不至于让真被游戏占着的文件把人晾太久。
+const DELETE_BACKOFF_MS: [u64; DELETE_ATTEMPTS - 1] = [150, 300, 600, 1000];
+
+/// 删一个文件，带重试与只读属性处理；文件已经不在（NotFound）视为删掉。
+fn remove_file_with_retry(p: &Path) -> std::io::Result<()> {
+    let mut waits = DELETE_BACKOFF_MS.iter().copied();
+    loop {
+        match std::fs::remove_file(p) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                // 退避表用完 = 这就是最后一次尝试：把系统的错误原样带回去
+                let Some(wait_ms) = waits.next() else { return Err(e) };
+                // 只读属性也会让 remove_file 失败。这个文件本来就是我们部署进去的，
+                // 去掉只读再删没有副作用。
+                if let Ok(meta) = std::fs::metadata(p) {
+                    let mut perms = meta.permissions();
+                    if perms.readonly() {
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        perms.set_readonly(false);
+                        let _ = std::fs::set_permissions(p, perms);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(wait_ms));
+            }
+        }
+    }
+}
+
+/// 删掉计划里「原本不存在」的那些文件（这次新建的），返回真删掉的条数与失败清单。
+///
+/// 删不掉的**必须报出来**（以前只记不报）：文件可能正被游戏 / 杀毒占着，
+/// 那不是致命错误，但调用方要知道「还没干净」—— 否则会把部署记录删掉，
+/// 剩下的文件就再也对不上号了。
+///
 /// **只按路径删，不看内容** —— 所以调用方必须先确认这条确实是这次新建的。
-pub fn remove_created(dir: &Path, plan: &BackupPlan) -> usize {
+pub fn remove_created(dir: &Path, plan: &BackupPlan) -> (usize, Vec<(String, String)>) {
     let mut removed = 0usize;
+    let mut failed: Vec<(String, String)> = Vec::new();
     for (rel, existed, _) in &plan.entries {
         if *existed {
             continue; // 有原件的走 restore_originals，不能删
         }
-        let Ok(p) = util::safe_join(dir, rel) else {
-            continue;
+        let p = match util::safe_join(dir, rel) {
+            Ok(p) => p,
+            Err(e) => {
+                failed.push((rel.clone(), e.to_string()));
+                continue;
+            }
         };
-        if p.is_file() && std::fs::remove_file(&p).is_ok() {
-            removed += 1;
+        if !p.is_file() {
+            continue; // 已经不在了（上一次还原删过 / 用户自己删了）
+        }
+        match remove_file_with_retry(&p) {
+            Ok(()) => removed += 1,
+            Err(e) => failed.push((rel.clone(), e.to_string())),
         }
     }
-    removed
+    (removed, failed)
 }
 
 /// 按计划把目录恢复成动手前的样子：先写回原件，再删新建的文件。
@@ -275,8 +351,12 @@ pub fn remove_created(dir: &Path, plan: &BackupPlan) -> usize {
 /// 顺序不能反：先删后写，中途失败会留下「我们的删了、原件也没回来」的状态。
 pub fn rollback(dir: &Path, plan: &BackupPlan) -> Result<RollbackReport> {
     let restored = restore_originals(dir, plan)?;
-    let removed = remove_created(dir, plan);
-    Ok(RollbackReport { restored, removed })
+    let (removed, failed) = remove_created(dir, plan);
+    Ok(RollbackReport {
+        restored,
+        removed,
+        failed,
+    })
 }
 
 #[cfg(test)]
@@ -466,5 +546,41 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&src_dir).ok();
+    }
+
+    /// 文件被别的进程占用（游戏 / 杀毒软件）时：必须报「没删掉」，不能假装删干净了。
+    ///
+    /// 这是 1.6.3 用户实测踩到的坑：还原报成功、部署记录被删，目录里却还留着
+    /// version.dll，界面随即显示「本工具无记录」，只能再去点「清理」。
+    #[cfg(windows)]
+    #[test]
+    fn remove_created_reports_locked_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = temp_dir("locked");
+        // 先拍快照（原本没有这个文件），再模拟部署写进去
+        let plan = capture(&dir, &["version.dll"]).unwrap();
+        std::fs::write(dir.join("version.dll"), b"OURS").unwrap();
+
+        // 只共享读：别的进程还能读，但删除（需要 DELETE 权限）会被拒绝 ——
+        // 和游戏 LoadLibrary 之后的状态一致。
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(dir.join("version.dll"))
+            .unwrap();
+
+        let (removed, failed) = remove_created(&dir, &plan);
+        assert_eq!(removed, 0);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, "version.dll");
+        assert!(dir.join("version.dll").exists());
+
+        drop(held);
+        let (removed, failed) = remove_created(&dir, &plan);
+        assert_eq!(removed, 1);
+        assert!(failed.is_empty(), "放开占用后不该再报失败：{failed:?}");
+        assert!(!dir.join("version.dll").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

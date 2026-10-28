@@ -967,16 +967,34 @@ impl Drop for DirLock {
 }
 
 /// 把回滚的成败说清楚。以前无论成败都写「已自动回滚」—— 回滚失败时那是撒谎。
-fn rollback_text(r: &Result<String>) -> String {
+fn rollback_text(r: &Result<RestoreOutcome>) -> String {
     match r {
-        Ok(m) => format!("成功（{m}）"),
+        Ok(o) if o.complete() => format!("成功（{}）", o.msg),
+        Ok(o) => format!("**没有完全回滚**：{}", o.msg),
         Err(e) => {
             format!("**失败**：{e}（游戏目录可能停在半部署状态，请点「还原」再试一次）")
         }
     }
 }
 
-fn restore_with(manifest: &BackupManifest) -> Result<String> {
+/// 「还原」的结果：给人看的话 + 这次**没删掉**的本工具文件（相对路径）。
+///
+/// leftover 非空 = 部分还原。调用方必须**保留部署记录**：记录一删，目录里剩下的文件
+/// 就成了「本工具无记录」（界面显示「已安装，本工具无记录」），用户只能去点「清理」，
+/// 而「清理」没有原件备份 —— 真正的游戏原件再也放不回来。
+pub struct RestoreOutcome {
+    pub msg: String,
+    pub leftover: Vec<String>,
+}
+
+impl RestoreOutcome {
+    /// 目录已经收干净（记录可以安全删掉）。
+    pub fn complete(&self) -> bool {
+        self.leftover.is_empty()
+    }
+}
+
+fn restore_with(manifest: &BackupManifest) -> Result<RestoreOutcome> {
     let target_dir = manifest.game_dir.as_path();
     let base = util::backups_dir()?.join(&manifest.game_key);
 
@@ -1002,6 +1020,10 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
     let loaded = backup_restore::load_originals(&files_dir, &refs)?;
 
     let mut skipped: Vec<String> = Vec::new();
+    // 记录里有、但文件读不出来（被游戏 / 杀毒软件独占）：既不能确认归属、更不能删，
+    // 只能如实报出来并保留记录。以前这里直接 continue —— 记录随后被删，用户看到的是
+    // 「本工具无记录」，目录里却还留着我们的文件。
+    let mut unreadable: Vec<(String, String)> = Vec::new();
     // 记录说"这个位置原本就有文件"，但那份"原件"其实是我们自己放进去的 —— 不能写回
     let mut healed: Vec<String> = Vec::new();
     let mut plan = BackupPlan::new();
@@ -1040,9 +1062,23 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
         if !p.is_file() {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&p) else {
-            continue;
+        let bytes = match std::fs::read(&p) {
+            Ok(b) => b,
+            Err(io_err) => {
+                unreadable.push((e.rel_path.clone(), io_err.to_string()));
+                continue;
+            }
         };
+        /* 上一次「部分还原」已经把原件放回去了（重试时就会看到）：这一条不用再动，
+           更不能当成「内容被别人改过」去跳过 —— 那会让部署记录永远删不掉。
+           直接拿备份里的原件字节比，比哈希更准（老记录可能没有 original_sha256）。 */
+        let already_original = plan
+            .get(&e.rel_path)
+            .map(|(_, existed_before, original)| *existed_before && original == &bytes)
+            .unwrap_or(false);
+        if already_original {
+            continue;
+        }
         let same_as_deployed = !e.deployed_sha256.is_empty()
             && util::sha256_hex(&bytes) == e.deployed_sha256;
         /* 内容不是这次部署的那份时还有第二种可能：**位置被本工具放的别的东西顶掉了**
@@ -1061,24 +1097,38 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
 
     // 3) 先把原件放回去，再删我们放进去的那些。顺序反过来的话，中途失败会留下
     //    「我们的删了、原件也没回来」的状态（顺序由 backup_restore::rollback 保证）。
-    let restored = backup_restore::rollback(target_dir, &plan)?.restored;
+    let rb = backup_restore::rollback(target_dir, &plan)?;
     // 3b) 插件运行时在旁边建的目录（日志 / bundle 缓存）。它不是我们部署的文件，
     //     所以 manifest 里没有；但不删的话，用户点完「还原」目录里还留着它。
-    let swept = if sweep_runtime_dir(target_dir) {
-        vec![format!("{RUNTIME_DIR}\\")]
-    } else {
-        Vec::new()
-    };
+    let (swept, sweep_err) = sweep_runtime_dir(target_dir);
 
-    /* 4) 两种情况都要保留备份目录并如实说明，别把「原件还在」这一点弄丢：
+    // 3c) **真正删掉了吗？** 游戏 / 启动器 / 反作弊还开着时，version.dll 这类文件
+    //     会被独占，删不掉；杀毒软件也可能正扫着刚写进去的 DLL。以前这里不看结果、
+    //     直接按「已还原」收尾并把记录删了 —— 目录里留下我们的文件、记录却没了，
+    //     界面翻成「本工具无记录」，用户只能再点一次「清理」，游戏原件再也放不回来。
+    let mut leftover: Vec<String> = rb.failed.iter().map(|(rel, _)| rel.clone()).collect();
+    leftover.extend(unreadable.iter().map(|(rel, _)| rel.clone()));
+    if sweep_err.is_some() {
+        leftover.push(format!("{RUNTIME_DIR}\\"));
+    }
+
+    /* 4) 以下情况都要保留备份目录并如实说明，别把「原件还在」这一点弄丢：
           · 有文件被用户改过（skipped）：不能删，否则原件跟着没了
           · 记下的"游戏原件"其实是我们自己的文件（healed）：那份备份也不能删 ——
-            用户可能想核对它到底是不是游戏自带的 */
-    let keep_backups = !skipped.is_empty() || !healed.is_empty();
+            用户可能想核对它到底是不是游戏自带的
+          · 还有本工具的文件没删掉（leftover）：记录留着才能再点一次「还原」收尾 */
+    let keep_backups =
+        !skipped.is_empty() || !healed.is_empty() || !unreadable.is_empty() || !leftover.is_empty();
     let mut msg = if keep_backups {
-        format!("部分还原：恢复 {restored} 个原始文件")
+        format!(
+            "部分还原：恢复 {} 个原始文件、删除 {} 个本工具写入的文件",
+            rb.restored, rb.removed
+        )
     } else {
-        format!("已还原：恢复 {restored} 个原始文件")
+        format!(
+            "已还原：恢复 {} 个原始文件、删除 {} 个本工具写入的文件",
+            rb.restored, rb.removed
+        )
     };
     if !skipped.is_empty() {
         msg.push_str(&format!(
@@ -1094,24 +1144,80 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
             healed.len()
         ));
     }
-    if !swept.is_empty() {
-        msg.push_str(&format!("；另清理插件运行时留下的目录：{}", swept.join("、")));
+    if swept {
+        msg.push_str(&format!("；另清理插件运行时留下的目录：{RUNTIME_DIR}\\"));
+    }
+    if !unreadable.is_empty() {
+        let shown: Vec<String> = unreadable
+            .iter()
+            .take(5)
+            .map(|(rel, why)| format!("{rel}（{why}）"))
+            .collect();
+        msg.push_str(&format!(
+            "；{} 个文件读不出来、没法确认归属，已跳过（{}）",
+            unreadable.len(),
+            shown.join("、")
+        ));
+    }
+    if !rb.failed.is_empty() {
+        let shown: Vec<String> = rb
+            .failed
+            .iter()
+            .take(5)
+            .map(|(rel, why)| format!("{rel}（{why}）"))
+            .collect();
+        let more = rb.failed.len().saturating_sub(5);
+        msg.push_str(&format!(
+            "；{} 个文件没能删掉：{}{}",
+            rb.failed.len(),
+            shown.join("、"),
+            if more > 0 {
+                format!(" 等 {more} 个")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    if let Some(e) = &sweep_err {
+        msg.push_str(&format!(
+            "；插件运行时目录 {RUNTIME_DIR}\\ 也没能删掉（{e}）"
+        ));
+    }
+    if !leftover.is_empty() {
+        msg.push_str(
+            "\n\n原因多半是游戏（或它的启动器 / 反作弊）还开着，或杀毒软件正在扫描这些文件。\
+             **部署记录已经保留**：请完全退出游戏后再点一次「还原」，就能把它收干净。",
+        );
     }
     if keep_backups {
-        msg.push_str(&format!(
-            "。备份保留在 {}，确认不需要了可以手动删除。",
-            base.display()
-        ));
+        if leftover.is_empty() {
+            msg.push_str(&format!(
+                "\n\n备份保留在 {}，确认不需要了可以手动删除。",
+                base.display()
+            ));
+        } else {
+            msg.push_str(&format!(
+                "\n\n备份还在 {}，先别删 —— 下一次「还原」还要靠它把原件放回去。",
+                base.display()
+            ));
+        }
     } else {
         let _ = std::fs::remove_dir_all(&base);
     }
-    Ok(msg)
+    Ok(RestoreOutcome { msg, leftover })
 }
 
-/// 删掉插件运行时建的 dlssg_sm86 目录，返回是否真删掉了。
-fn sweep_runtime_dir(dir: &Path) -> bool {
+/// 删掉插件运行时建的 dlssg_sm86 目录。返回（是否真删掉了, 删不掉的原因）——
+/// 目录不存在算「没删」，不算失败（它本来就不在）。
+fn sweep_runtime_dir(dir: &Path) -> (bool, Option<String>) {
     let p = dir.join(RUNTIME_DIR);
-    p.is_dir() && std::fs::remove_dir_all(&p).is_ok()
+    if !p.is_dir() {
+        return (false, None);
+    }
+    match std::fs::remove_dir_all(&p) {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    }
 }
 
 /// 目录里「本项目的帧生成文件」清单 —— 给「用户手动装过、没有本工具记录」的目录用。
@@ -1222,8 +1328,17 @@ pub fn cleanup_manual(dir: &Path) -> Result<String> {
 }
 
 pub fn restore(target_dir: &Path) -> Result<String> {
+    Ok(restore_report(target_dir)?.msg)
+}
+
+/// 同 restore，但把「还有哪些文件没删掉」也带出来：界面据此显示「部分还原」，
+/// 而不是把没删干净报成「已还原」。
+pub fn restore_report(target_dir: &Path) -> Result<RestoreOutcome> {
     let Some(m) = load_manifest(target_dir) else {
-        bail!("没有找到本工具对该目录的部署记录（{}）", target_dir.display());
+        bail!(
+            "没有找到本工具对该目录的部署记录（{}）",
+            target_dir.display()
+        );
     };
     // 和 deploy 用同一把锁：两个实例同时读写同一份备份会互相覆盖 ——
     // 那正是「原件找不回来」的典型路径。加在读到记录之后，
