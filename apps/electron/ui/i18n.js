@@ -592,6 +592,7 @@
   "SCAN-013": "Scanning the game library failed.",
   "CFG-014": "The configuration file could not be read or written.",
   "IO-015": "A file operation failed (write / copy / delete).",
+  "SAFE-016": "Refused: that path is a system folder. Point at the game's own folder instead.",
   "GEN-999": "Something went wrong.",
   "已有": "Present",
   "缺少": "Missing",
