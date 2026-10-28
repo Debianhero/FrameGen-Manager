@@ -16,12 +16,14 @@
 // "还能凑合"。清完弹一个**只有【我知道了】**的告知窗：哪类资产更新了、清了哪些游戏、
 // 哪些没清掉。
 //
-// 每一类都用「把我们的部署收回去」的命令，而不是"能删多少删多少"：
+// 每一类的清理命令：
 //   · 帧生成：restore（按记录放回原件 / 删掉我们铺的文件）+ clean_legacy（0.3.x 遗留）；
 //   · Smooth Motion：sm_set_game(on:false)（先重置驱动 profile）+ sm_asset_restore（取回组件）；
-//   · DLSS5（GITC，只是资产旧了）：dlss5_restore —— 只收我们的文件、还原原件，
-//     **不动用户自备的 ReShade 预设与效果包**（彻底卸载会把整个 reshade-shaders 删掉）；
-//   · DLSS5（旧版 RenoDX）：dlss5_uninstall —— 布局不兼容，必须彻底卸载才能装 GITC。
+//   · DLSS5：dlss5_uninstall —— **彻底卸载**（官方卸载器 + 插件/模型/残留一起走）。
+//     这里原来用的是 dlss5_restore（只收我们的文件、保留 ReShade 本体），实测结果：
+//     清完之后游戏目录里 ReShade 本体 / ini / 效果包还在，用户还得再去点一次「卸载」——
+//     等于自动清理只做了一半。产品决定：统一按「彻底卸载」处理（用户自备的 reshade-shaders
+//     会一并删掉，重新部署时由官方安装器重新铺）。
 // 清不掉的（游戏还开着 / 文件被占 / 没权限）不阻断其余游戏，如实列进弹窗让人手动处理。
 
 function legacyKindLabel(kind) {
@@ -38,7 +40,7 @@ function legacyKindPrefix(kind) {
 }
 
 // 把「命中的游戏名」映射成一条条清理任务（只做映射、不执行 —— 预览与自测都用它）。
-function legacyClearJobs(fgNames, smNames, d5Names, d5Outdated) {
+function legacyClearJobs(fgNames, smNames, d5Names) {
   var jobs = [];
   var byName = function (n) {
     return GAMES.filter(function (x) { return x.name === n; })[0];
@@ -68,14 +70,8 @@ function legacyClearJobs(fgNames, smNames, d5Names, d5Outdated) {
   (d5Names || []).forEach(function (n) {
     var g = byName(n);
     if (!g) return;
-    // 旧版 RenoDX：布局和 GITC 不同源，只能彻底卸载
+    // 一律彻底卸载：只做还原会留下 ReShade 本体 / 效果包，用户还得再点一次卸载
     jobs.push({ kind: 'dlss5', name: n, cmds: [{ cmd: 'dlss5_uninstall', args: { dir: g.dir, exe: exeOf(g) } }] });
-  });
-  (d5Outdated || []).forEach(function (n) {
-    var g = byName(n);
-    if (!g) return;
-    // 已经是 GITC：还原即可（收走我们的文件、放回原件），别碰用户自备的东西
-    jobs.push({ kind: 'dlss5', name: n, cmds: [{ cmd: 'dlss5_restore', args: { dir: g.dir } }] });
   });
   return jobs;
 }
@@ -172,20 +168,17 @@ function checkAssetsLegacy() {
     var smLegacy = (arr[1] && arr[1].games) ? arr[1].games : [];
     var d5Legacy = (arr[2] && arr[2].games) ? arr[2].games : [];
     var smAll = uniq(smLegacy.concat(u.sm ? u.sm : []));
-    /* DLSS5 分两类（见上面那段说明）：
-         d5Legacy   = 旧版 RenoDX 插件 → 彻底卸载；
-         d5Outdated = 已是 GITC、只是内置资产旧了 → 还原后重装。 */
-    var d5Outdated = (u.dlss5 ? u.dlss5 : []).filter(function (n) {
-      return d5Legacy.indexOf(n) < 0;
-    });
-    if (!fgAll.length && !smAll.length && !d5Legacy.length && !d5Outdated.length) return;
+    /* DLSS5 不再分「旧版 RenoDX」和「GITC 资产旧了」两类 —— 两者都走彻底卸载
+       （只还原会留下 ReShade 本体，用户还得手动点一次卸载，见 legacyClearJobs 的说明）。 */
+    var d5All = uniq(d5Legacy.concat(u.dlss5 ? u.dlss5 : []));
+    if (!fgAll.length && !smAll.length && !d5All.length) return;
     // 先记账再动手：中途崩了也不会每次启动重复清
     invoke('assets_legacy_prompt_done').catch(function () { });
     var kinds = [];
     if (fgAll.length) kinds.push(t('帧生成'));
     if (smAll.length) kinds.push(t('Smooth Motion'));
-    if (d5Legacy.length || d5Outdated.length) kinds.push(t('DLSS5'));
-    var jobs = legacyClearJobs(fgAll, smAll, d5Legacy, d5Outdated);
+    if (d5All.length) kinds.push(t('DLSS5'));
+    var jobs = legacyClearJobs(fgAll, smAll, d5All);
     return runLegacyClear(jobs).then(function (report) {
       hideBarIfPhase('legacy', 1200);
       return refreshLibrary().catch(function () { }).then(function () {

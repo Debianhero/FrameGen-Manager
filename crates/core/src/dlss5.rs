@@ -1770,6 +1770,33 @@ pub fn detect(dir: &Path) -> Found {
 }
 
 /// 卸载/清理时要额外删掉的文件：GITC 的另外几件 + 旧版 RenoDX 遗留。
+/// ReShade 6.8 给 DX12 游戏铺的 `D3D12\D3D12Core.dll`（Agility SDK）：**官方卸载器不删它**，
+/// 于是"彻底卸载"之后目录里还留着一样 ReShade 的东西，界面也还会把它算成残留。
+///
+/// 只删确定是这一份的：`D3D12\` 里只有 `D3D12Core.dll` 一个文件，且版本资源里带 Microsoft。
+/// 游戏自己带 Agility SDK 的一般放在 exe 旁边、不会占这个子目录 —— 这一条是把误删风险压到最小。
+fn clean_d3d12_agility(dir: &Path) -> Option<String> {
+    let d = dir.join("D3D12");
+    if !d.is_dir() {
+        return None;
+    }
+    let mut items: Vec<PathBuf> = std::fs::read_dir(&d).ok()?.flatten().map(|e| e.path()).collect();
+    if items.len() != 1 {
+        return None;
+    }
+    let f = items.pop()?;
+    if f.file_name()?.to_string_lossy().to_ascii_lowercase() != "d3d12core.dll" {
+        return None;
+    }
+    let txt = util::file_version_text(&f).unwrap_or_default().to_ascii_lowercase();
+    if !txt.contains("microsoft") {
+        return None;
+    }
+    std::fs::remove_file(&f).ok()?;
+    let _ = std::fs::remove_dir(&d);
+    Some(r"D3D12\D3D12Core.dll".to_owned())
+}
+
 fn clean_extras(dir: &Path) -> Vec<String> {
     let mut done = Vec::new();
     let mut targets: Vec<String> = vec![
@@ -1821,6 +1848,10 @@ pub fn uninstall(dir: &Path, exe: Option<&Path>, on: &mut dyn FnMut(String, f32)
     let mut deleted: Vec<String> = Vec::new();
     // GITC 新增的几件（32 位插件 / 辅助进程 / 模型子目录 / Shader）+ 旧版 RenoDX 遗留，一并清掉
     for t in clean_extras(dir) {
+        deleted.push(t);
+    }
+    // 再加上官方卸载器不管的 D3D12\D3D12Core.dll（否则"卸载干净"之后还剩一样东西）
+    if let Some(t) = clean_d3d12_agility(dir) {
         deleted.push(t);
     }
 
