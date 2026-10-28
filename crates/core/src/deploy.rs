@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::backup_restore::{self, BackupPlan, BackupRef};
 use crate::util;
 
 // 代理入口名单**只在 scan.rs 里硬编码一份**：`scan::PROXY_ALL` = 现用的 6 个
@@ -608,13 +609,12 @@ pub fn deploy(
         let mut backup_name = None;
         let mut original_sha256 = None;
         if existed {
-            let orig = std::fs::read(&dst).with_context(|| format!("备份 {}", dst.display()))?;
+            // 「读原件 + 落成 .bak」走公共层：备份名统一扁平化（见 backup_file_name），
+            // 0.4.0 那批 dlssg_sm86\backend\x.dll 的条目也不会变成嵌套路径。
+            let orig = backup_restore::snapshot_one(target_dir, name, &files_dir)?
+                .ok_or_else(|| anyhow::anyhow!("{name} 读不出来，无法备份原件"))?;
             original_sha256 = Some(util::sha256_hex(&orig));
-            // 备份名要**扁平**：0.4.0 的清单里有 dlssg_sm86\backend\x.dll 这类带子目录的条目，
-            // 直接用路径拼进备份目录会变成嵌套路径，还原读回时也容易踩分隔符的坑。统一换成 '_'。
-            let bn = format!("{}.bak", name.replace(['\\', '/'], "_"));
-            std::fs::write(files_dir.join(&bn), &orig)?;
-            backup_name = Some(bn);
+            backup_name = Some(backup_restore::backup_file_name(name));
         }
         entries.push(BackupEntry {
             rel_path: name.clone(),
@@ -654,10 +654,10 @@ pub fn deploy(
         if !dst.is_file() {
             continue;
         }
-        let orig = std::fs::read(&dst).with_context(|| format!("备份 {}", dst.display()))?;
+        let orig = backup_restore::snapshot_one(target_dir, name, &files_dir)?
+            .ok_or_else(|| anyhow::anyhow!("{name} 读不出来，无法备份原件"))?;
         let sha = util::sha256_hex(&orig);
-        let bn = format!("{name}.bak");
-        std::fs::write(files_dir.join(&bn), &orig)?;
+        let bn = backup_restore::backup_file_name(name);
         entries.push(BackupEntry {
             rel_path: name.clone(),
             existed_before: true,
@@ -986,43 +986,57 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
     // 1) 先把所有备份读出来校验完。**任何一份坏了都要在动游戏目录之前中止** ——
     //    以前是先无条件删掉部署文件、再逐个读备份：备份坏掉时游戏目录已经被删了
     //    一半，原件又没放回去，留下一个半残的游戏目录。
-    let mut plan: Vec<(&BackupEntry, Vec<u8>)> = Vec::new();
+    let files_dir = base.join("files");
+    let refs: Vec<BackupRef> = manifest
+        .files
+        .iter()
+        .filter_map(|e| {
+            if !e.existed_before {
+                return None;
+            }
+            let bn = e.backup_name.as_deref()?;
+            Some(BackupRef {
+                rel: &e.rel_path,
+                backup_name: bn,
+                original_sha256: e.original_sha256.as_deref(),
+            })
+        })
+        .collect();
+    let loaded = backup_restore::load_originals(&files_dir, &refs)?;
+
+    let mut skipped: Vec<String> = Vec::new();
     // 记录说"这个位置原本就有文件"，但那份"原件"其实是我们自己放进去的 —— 不能写回
     let mut healed: Vec<String> = Vec::new();
-    for e in &manifest.files {
-        if !e.existed_before {
+    let mut plan = BackupPlan::new();
+    for ((rel, _existed, bytes), r) in loaded.entries.into_iter().zip(refs.iter()) {
+        // 清单里的路径非法（被篡改/损坏）：跳过，绝不按原始字符串拼路径去删/写
+        if crate::util::safe_join(target_dir, &rel).is_err() {
+            skipped.push(rel);
             continue;
         }
-        let Some(bn) = &e.backup_name else { continue };
-        let src = base.join("files").join(bn);
-        let bytes = std::fs::read(&src).with_context(|| format!("读取备份 {}", src.display()))?;
-        if let Some(orig) = &e.original_sha256 {
-            if util::sha256_hex(&bytes) != *orig {
-                bail!("备份 {bn} 自身已损坏，中止还原（游戏目录一个字都没动）");
-            }
-        }
+        let src = files_dir.join(r.backup_name);
         /* 那份"游戏原件"本身如果是本项目放的文件（按签名或 0.3.x 指纹认），就**不写回**：
            写回去等于把我们自己的 mod 文件当成游戏原件塞进游戏目录，而且从此被当成
            游戏文件、本工具再也清不掉 —— 实测复现过的恶性 bug（手动装过 0.3.x 的目录，
            老版本会把我们自己的代理备份成"游戏原件"）。这份备份留在备份目录里不动，
            用户想核对还能找到。 */
-        if is_our_artifact(&src, &e.rel_path, &bytes) {
-            healed.push(e.rel_path.clone());
+        if is_our_artifact(&src, &rel, &bytes) {
+            healed.push(rel);
             continue;
         }
-        plan.push((e, bytes));
+        plan.push(rel, true, bytes);
     }
 
     // 2) 只删「确认还是我们部署的那一份」的文件。用户换成别的 mod、或游戏更新
     //    了自己那份 nvngx_dlssg.dll 之后，那个文件已经不是我们的了 —— 删掉它
     //    等于替用户丢文件，而且没有备份能救。
-    let mut ours: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
     for e in &manifest.files {
         let p = match crate::util::safe_join(target_dir, &e.rel_path) {
             Ok(p) => p,
             Err(_) => {
-                skipped.push(e.rel_path.clone());
+                if !skipped.contains(&e.rel_path) {
+                    skipped.push(e.rel_path.clone());
+                }
                 continue;
             }
         };
@@ -1039,36 +1053,18 @@ fn restore_with(manifest: &BackupManifest) -> Result<String> {
            要一并收走 —— 留着会让游戏继续加载到 Smooth Motion 的组件，而用户以为还原干净了。 */
         let still_ours = same_as_deployed || is_our_artifact(&p, &e.rel_path, &bytes);
         if still_ours {
-            ours.push(e.rel_path.clone());
+            // 有原件的那几条由回滚写回原件（等于覆盖掉它），这里只登记「这次新建的」
+            if plan.existed_before(&e.rel_path) != Some(true) {
+                plan.push(e.rel_path.clone(), false, Vec::new());
+            }
         } else {
             skipped.push(e.rel_path.clone());
         }
     }
 
     // 3) 先把原件放回去，再删我们放进去的那些。顺序反过来的话，中途失败会留下
-    //    「我们的删了、原件也没回来」的状态。
-    let mut restored = 0usize;
-    for (e, bytes) in &plan {
-        let dst = match crate::util::safe_join(target_dir, &e.rel_path) {
-            Ok(p) => p,
-            Err(_) => {
-                skipped.push(e.rel_path.clone());
-                continue;
-            }
-        };
-        let tmp = target_dir.join(format!(".{}.tmp", e.rel_path));
-        std::fs::write(&tmp, bytes)?;
-        if let Err(e) = util::atomic_replace(&tmp, &dst) {
-            // 失败时别把半成品留在游戏目录里（有的游戏/反作弊会扫目录里的未知文件）
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-        restored += 1;
-        ours.retain(|n| n != &e.rel_path);
-    }
-    for name in &ours {
-        let _ = std::fs::remove_file(target_dir.join(name));
-    }
+    //    「我们的删了、原件也没回来」的状态（顺序由 backup_restore::rollback 保证）。
+    let restored = backup_restore::rollback(target_dir, &plan)?.restored;
     // 3b) 插件运行时在旁边建的目录（日志 / bundle 缓存）。它不是我们部署的文件，
     //     所以 manifest 里没有；但不删的话，用户点完「还原」目录里还留着它。
     let swept = if sweep_runtime_dir(target_dir) {

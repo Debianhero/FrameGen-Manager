@@ -1,21 +1,26 @@
-//! 部署 / 还原共用的「原件计划」（P1-7 的只读一半）。
+//! 部署 / 还原共用的「原件计划」（P1-7）。
 //!
 //! 三个业务各写过一遍同一套流程（读记录 → 备原件 → 写新文件 → 校验 → 失败回滚）：
-//! `deploy.rs`（帧生成）、`sm.rs`（解锁组件）、`dlss5.rs`。
+//! `deploy.rs`（帧生成）、`sm.rs`（解锁组件）、`dlss5.rs`。这里只留下**一份**实现：
 //!
-//! 这里先抽**完全不碰写入**的那一半：
+//! | 步骤 | 函数 | 谁用 |
+//! |---|---|---|
+//! | 改动前把原件读进内存 | [`capture`] | 部署侧（deploy / sm） |
+//! | 读一条原件并落成 `.bak` | [`snapshot_one`] | 部署侧（deploy / dlss5 / sm） |
+//! | 还原前把备份读回来并校验 | [`load_originals`] | 还原 / 回滚侧（deploy / dlss5） |
+//! | 写新文件（原子替换 + 校验 + 失败回滚） | [`apply`] | 部署侧（sm） |
+//! | 按计划恢复（写回原件、删新建） | [`rollback`] | 回滚 / 还原 |
 //!
-//!   * [`capture`]：改动之前，把目标目录里现有的原件读进内存（部署侧的「备原件」）；
-//!   * [`load_originals`]：还原之前，把备份目录里的原件读回来**并校验哈希**（还原 / 回滚侧）。
+//! 为什么不把 `deploy` / `dlss5` 的**写入**也换成 [`apply`]：它们的回滚必须按
+//! **磁盘上的记录**走（重部署时会沿用上一次的原件备份，那份原件不在本次的快照里），
+//! 所以这两处的回滚仍由各自的记录驱动，只是把「读备份」「写回原件」「删新建」
+//! 换成了这里的实现。
 //!
-//! 两边产出同一个 [`BackupPlan`]，下一步的 `apply` / `rollback` 直接吃它。
-//!
-//! 为什么分两步：回滚写错会让用户**丢原件**（备份里有的是游戏唯一的原始文件）。
-//! 所以先落地不写盘的这一半、用单测把边界钉住，再去替换三处写入路径。
-//! **本文件里的函数一个字节都不改磁盘。**
+//! 这里所有函数都只做「一件事」，策略（谁该备份、哪些文件算我们的、文案怎么写）
+//! 仍留在业务里 —— 回滚写错会让用户**丢原件**，判断不分散到公共层。
 
-use anyhow::{bail, Context, Result};
-use std::path::Path;
+use anyhow::{anyhow, bail, Context, Result};
+use std::path::{Path, PathBuf};
 
 use crate::util;
 
@@ -93,6 +98,12 @@ pub fn backup_file_name(rel: &str) -> String {
     format!("{}.bak", rel.replace(['\\', '/'], "_"))
 }
 
+/// 临时文件名：同样扁平，避免「目标在子目录里」时 tmp 也跟着嵌套。
+fn tmp_path(dir: &Path, rel: &str) -> PathBuf {
+    let flat = rel.replace(['\\', '/'], "_");
+    dir.join(format!(".{flat}.fgm.tmp"))
+}
+
 /// 部署之前拍快照：把 `dir` 里这些相对路径的现有内容读进内存。
 ///
 /// **只读**：不建目录、不改文件，目标不存在就记 `existed_before = false`。
@@ -104,14 +115,31 @@ pub fn capture<S: AsRef<str>>(dir: &Path, rels: &[S]) -> Result<BackupPlan> {
         let rel = rel.as_ref();
         let p = util::safe_join(dir, rel)?;
         if p.is_file() {
-            let bytes =
-                std::fs::read(&p).with_context(|| format!("备份 {}", p.display()))?;
+            let bytes = std::fs::read(&p).with_context(|| format!("备份 {}", p.display()))?;
             plan.push(rel, true, bytes);
         } else {
             plan.push(rel, false, Vec::new());
         }
     }
     Ok(plan)
+}
+
+/// 读一条原件、落成备份文件；没有原件返回 `None`。
+///
+/// 给「一个文件一个文件地铺」的流程用（deploy / dlss5 / sm 的部署循环）：
+/// 返回原件字节，调用方自己算哈希、自己决定记不记账。
+/// 备份文件名固定是 `files_dir/` 下的 [`backup_file_name`]（需要路径就照这个拼）。
+pub fn snapshot_one(dir: &Path, rel: &str, files_dir: &Path) -> Result<Option<Vec<u8>>> {
+    let p = util::safe_join(dir, rel)?;
+    if !p.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&p).with_context(|| format!("备份 {}", p.display()))?;
+    std::fs::create_dir_all(files_dir)
+        .with_context(|| format!("创建备份目录失败: {}", files_dir.display()))?;
+    let bp = files_dir.join(backup_file_name(rel));
+    std::fs::write(&bp, &bytes).with_context(|| format!("写入备份 {}", bp.display()))?;
+    Ok(Some(bytes))
 }
 
 /// 备份目录里的一条原件（三个业务的记录字段名不一样，这里只取共同的三项）。
@@ -145,6 +173,126 @@ pub fn load_originals(files_dir: &Path, refs: &[BackupRef<'_>]) -> Result<Backup
         plan.push(r.rel, true, bytes);
     }
     Ok(plan)
+}
+
+/// 要写进目标目录的一个新文件。
+pub struct WriteItem {
+    pub rel: String,
+    /// 新内容的来源文件（走文件复制，不整份读进内存）。
+    pub src: PathBuf,
+    /// 期望的 sha256，写完逐个校验。
+    pub sha256: String,
+}
+
+/// 部署写入：逐个原子替换进 `dir`，写完逐个校验；任何一步失败都按 `plan` 回滚。
+///
+/// `plan` 是**改动之前**的快照（[`capture`] 或 [`snapshot_one`] 得来的）：
+/// 失败时按它把原件写回去，目录不会停在半部署状态。
+pub fn apply(dir: &Path, plan: &BackupPlan, items: &[WriteItem]) -> Result<()> {
+    for it in items {
+        let dst = util::safe_join(dir, &it.rel)?;
+        if let Some(parent) = dst.parent() {
+            if !parent.is_dir() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("创建目录 {}", parent.display()))?;
+            }
+        }
+        let tmp = util::long_path(&tmp_path(dir, &it.rel));
+        let step = std::fs::copy(util::long_path(&it.src), &tmp)
+            .with_context(|| format!("复制到 {} 失败", dst.display()))
+            .and_then(|_| util::atomic_replace(&tmp, &dst));
+        if let Err(e) = step {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(with_rollback(e, dir, plan));
+        }
+        util::clear_motw(&dst);
+    }
+    for it in items {
+        let p = util::safe_join(dir, &it.rel)?;
+        let got = util::sha256_file(&p)?;
+        if !got.eq_ignore_ascii_case(&it.sha256) {
+            let e = anyhow!("{} 复制后校验不一致", it.rel);
+            return Err(with_rollback(e, dir, plan));
+        }
+    }
+    Ok(())
+}
+
+/// 失败信息里带上回滚的**真实**结果：回滚失败时不能只写「已回滚」（那是撒谎）。
+fn with_rollback(e: anyhow::Error, dir: &Path, plan: &BackupPlan) -> anyhow::Error {
+    match rollback(dir, plan) {
+        Ok(r) => anyhow!(
+            "{e}，已回滚（恢复 {} 个原件、删除 {} 个新文件）",
+            r.restored,
+            r.removed
+        ),
+        Err(re) => anyhow!("{e}；**回滚也失败了**：{re}（请点「还原」再试一次）"),
+    }
+}
+
+/// 回滚结果。两个数字都是**真的做到了**的数量，不是计划里的条数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RollbackReport {
+    pub restored: usize,
+    pub removed: usize,
+}
+
+/// 把计划里的原件写回 `dir`（原子替换），返回恢复的条数。
+///
+/// 只做「写回」这一件事：删哪些文件由调用方决定（`deploy` / `dlss5` 会跳过被用户改过的
+/// 文件，那个判断不能下沉到这里 —— 判错就是替用户丢文件）。
+pub fn restore_originals(dir: &Path, plan: &BackupPlan) -> Result<usize> {
+    let mut restored = 0usize;
+    for (rel, existed, bytes) in &plan.entries {
+        if !existed {
+            continue;
+        }
+        let dst = util::safe_join(dir, rel)?;
+        if let Some(parent) = dst.parent() {
+            if !parent.is_dir() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("创建目录 {}", parent.display()))?;
+            }
+        }
+        let tmp = util::long_path(&tmp_path(dir, rel));
+        std::fs::write(&tmp, bytes).with_context(|| format!("写入 {}", dst.display()))?;
+        if let Err(e) = util::atomic_replace(&tmp, &dst) {
+            // 失败时别把半成品留在游戏目录里（有的游戏 / 反作弊会扫目录里的未知文件）
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        restored += 1;
+    }
+    Ok(restored)
+}
+
+/// 删掉计划里「原本不存在」的那些文件（这次新建的），返回真删掉的条数。
+///
+/// 删不掉只记不报错：文件可能正被游戏 / 杀毒占着，那不是致命错误。
+/// **只按路径删，不看内容** —— 所以调用方必须先确认这条确实是这次新建的。
+pub fn remove_created(dir: &Path, plan: &BackupPlan) -> usize {
+    let mut removed = 0usize;
+    for (rel, existed, _) in &plan.entries {
+        if *existed {
+            continue; // 有原件的走 restore_originals，不能删
+        }
+        let Ok(p) = util::safe_join(dir, rel) else {
+            continue;
+        };
+        if p.is_file() && std::fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// 按计划把目录恢复成动手前的样子：先写回原件，再删新建的文件。
+///
+/// 顺序不能反：先删后写，中途失败会留下「我们的删了、原件也没回来」的状态。
+pub fn rollback(dir: &Path, plan: &BackupPlan) -> Result<RollbackReport> {
+    let restored = restore_originals(dir, plan)?;
+    let removed = remove_created(dir, plan);
+    Ok(RollbackReport { restored, removed })
 }
 
 #[cfg(test)]
@@ -205,7 +353,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.len(), 1);
-        assert_eq!(plan.get("dlssg_sm86\\backend\\nvngx_dlssg.dll").unwrap().2, b"ORIGINAL");
+        assert_eq!(
+            plan.get("dlssg_sm86\\backend\\nvngx_dlssg.dll").unwrap().2,
+            b"ORIGINAL"
+        );
 
         let bad = load_originals(
             &files_dir,
@@ -229,5 +380,107 @@ mod tests {
         assert!(capture(&dir, &["C:\\Windows\\System32\\x.dll"]).is_err());
         assert!(capture(&dir, &[""]).is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 原件恢复：部署过之后回滚，文件内容必须回到动手前那一份。
+    #[test]
+    fn rollback_restores_originals() {
+        let dir = temp_dir("restore");
+        std::fs::write(dir.join("version.dll"), b"GAME-ORIGINAL").unwrap();
+        let plan = capture(&dir, &["version.dll"]).unwrap();
+
+        // 模拟部署：把文件换成我们的
+        std::fs::write(dir.join("version.dll"), b"OURS").unwrap();
+        assert_eq!(std::fs::read(dir.join("version.dll")).unwrap(), b"OURS");
+
+        let r = rollback(&dir, &plan).unwrap();
+        assert_eq!(r.restored, 1);
+        assert_eq!(r.removed, 0);
+        assert_eq!(
+            std::fs::read(dir.join("version.dll")).unwrap(),
+            b"GAME-ORIGINAL"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回滚：本来没有的位置要删掉，别留一个 0 字节的假文件。
+    #[test]
+    fn rollback_deletes_files_that_did_not_exist() {
+        let dir = temp_dir("remove");
+        let plan = capture(&dir, &["nvngx_dlssg.dll"]).unwrap();
+        assert_eq!(plan.existed_before("nvngx_dlssg.dll"), Some(false));
+
+        std::fs::write(dir.join("nvngx_dlssg.dll"), b"OURS").unwrap();
+        let r = rollback(&dir, &plan).unwrap();
+        assert_eq!(r.restored, 0);
+        assert_eq!(r.removed, 1);
+        assert!(!dir.join("nvngx_dlssg.dll").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 无记录时直接写：计划里没有原件也能照常部署（写进去、校验通过）。
+    #[test]
+    fn apply_writes_when_nothing_existed() {
+        let dir = temp_dir("apply-new");
+        let src_dir = temp_dir("apply-new-src");
+        std::fs::write(src_dir.join("new.dll"), b"NEW").unwrap();
+        let plan = capture(&dir, &["sub\\new.dll"]).unwrap(); // 目标不存在 + 还在子目录里
+
+        apply(
+            &dir,
+            &plan,
+            &[WriteItem {
+                rel: "sub\\new.dll".to_owned(),
+                src: src_dir.join("new.dll"),
+                sha256: util::sha256_hex(b"NEW"),
+            }],
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(dir.join("sub\\new.dll")).unwrap(), b"NEW");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&src_dir).ok();
+    }
+
+    /// 写入失败（校验不一致）时必须自动回滚，目录回到动手前的样子。
+    #[test]
+    fn apply_rolls_back_when_verify_fails() {
+        let dir = temp_dir("apply-rollback");
+        let src_dir = temp_dir("apply-rollback-src");
+        std::fs::write(dir.join("version.dll"), b"GAME-ORIGINAL").unwrap();
+        std::fs::write(src_dir.join("version.dll"), b"OURS").unwrap();
+        let plan = capture(&dir, &["version.dll", "dbghelp.dll"]).unwrap();
+
+        let err = apply(
+            &dir,
+            &plan,
+            &[
+                WriteItem {
+                    rel: "version.dll".to_owned(),
+                    src: src_dir.join("version.dll"),
+                    // 故意写错的期望值 -> 校验必然失败
+                    sha256: util::sha256_hex(b"WRONG"),
+                },
+                WriteItem {
+                    rel: "dbghelp.dll".to_owned(),
+                    src: src_dir.join("version.dll"),
+                    sha256: util::sha256_hex(b"OURS"),
+                },
+            ],
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("已回滚"), "错误信息应说明已回滚：{msg}");
+        // 原件回来、新建的删掉
+        assert_eq!(
+            std::fs::read(dir.join("version.dll")).unwrap(),
+            b"GAME-ORIGINAL"
+        );
+        assert!(!dir.join("dbghelp.dll").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&src_dir).ok();
     }
 }

@@ -1576,22 +1576,6 @@ fn default_asset_record_v() -> u8 {
     1
 }
 
-/// 部署中途失败时把已铺的文件回滚（有备份还原备份，没有就删掉）。
-fn rollback_asset_files(game_dir: &std::path::Path, done: &[AssetFileRecord]) {
-    for f in done {
-        let dst = game_dir.join(&f.rel);
-        if f.had_original {
-            if let Some(bp) = &f.backup {
-                if std::path::Path::new(bp).is_file() {
-                    let _ = std::fs::copy(bp, &dst);
-                    continue;
-                }
-            }
-        }
-        let _ = std::fs::remove_file(&dst);
-    }
-}
-
 /// 记录之外、目录里遗留的"我们的文件"（例如上次部署中断留下的）也要认出来。
 fn known_asset_rels() -> Vec<&'static str> {
     component_files(SmComponent::Rtx30)
@@ -1677,7 +1661,19 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
         vc_warn = vcruntime_warning(game_dir);
     }
     let files = component_files(comp);
+    let rec = asset_record_path(game_dir)?;
+    let bdir = rec
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("originals");
+    std::fs::create_dir_all(&bdir).map_err(|e| format!("{e}"))?;
+
+    /* 1) 先做完全部**只读**的准备工作：源文件在不在、目标能不能写、原件长什么样。
+       这一步一个字节都不写进游戏目录 —— 任何一项不过就直接返回，用户看到的是「什么都没动」
+       （以前是边备份边铺，中途失败还得靠回滚把前面几个文件拼回去）。 */
     let mut done: Vec<AssetFileRecord> = Vec::new();
+    let mut items: Vec<crate::backup_restore::WriteItem> = Vec::new();
+    let mut plan = crate::backup_restore::BackupPlan::new();
     for (rel, src_rel, want) in &files {
         let mut src = base.join(src_rel.replace('/', "\\"));
         if !src.is_file() {
@@ -1691,59 +1687,64 @@ pub fn asset_deploy(game_dir: &std::path::Path) -> Result<String, String> {
             }
         }
         if !src.is_file() {
-            rollback_asset_files(game_dir, &done);
             return Err(format!("内置组件不存在：{}", src.display()));
         }
         let dst = game_dir.join(rel);
         match crate::util::lock_state(&dst) {
             crate::util::LockState::InUse => {
-                rollback_asset_files(game_dir, &done);
                 return Err(format!("{rel} 正被占用，请先完全退出游戏。"));
             }
             crate::util::LockState::NoAccess => {
-                rollback_asset_files(game_dir, &done);
                 return Err(format!(
                     "{rel} 现在写不进去：文件带了只读属性，或者权限不足。去掉只读 / 换个可写的目录再试。"
                 ));
             }
             crate::util::LockState::Free => {}
         }
+        let bp = bdir.join(crate::backup_restore::backup_file_name(rel));
         let mut had_original = false;
         let mut backup: Option<String> = None;
-        if dst.is_file() {
-            let rec = asset_record_path(game_dir)?;
-            let bdir = rec.parent().unwrap_or(std::path::Path::new(".")).join("originals");
-            std::fs::create_dir_all(&bdir).map_err(|e| format!("{e}"))?;
-            let bp = bdir.join(format!("{}.bak", rel.replace('/', "_")));
-            if is_our_asset_file(&dst) {
-                /* 目录里已经是**我们自己的组件**（老版本部署的）：绝不能拿它去覆盖备份——
-                   否则"关闭"时会把这个旧组件当成原件又还原回来（用户实测踩过：关了组件还在）。
-                   备份里要保留的是**更早的原件**；原件备份不存在就当没有原件（关闭时直接删）。 */
-                if bp.is_file() {
-                    had_original = true;
-                    backup = Some(bp.display().to_string());
-                }
-            } else {
-                std::fs::copy(&dst, &bp).map_err(|e| format!("备份原文件失败：{e}"))?;
+        if dst.is_file() && is_our_asset_file(&dst) {
+            /* 目录里已经是**我们自己的组件**（老版本部署的）：绝不能拿它去覆盖备份——
+               否则"关闭"时会把这个旧组件当成原件又还原回来（用户实测踩过：关了组件还在）。
+               备份里要保留的是**更早的原件**；原件备份不存在就当没有原件（关闭时直接删）。 */
+            if bp.is_file() {
+                let bytes = std::fs::read(&bp)
+                    .map_err(|e| format!("读取备份 {} 失败：{e}", bp.display()))?;
+                plan.push(*rel, true, bytes);
                 had_original = true;
                 backup = Some(bp.display().to_string());
+            } else {
+                plan.push(*rel, false, Vec::new());
             }
-        }
-        std::fs::copy(&src, &dst).map_err(|e| format!("复制到 {} 失败：{e}", dst.display()))?;
-        let got = crate::util::sha256_file(&dst).map_err(|e| format!("{e:#}"))?;
-        if !got.eq_ignore_ascii_case(want) {
-            rollback_asset_files(game_dir, &done);
-            return Err("复制后校验不一致，已回滚".to_owned());
+        } else if dst.is_file() {
+            // 原件先读进内存并落成 .bak（公共层负责扁平备份名与 safe_join）
+            let bytes = crate::backup_restore::snapshot_one(game_dir, rel, &bdir)
+                .map_err(|e| format!("{e:#}"))?
+                .ok_or_else(|| format!("{rel} 读不出来，无法备份原件"))?;
+            plan.push(*rel, true, bytes);
+            had_original = true;
+            backup = Some(bp.display().to_string());
+        } else {
+            plan.push(*rel, false, Vec::new());
         }
         done.push(AssetFileRecord {
-            rel: rel.to_string(),
+            rel: (*rel).to_string(),
             had_original,
             backup,
-            sha: Some(got),
+            sha: Some((*want).to_ascii_lowercase()),
+        });
+        items.push(crate::backup_restore::WriteItem {
+            rel: (*rel).to_string(),
+            src,
+            sha256: (*want).to_string(),
         });
     }
+
+    /* 2) 铺文件：原子替换 + 逐个校验，任何一步失败都按上面的快照回滚
+       （有原件的写回原件、没有的删掉），游戏目录不会停在半铺状态。 */
+    crate::backup_restore::apply(game_dir, &plan, &items).map_err(|e| format!("{e:#}"))?;
     let had_any = done.iter().any(|f| f.had_original);
-    let rec = asset_record_path(game_dir)?;
     let body = AssetRecord {
         dir: game_dir.display().to_string().replace(std::path::MAIN_SEPARATOR, "/"),
         v: 2,

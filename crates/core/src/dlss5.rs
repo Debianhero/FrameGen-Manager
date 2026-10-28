@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::backup_restore::{self, BackupRef};
 use crate::deploy::DirLock;
 use crate::scan::{self, GraphicsApi, GpuRoute};
 use crate::util;
@@ -1038,15 +1039,12 @@ pub fn deploy(
         let mut backup_name = None;
         let mut original_sha256 = None;
         if existed {
-            let orig = std::fs::read(&dst).with_context(|| format!("备份 {}", dst.display()))?;
+            let orig = backup_restore::snapshot_one(&dir, name, &files_dir)?
+                .ok_or_else(|| anyhow::anyhow!("{name} 读不出来，无法备份原件"))?;
             original_sha256 = Some(util::sha256_hex(&orig));
-            // 子目录里的目标（GITC-Uplift\\nvngx_dlssnr.dll）备份名不能带反斜杠
-            let bn = format!("{}.bak", name.replace('\\', "_").replace('/', "_"));
-            if let Some(p) = files_dir.join(&bn).parent() {
-                std::fs::create_dir_all(p).ok();
-            }
-            std::fs::write(files_dir.join(&bn), &orig)?;
-            backup_name = Some(bn);
+            // 子目录里的目标（GITC-Uplift\nvngx_dlssnr.dll）由公共层压成**扁平**备份名，
+            // 否则备份目录里会多出嵌套路径，还原读回时踩分隔符的坑。
+            backup_name = Some(backup_restore::backup_file_name(name));
         }
         entries.push(Entry {
             rel_path: name.clone(),
@@ -1488,29 +1486,23 @@ fn vulkan_module_path(is64: bool) -> PathBuf {
 /// （同 deploy.rs：备份坏了要中止，而不是删一半留下一地鸡毛）。回滚与「还原」共用它。
 fn rollback_entries(dir: &Path, base: &Path, entries: &[Entry]) -> Result<String> {
     let files_dir = base.join("files");
-    let mut plan: Vec<(&Entry, Vec<u8>)> = Vec::new();
-    for e in entries {
-        if !e.existed_before {
-            continue;
-        }
-        let Some(bn) = &e.backup_name else { continue };
-        let src = files_dir.join(bn);
-        let bytes = std::fs::read(&src).with_context(|| format!("读取备份 {}", src.display()))?;
-        if let Some(orig) = &e.original_sha256 {
-            if util::sha256_hex(&bytes) != *orig {
-                bail!("备份 {bn} 自身已损坏，中止（目录一个字都没动）");
+    let refs: Vec<BackupRef> = entries
+        .iter()
+        .filter_map(|e| {
+            if !e.existed_before {
+                return None;
             }
-        }
-        plan.push((e, bytes));
-    }
-    let mut restored = 0usize;
-    for (e, bytes) in &plan {
-        let dst = dir.join(&e.rel_path);
-        let tmp = dir.join(format!(".{}.fgm.tmp", e.rel_path));
-        std::fs::write(&tmp, bytes)?;
-        util::atomic_replace(&tmp, &dst)?;
-        restored += 1;
-    }
+            let bn = e.backup_name.as_deref()?;
+            Some(BackupRef {
+                rel: &e.rel_path,
+                backup_name: bn,
+                original_sha256: e.original_sha256.as_deref(),
+            })
+        })
+        .collect();
+    // 读回 + 逐个校验（坏备份在这里就中止，目录一个字都没动），再原子写回
+    let plan = backup_restore::load_originals(&files_dir, &refs)?;
+    let restored = backup_restore::restore_originals(dir, &plan)?;
     let mut removed = 0usize;
     let mut forced: Vec<String> = Vec::new();
     for e in entries {

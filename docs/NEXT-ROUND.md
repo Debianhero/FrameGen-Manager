@@ -46,15 +46,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\bench.ps1
 
 ## 4. 下一轮目标（按顺序）
 
-### P1-7 抽 `backup_restore`
+### ~~P1-7 抽 `backup_restore`~~（已完成，见 `docs/CHANGELOG.md` 的 v1.5.1「工程（P1-7）」）
 
-- 现状：`deploy.rs` / `sm.rs` / `dlss5.rs` 各有一套「读记录 → 备原件 → 写新文件 → 校验 → 失败回滚」。
-- 目标：新建 `crates/core/src/backup_restore.rs`，暴露
-  `BackupPlan { entries: Vec<(rel, existed_before, bytes)> }` + `apply(dir, plan)` + `rollback(dir, plan)`；
-  三个业务只负责“清单与策略”。
-- DoD：三处调用点行为不变；新增 3 条单测（覆盖：原件恢复、回滚、无记录时直接写）；
-  `cargo test` 全绿；沙箱“部署→还原”文件级对照一致。
-- 风险：回滚路径写错会让用户**丢原件**。分两次提交：先抽只读部分，再替换写入部分。
+- `crates/core/src/backup_restore.rs`：`BackupPlan { entries: Vec<(rel, existed_before, bytes)> }`
+  + `capture` / `snapshot_one` / `load_originals` / `apply` / `rollback`（含 7 条单测）。
+- 三处调用点已接入：`deploy.rs`（部署备份 + `restore_with`）、`sm.rs`（`asset_deploy`，旧的
+  `rollback_asset_files` 已删）、`dlss5.rs`（部署备份 + `rollback_entries`）。
+- 遗留：`sm::asset_restore`（关闭组件）仍按记录里的绝对路径逐个 copy，未接入公共层；
+  它的「备份是本项目组件就直接删」属于特例策略，等下次动它时再抽。
 
 ### P1-12 拆 `app.js`（当前 2596 行）
 
