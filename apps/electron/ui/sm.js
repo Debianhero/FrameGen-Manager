@@ -125,11 +125,13 @@ function showClearedDialog(report, kinds) {
     var bad = namesOf(report.failed, k);
     if (bad.length) failLines.push(legacyKindPrefix(k) + fmt(bad));
   });
+  // `kinds` 只放**这次真的扫到更新**的那几类（由 checkAssetsLegacy 按扫到的列表拼），
+  // 这里绝不写死「帧生成、Smooth Motion、DLSS5」——只有 DLSS5 更新时，正文里就只出现 DLSS5。
   var body = t('检测到 {kinds} 资产有更新，已自动清除这些游戏里的旧版部署：', { kinds: kinds.join('、') });
   body += NL + NL + (lines.length ? lines.join(NL) : t('（扫到的旧部署已经干净，没有需要删除的文件）'));
   if (failLines.length) {
-    body += NL + NL + t('这些没能清干净（多半是游戏还开着）：请先退出游戏，再到对应页面手动处理。') +
-      NL + failLines.join(NL);
+    body += NL + NL + t('没能清除的游戏：') + NL + failLines.join(NL) +
+      NL + NL + t('请退出游戏后还原/清理后重新部署');
   }
   body += NL + NL + t('请到对应页面重新部署新版本。');
   return uiConfirm({
