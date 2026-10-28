@@ -244,3 +244,72 @@ function checkSelfUpdate() {
     });
   });
 }
+/* 更新弹窗 + 日志实时刷新（P1-12 第 5 步）：从 app.js 搬到设置/关于这一块（同属「设置页」），
+   函数名不变。依赖 app.js 的 invoke / toast / busy / showBar，lib.js 的 `$` / errText / fmtSize，
+   以及 UPD_NOTES / SELF 等状态。 */
+function startLogLive() {
+  var tick = function () { if (!document.hidden) loadLog().catch(function () { }); };
+  tick();
+  setInterval(tick, 2500);
+}
+function bindUpdateDialog() {
+  var box = $('upd'), stop = $('upd-stop');
+  if (!box) return;
+  // 下载窗口不在 .ov 那套弹层里，以前忘了 setOvOpen —— 它盖在界面上时背景一点没糊，
+  // 和别的对话框（那种是糊的）明显不一致。这里补上；带计数保护，重复的 start 不会累加。
+  var updOpen = false;
+  function setUpdBlur(on) {
+    if (on === updOpen) return;
+    updOpen = on;
+    setOvOpen(on);
+  }
+  var netdiskBtn = $('upd-netdisk');
+  if (netdiskBtn) netdiskBtn.addEventListener('click', function () {
+    invoke('open_netdisk').catch(function () {  });
+  });
+  var stopAck = false;   // 点了停止之后，等后台确认（canceled/done 事件）就置位
+  if (stop) stop.addEventListener('click', function () {
+    if (stop.disabled) return;
+    // 用户反馈：点了停止要立刻有反馈，而不是干等后台确认
+    stop.disabled = true;
+    if ($('upd-msg')) $('upd-msg').textContent = t('正在停止…');
+    stopAck = false;
+    invoke('cancel_self_update').then(function () {
+      toast(t('已请求停止，临时文件会一并清理'), 'info', 5000);
+      // 5 秒内没等到后台确认 = 连接卡住了：如实说明，别让用户以为没点上
+      setTimeout(function () {
+        if (stopAck || box.classList.contains('hidden')) return;
+        toast(t('当前网络暂时卡住，停止将在连接恢复响应后自动完成（不会继续下载内容）'), 'info', 8000);
+      }, 5000);
+    }).catch(function (e) {
+      toast(t('停止失败：') + errText(e), 'err', 8000);
+      stop.disabled = false;
+    });
+  });
+  EV.listen('selfupdate', function (e) {
+    var p = (e && e.payload) || {};
+    var phase = p.phase || '';
+    if (phase) stopAck = true;
+    if (phase === 'start') {
+      box.classList.remove('hidden');
+      setUpdBlur(true);
+      // 更新内容：检查更新时从发布页取回来的日志，下载前让用户看得见
+      var nEl = $('upd-notes');
+      if (nEl) {
+        nEl.textContent = UPD_NOTES || '';
+        nEl.classList.toggle('hidden', !UPD_NOTES);
+      }
+      if ($('upd-fill')) $('upd-fill').style.width = '0%';
+      if ($('upd-msg')) $('upd-msg').textContent = t('正在获取版本信息…');
+      return;
+    }
+    if (phase) {
+      if ($('upd-msg')) $('upd-msg').textContent = phase === 'done' ? t('下载完成，正在启动安装程序…') : (phase === 'canceled' ? t('已停止，临时文件已清理') : t('下载失败'));
+      if ($('upd-stop')) $('upd-stop').disabled = true;
+      setTimeout(function () { box.classList.add('hidden'); setUpdBlur(false); if ($('upd-stop')) $('upd-stop').disabled = false; }, phase === 'done' ? 600 : 1200);
+      return;
+    }
+    if ($('upd-fill')) $('upd-fill').style.width = Math.round(Math.max(0, Math.min(1, p.fraction || 0)) * 100) + '%';
+    if ($('upd-msg')) $('upd-msg').textContent = p.msg || '';
+  });
+}
