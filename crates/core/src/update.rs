@@ -34,8 +34,6 @@ pub const INI_REPO_PATH: &str = "dlssg_sm86.ini";
 
 const USER_AGENT: &str = "FrameGen-Manager/0.1 (+https://github.com/sdli1995/dlssg_for_sm86)";
 
-/// GitHub 未登录 API 每分钟/小时的配额用尽时的提示
-
 pub fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
@@ -807,6 +805,9 @@ fn ini_insert_key(text: &str, section: &str, key: &str, value: &str) -> String {
 ///
 /// optimized：0 原厂不加速 / 1 加速且画面与官方逐位一致 / 2 再加有损图像内核（出厂默认）/ 3 全部有损
 /// max_frames：3 = 最高 4X（出厂默认）/ 5 = 最高 6X（仅 310.9 版，且要游戏自带插件支持）
+// 这几个参数就是「部署档位」的原始输入，拆成结构体会让调用方多绕一层；
+// 界面和自测都是逐项传的，保持一眼能对照 INI 的键。
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_deploy_ini(
     upstream: &Path,
     optimized: u8,
@@ -832,11 +833,9 @@ pub fn prepare_deploy_ini(
     // 0.4.1：Engine=XeSS 时最多 3（=4X），选 5（6X）会导致帧生成不启用（max_generated_frames_unsupported）
     let mut max_frames = max_frames;
     let mut xess_clamped = false;
-    if engine == "XeSS" {
-        if max_frames > 3 {
-            max_frames = 3;
-            xess_clamped = true;
-        }
+    if engine == "XeSS" && max_frames > 3 {
+        max_frames = 3;
+        xess_clamped = true;
     }
     if preset == "A"
         && optimized == DEFAULT_OPTIMIZED
@@ -1036,9 +1035,7 @@ pub fn load_speeds() -> SourceSpeeds {
 
 fn save_speeds(s: &SourceSpeeds) {
     if let Ok(p) = speed_path() {
-        if let Ok(t) = serde_json::to_string_pretty(s) {
-            let _ = std::fs::write(p, t);
-        }
+        let _ = crate::util::write_json_atomic(&p, s);
     }
 }
 

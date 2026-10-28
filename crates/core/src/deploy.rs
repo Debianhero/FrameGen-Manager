@@ -186,12 +186,9 @@ pub fn manifest_state(dir: &Path) -> ManifestState {
     }
 }
 
-/// 写 manifest：**必须原子**。非原子写中途崩溃会留下半截 JSON，
-/// 下次就被当成「没部署过」（见 manifest_state 的说明）。
+/// 写 manifest：**必须原子**（见 `util::write_json_atomic` 的说明）。
 fn write_manifest(base: &Path, m: &BackupManifest) -> Result<()> {
-    let tmp = base.join("manifest.json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(m)?)?;
-    util::atomic_replace(&tmp, &base.join("manifest.json"))
+    util::write_json_atomic(&base.join("manifest.json"), m)
 }
 
 pub fn load_manifest(dir: &Path) -> Option<BackupManifest> {
@@ -1247,6 +1244,8 @@ pub struct PreparedDeploy {
 ///   1. 代理 DLL 本体；
 ///   2. 游戏目录已有的 DLSS 运行库不动，缺的才补；
 ///   3. INI：出厂默认用资产原文件，改过档位才生成 deploy.ini。
+// 参数就是「部署档位」的原始输入，逐项传递便于和 INI 的键一一对照。
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_deploy(
     dir: &Path,
     proxy: &str,
@@ -1868,6 +1867,8 @@ pub const SM_CONFLICT_NOTE: &str =
     "该游戏疑似已开启Smooth Motion。不建议同时开启Smooth Motion和DLSS-FG。但你可以忽略这条提示继续部署。";
 
 /// 一步到位：准备 + 部署（返回部署说明与备注）。
+// 同 prepare_deploy：档位参数逐项传，调用方（sidecar / 自测）一眼能对上界面下拉框。
+#[allow(clippy::too_many_arguments)]
 pub fn deploy_game(
     dir: &Path,
     proxy: &str,

@@ -524,9 +524,7 @@ pub fn state_label(deploy_dir: &Path) -> String {
 
 fn write_manifest(base: &Path, m: &Manifest) -> Result<()> {
     std::fs::create_dir_all(base)?;
-    let tmp = base.join("manifest.json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(m)?)?;
-    util::atomic_replace(&tmp, &base.join("manifest.json"))
+    util::write_json_atomic(&base.join("manifest.json"), m)
 }
 
 // ---------------------------------------------------------------- 小工具
@@ -1335,10 +1333,10 @@ pub fn deploy(
         let mut seen_tx = false;
         for l in text.lines() {
             if let Some(cur) = l.strip_prefix("EffectSearchPaths=") {
-                lines.push(format!("EffectSearchPaths={}", merge(cur, &fx_paths)));
+                lines.push(format!("EffectSearchPaths={}", merge(cur, fx_paths)));
                 seen_fx = true;
             } else if let Some(cur) = l.strip_prefix("TextureSearchPaths=") {
-                lines.push(format!("TextureSearchPaths={}", merge(cur, &tx_paths)));
+                lines.push(format!("TextureSearchPaths={}", merge(cur, tx_paths)));
                 seen_tx = true;
             } else {
                 lines.push(l.to_owned());

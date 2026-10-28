@@ -978,6 +978,7 @@ fn dir_touched_since(dir: &std::path::Path, since_epoch: u64) -> bool {
 ///     老游戏只在目录被改过 / 没找到过渲染 exe / 技术字段没算过时才重新探测。
 ///   * `manual_fast`：手动扫描（用户只选「仅启动器」），枚举启动器清单，不做散装枚举。
 ///   * `reprobe`：schema 升级后的静默重探测 —— 全部游戏重新探测，分批汇报进度。
+///
 /// 探测分批（每批 4 个）并汇报「正在识别（N/M）」；落盘不能省。手动条目与忽略清单原样保留。
 fn scan_library(id: u64, mode: &str) -> Result<Value, String> {
     progress(id, "正在扫描游戏库…", 0.0);
@@ -1613,6 +1614,8 @@ fn checked_exe(exe: &str) -> Result<std::path::PathBuf, String> {
     Ok(p)
 }
 
+// 参数一一对应界面上的部署档位下拉框；打包成结构体只会在这一层多绕一次。
+#[allow(clippy::too_many_arguments)]
 fn deploy_impl(
     dir: &str,
     proxy: &str,
@@ -1671,6 +1674,8 @@ fn deploy_impl(
     .map_err(|e| format!("{e:#}"))
 }
 
+// 同 deploy_impl：参数就是命令协议里的那一组字段。
+#[allow(clippy::too_many_arguments)]
 fn deploy_game(
     dir: String,
     proxy: String,

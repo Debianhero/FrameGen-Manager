@@ -30,7 +30,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
 pub fn sha256_file_cached(p: &Path) -> anyhow::Result<String> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, (u64, u64, String)>>> = OnceLock::new();
+    // 缓存值：(大小, mtime 秒, 哈希)。键是规范化后的路径。
+    type CacheVal = (u64, u64, String);
+    static CACHE: OnceLock<Mutex<HashMap<String, CacheVal>>> = OnceLock::new();
 
     let meta = std::fs::metadata(p)?;
     let size = meta.len();
@@ -44,10 +46,8 @@ pub fn sha256_file_cached(p: &Path) -> anyhow::Result<String> {
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(g) = cache.lock() {
         if let Some((s, m, h)) = g.get(&key) {
-            if *s == size {
-                if *m == mtime {
-                    return Ok(h.clone());
-                }
+            if *s == size && *m == mtime {
+                return Ok(h.clone());
             }
         }
     }
@@ -589,9 +589,37 @@ pub fn save_config(cfg: &AppConfig) -> Result<()> {
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&p, serde_json::to_string_pretty(cfg)?)
-        .with_context(|| format!("写入配置失败: {}", p.display()))?;
+    write_json_atomic(&p, cfg).with_context(|| format!("写入配置失败: {}", p.display()))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------- 原子写 JSON / 文本
+
+/// 目标文件的临时名：`manifest.json` -> `manifest.json.tmp`（同目录，`atomic_replace` 才好换）。
+fn tmp_sibling(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".tmp");
+    PathBuf::from(s)
+}
+
+/// 原子写文本：先写同目录 `.tmp`，再 `atomic_replace` 换上去。
+///
+/// 为什么统一走这一条：非原子写中途崩溃会留下半截文件，而**「文件在但读不出来」
+/// 和「没有这份文件」是两种完全不同的处境** —— 部署记录读不出来时当成"没部署过"，
+/// 下一步就会把游戏原件覆盖掉（见 `deploy::manifest_state` 的说明）。
+/// 所以凡是"下次启动还要读"的文件一律原子写。
+pub fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
+    let tmp = tmp_sibling(path);
+    std::fs::write(&tmp, text).with_context(|| format!("写入 {} 失败", tmp.display()))?;
+    atomic_replace(&tmp, path)?;
+    Ok(())
+}
+
+/// 原子写 JSON（pretty，便于用户自己打开看）。**部署记录、配置、游戏库、GPU 名称备份
+/// 都走它**，别再各写一遍 `to_string_pretty` + `fs::write`。
+pub fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    let text = serde_json::to_string_pretty(value)?;
+    write_text_atomic(path, &text)
 }
 
 /// 默认资产目录：exe 同级 assets（能写就用，便携），否则 %APPDATA%\DLSSG-Manager\assets
@@ -880,24 +908,6 @@ pub fn safe_join(base: &std::path::Path, rel: &str) -> anyhow::Result<std::path:
     Ok(out)
 }
 
-#[cfg(test)]
-mod safe_join_tests {
-    use super::safe_join;
-    use std::path::Path;
-
-    #[test]
-    fn rejects_escapes() {
-        let base = Path::new("C:\\games\\demo");
-        assert!(safe_join(base, "version.dll").is_ok());
-        assert!(safe_join(base, "dlssg_sm86\\kernels\\fg_kernels.dll").is_ok());
-        assert!(safe_join(base, "..\\evil.dll").is_err());
-        assert!(safe_join(base, "a\\..\\..\\evil.dll").is_err());
-        assert!(safe_join(base, "C:\\Windows\\x.dll").is_err());
-        assert!(safe_join(base, "\\\\server\\share\\x.dll").is_err());
-        assert!(safe_join(base, "con.txt").is_err());
-        assert!(safe_join(base, "").is_err());
-    }
-}
 
 /// 读 PE 的版本资源块，返回一块**宽松的 ASCII 文本**（仅用于特征判断，不保证完整）。
 ///
@@ -942,5 +952,24 @@ pub fn file_version_text(p: &std::path::Path) -> Option<String> {
         } else {
             Some(out)
         }
+    }
+}
+
+#[cfg(test)]
+mod safe_join_tests {
+    use super::safe_join;
+    use std::path::Path;
+
+    #[test]
+    fn rejects_escapes() {
+        let base = Path::new("C:\\games\\demo");
+        assert!(safe_join(base, "version.dll").is_ok());
+        assert!(safe_join(base, "dlssg_sm86\\kernels\\fg_kernels.dll").is_ok());
+        assert!(safe_join(base, "..\\evil.dll").is_err());
+        assert!(safe_join(base, "a\\..\\..\\evil.dll").is_err());
+        assert!(safe_join(base, "C:\\Windows\\x.dll").is_err());
+        assert!(safe_join(base, "\\\\server\\share\\x.dll").is_err());
+        assert!(safe_join(base, "con.txt").is_err());
+        assert!(safe_join(base, "").is_err());
     }
 }

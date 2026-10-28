@@ -440,7 +440,8 @@ pub fn load_backup() -> Option<Backup> {
 
 fn write_backup(b: &Backup) -> Result<()> {
     let p = backup_path()?;
-    std::fs::write(&p, serde_json::to_string_pretty(b)?)
+    // 这份备份是「改名之前的原始值」唯一依据，写一半就废了 → 必须原子写
+    crate::util::write_json_atomic(&p, b)
         .with_context(|| format!("写入备份失败: {}", p.display()))?;
     Ok(())
 }

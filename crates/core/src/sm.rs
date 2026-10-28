@@ -880,9 +880,8 @@ fn record_write(path: &std::path::Path, r: &SmRecord) -> Result<(), String> {
         had_value,
         json_escape(&r.dir)
     );
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, body.as_bytes()).map_err(|e| format!("写记录失败：{e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("落盘记录失败：{e}"))?;
+    // 原子写（原来是自己写 tmp + rename，现在和其他几处共用同一条实现）
+    crate::util::write_text_atomic(path, &body).map_err(|e| format!("落盘记录失败：{e}"))?;
     Ok(())
 }
 
@@ -1374,49 +1373,10 @@ pub fn test_record_read(game_dir: &std::path::Path) -> Option<TestRecord> {
     record_read(&path).as_ref().map(to_test_record)
 }
 
-/// 我们建过但没挂任何应用的 profile（挂不上应用、或者游戏被删掉了）。
-/// 返回它们的名字。
-pub fn orphan_profiles() -> Result<Vec<String>, String> {
-    let sess = nv::Session::open()?;
-    let recorded = recorded_profile_names();
-    let mut out = Vec::new();
-    for prof in sess.profiles() {
-        let name = sess.profile_name(prof);
-        if name.is_empty() || !name.starts_with(PROFILE_PREFIX) {
-            continue;
-        }
-        if recorded.iter().any(|n| n == &name) {
-            continue;
-        }
-        if sess.apps(prof).is_empty() {
-            out.push(name);
-        }
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
-/// 备份记录里出现过的 profile 名（这些还在用，不能当孤儿清掉）。
-fn recorded_profile_names() -> Vec<String> {
-    let Ok(dir) = sm_records_dir() else {
-        return Vec::new();
-    };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for e in rd.flatten() {
-        if e.path().extension().map(|x| x == "json").unwrap_or(false) {
-            if let Some(r) = record_read(&e.path()) {
-                if !r.profile.is_empty() {
-                    out.push(r.profile);
-                }
-            }
-        }
-    }
-    out
-}
+/* 这里原来有两个函数：`orphan_profiles()`（找出「我们建过但没挂应用」的驱动 profile）
+   和它专用的 `recorded_profile_names()`。egui 版退役后它们**没有任何调用点**
+   （sidecar 里也没有对应命令），已随本轮代码结构审计删除（见 docs/CHANGELOG.md）；
+   要恢复从 git 历史里取。 */
 
 // ---------------------------------------------------------------- 内置解锁组件的部署 / 还原
 

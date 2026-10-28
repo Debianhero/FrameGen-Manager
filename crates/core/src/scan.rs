@@ -149,9 +149,9 @@ pub fn load_library_from(p: &Path) -> LibraryCache {
 }
 
 pub fn save_library_from(p: &Path, c: &LibraryCache) -> anyhow::Result<()> {
-    let t = serde_json::to_string_pretty(c)?;
-    std::fs::write(p, t)?;
-    Ok(())
+    // 原子写：写一半崩溃会让下次启动读不出来，只能按空库处理 ——
+    // 库里有人工添加的游戏和「已移除」名单，丢不起（见 load_library 的 .bad 兜底）。
+    crate::util::write_json_atomic(p, c)
 }
 
 /// 手动条目：用户把当前目录存进游戏库时构造。

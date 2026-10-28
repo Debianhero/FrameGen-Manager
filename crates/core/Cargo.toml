@@ -28,22 +28,18 @@ winreg = "0.56"
 walkdir = "2"
 
 [target.'cfg(windows)'.dependencies]
+# 只留**真的在用**的 feature。以前这里还挂着 Win32_Security / Win32_Security_Cryptography /
+# Win32_Security_WinTrust / Win32_System_Memory —— 那是 egui 版的字体内存映射和 WinVerifyTrust
+# 签名校验留下的，两段代码都随 1.0.0 退役删掉了（现在认归属是 `scan::identify_dll` 自己
+# 解析 PE 证书表，不碰 CryptoAPI）。
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    # 原子替换 MoveFileExW、读 PE 版本资源（file_version_text）
     "Win32_Storage_FileSystem",
-    # 取游戏图标：Shell 拿 HICON，GDI 转成 RGBA 像素
+    # 取游戏图标：Shell 拿 HICON，GDI 转成 RGBA 像素；打开网址 / 跳系统设置页
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
-    # 手动导入要严格校验签名：WinVerifyTrust 验内容有没有被改，
-    # CryptQueryObject 取出「真正签名的那张证书」再比指纹
-    "Win32_Security_Cryptography",
-    "Win32_Security_WinTrust",
-    # 字体文件用只读内存映射加载（见 main.rs 的 map_font_readonly）：
-    # windows-sys 把 CreateFileW / CreateFileMappingW 挂在 Win32_Security 下，
-    # 映射本身在 Win32_System_Memory。都只是 extern 声明，不会让 exe 变大。
-    "Win32_Security",
-    "Win32_System_Memory",
     # 日志时间戳用本地时间（GetLocalTime 在 SystemInformation 下）
     "Win32_System_SystemInformation",
     # 判断「拿锁的那个进程还在不在」：OpenProcess + GetExitCodeProcess（清陈旧锁用）

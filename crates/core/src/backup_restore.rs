@@ -56,11 +56,6 @@ impl BackupPlan {
         self.entries.iter().filter(|e| e.1)
     }
 
-    /// 回滚时要**删掉**的条目（原本不存在的，即这次新建的）。
-    pub fn created(&self) -> impl Iterator<Item = &PlanEntry> {
-        self.entries.iter().filter(|e| !e.1)
-    }
-
     pub fn get(&self, rel: &str) -> Option<&PlanEntry> {
         self.entries.iter().find(|e| e.0 == rel)
     }
@@ -76,17 +71,6 @@ impl BackupPlan {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-
-    /// 给日志 / 错误信息用的一句话摘要。
-    pub fn summary(&self) -> String {
-        let existing = self.existing().count();
-        format!(
-            "{} 项（{} 项原件 + {} 项新建）",
-            self.entries.len(),
-            existing,
-            self.entries.len() - existing
-        )
     }
 }
 
@@ -323,9 +307,9 @@ mod tests {
         let plan = capture(&dir, &["version.dll", "nvngx_dlssg.dll"]).unwrap();
 
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan.get("version.dll").unwrap().1, true);
+        assert!(plan.get("version.dll").unwrap().1);
         assert_eq!(plan.get("version.dll").unwrap().2, b"ORIGINAL");
-        assert_eq!(plan.get("nvngx_dlssg.dll").unwrap().1, false);
+        assert!(!plan.get("nvngx_dlssg.dll").unwrap().1);
         assert!(plan.get("nvngx_dlssg.dll").unwrap().2.is_empty());
         // 只读：目标目录里没有多出任何文件，原件也没被改
         assert_eq!(std::fs::read(dir.join("version.dll")).unwrap(), b"ORIGINAL");
