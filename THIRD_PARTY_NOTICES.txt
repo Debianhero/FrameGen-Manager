@@ -55,9 +55,8 @@ nvngx_dlssg.dll / nvngx_dlss.dll / nvngx_dlssnr.dll 的版权归 NVIDIA Corporat
 
   dlssg_sm86\runtime\nvngx_dlssg.dll   310.9.16.0   签名 CN=NVIDIA Corporation（校验通过）
   dlssg_sm86\sr\nvngx_dlss.dll         310.7.129.0  签名 CN=NVIDIA Corporation（校验通过）
-  nvngx_dlssnr.dll                      310.8.0.0    签名 CN=NVIDIA Corporation（本机校验结果为
-                                                     HashMismatch：内容与签名记录的哈希不符 ——
-                                                     它来自 DLSS5 资源包，可能被重新打包过）
+  nvngx_dlssnr.dll                      310.9.16.0   无数字签名（NotSigned）—— 它来自 DLSS5 资源包，
+                                                    是 NVIDIA 的运行时，但被重新打包过，别按签名判断归属
 
 帧生成与超分的那两个文件**原样来自上游 0.4.0 发行包**（未做任何修改），哈希与上游包内
 manifest.json 记录的一致：
@@ -103,17 +102,29 @@ bundled-dlss5/ —— DLSS5，复制到 <资产目录>\DLSS5\
   ReShade_Setup_6.8.0_Addon.exe     ReShade 6.8.0 官方安装器（Addon 版），来源：ReShade 官网
                                     https://reshade.me 的下载页（文件属性 ProductName=ReShade、
                                     Company=crosire，签名者 CN=ReShade <info@reshade.me>，自签名证书）
-  renodx-dlss5-v8.5-model.addon64   RenoDX 项目（GitHub: clshortfuse/renodx）的 DLSS5 插件 v8.5；
-                                    *.addon64 是 ReShade 的插件后缀，ReShade 会加载与自身同目录的它
-  nvngx_dlssnr.dll                  与插件配套的神经网络模型（约 158 MB）
+  gitc-uplift.addon64               GITC Uplift 1.7.0 的 ReShade 插件（64 位）
+  gitc-uplift.addon32               同上，32 位版本（32 位游戏走它）
+  gitc-uplift-helper64.exe          GITC Uplift 1.7.0 的辅助进程（32 位 / DX9 由它托管 NR）
+  Uplift.fx / UpliftMask.fx         GITC Uplift 1.7.0 附带的两个 ReShade Shader
+  nvngx_dlssnr.dll                  NVIDIA 的神经网络模型（版本见上），随用户资源包提供
+  effects\                          内置 ReShade 效果包（标准效果 + SweetFX + iMMERSE 免费套件 +
+                                    lilium HDR，共 108 个文件），各自按上游仓库的许可分发
 
-后两个来自 RenoDX 的 DLSS5 资源包：本项目此前是在界面里给一个「获取资源包」按钮打开作者的
-分发页，现在改为把同一份资源随安装包内置，省去用户自己找包这一步。
+GITC Uplift 的出处与许可
+  项目：  GitHub: ghostinthecamera/GITC-Uplift
+  版本：  1.7.0（发布包 GITC-Uplift-1.7.0.zip）
+  改动：  未做任何修改 —— 内置的就是发布包 Addons\ 与 Shaders\ 下的文件，
+          SHA-256 与发布包内的 SHA256SUMS.txt 逐条一致
+  许可：  MIT，Copyright (c) 2026 Hussain Abdullah（全文见发布包 LICENSE）
+  其自带声明（发布包 THIRD_PARTY_NOTICES.md）：openNR、RenoDX、NVIDIA NGX SDK 头文件、
+          ReShade add-on API 头文件（BSD-3-Clause）、Dear ImGui、OkLab —— 均为 MIT / BSD-3-Clause，
+          并明确「不分发 NVIDIA 的任何库或二进制，nvngx_dlssnr.dll 由用户提供」
 
 上游项目与本项目的许可
 ----------------------
 · 上游 dlssg_for_sm86 —— GitHub: sdli1995/dlssg_for_sm86
-· RenoDX —— GitHub: clshortfuse/renodx
+· GITC Uplift —— GitHub: ghostinthecamera/GITC-Uplift（DLSS5 插件、辅助进程与 Shader）
+· RenoDX —— GitHub: clshortfuse/renodx（GITC Uplift 的上游之一，其声明里已致谢）
 · ReShade —— https://reshade.me（官方安装器内附有许可文件）
 · 本程序以 MIT 许可发布，见 LICENSE。
 
