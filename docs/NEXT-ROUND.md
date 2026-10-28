@@ -55,16 +55,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\bench.ps1
 - 遗留：`sm::asset_restore`（关闭组件）仍按记录里的绝对路径逐个 copy，未接入公共层；
   它的「备份是本项目组件就直接删」属于特例策略，等下次动它时再抽。
 
-### P1-12 拆 `app.js`（当前 2596 行）
+### ~~P1-12 拆 `app.js`~~（已完成，见 `docs/CHANGELOG.md` 的 v1.5.1「工程（P1-12）」）
 
-- 现状：`ui/lib.js`（111 行，纯工具）已抽出；`app.js` 仍含库页/部署弹窗/SM/DLSS5/设置全部逻辑。
-- 目标顺序（每次只做一步，跑完 e2e 再提交）：
-  1. `ui/settings.js`（设置页 + 关于页）
-  2. `ui/deploy.js`（游戏详情对话框 + 部署/还原/清理）
-  3. `ui/sm.js` / `ui/dlss5.js`
-  4. 剩下 `app.js` 只留启动、tab、库列表
-- DoD：`app.js` ≤600 行；每个新文件 ≤600 行；e2e 全过；`preflight` 全绿。
-- 风险：函数被多处引用 → 拆分时**只移动不重写**，全局函数名保持不变。
+- 现状：`app.js` **594 行**，只剩启动 / 页签 / 弹窗与进度条公共件 / GPU 闸门 / 事件绑定；
+  其余按页拆到 `ui/settings.js`（315）、`ui/deploy.js`（553）、`ui/dlss5.js`（385）、
+  `ui/sm.js`（323）、`ui/library.js`（469），加上原有的 `ui/lib.js`（107）。
+- 加载顺序（`index.html` 是唯一来源，e2e 与 `i18n-coverage.py` 都从它读）：
+  `i18n.js → lib.js → settings.js → deploy.js → dlss5.js → sm.js → library.js → app.js`
+- **踩过的坑（后续拆分别再踩）**：
+  1. `app.js` 原来是整文件一个 IIFE，块搬不走（函数/状态对外不可见）→ 第 0 步先去 IIFE。
+  2. **脚本顶层不能写 `'use strict'`**：e2e 用 `win.eval` 加载，严格模式 eval 里的
+     `var`/`function` 不会挂到全局，`settings.js` 就看不到 `app.js` 的 `invoke`/`CFG`
+     （浏览器脚本级严格模式没这问题，但两条路径必须一致）。已写进 `app.js` 顶部注释。
+  3. 搬运时保持函数体原样（只移动不重写），搬完跑一次跨文件同名声明检查，
+     再跑 `node --check` + `ui-e2e`；`preflight` 的语法门禁已覆盖整个 `ui/`。
 
 ## 5. 明确不做（已决策）
 

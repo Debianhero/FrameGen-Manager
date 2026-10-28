@@ -37,7 +37,14 @@ $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
   Write-Output '  skipped (node not found)'
 } else {
-  foreach ($f in @('apps/electron/ui/app.js', 'apps/electron/main.js', 'apps/electron/preload.js')) {
+  # ui/ 下的脚本全查（P1-12 拆成多个文件后，漏查一个就等于没有语法门禁）
+  $jsList = @()
+  $uiDir = Join-Path $root 'apps\electron\ui'
+  if (Test-Path $uiDir) {
+    $jsList += (Get-ChildItem $uiDir -Filter *.js -File | Sort-Object Name | ForEach-Object { 'apps/electron/ui/' + $_.Name })
+  }
+  $jsList += @('apps/electron/main.js', 'apps/electron/preload.js')
+  foreach ($f in $jsList) {
     $p = Join-Path $root $f
     if (-not (Test-Path $p)) { continue }
     & node --check $p 2>&1 | Out-Null
