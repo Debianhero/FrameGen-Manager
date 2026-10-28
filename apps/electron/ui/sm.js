@@ -9,153 +9,183 @@
    它没有任何调用点了，已随本轮代码结构审计删除（见 docs/CHANGELOG.md）—— 里面的 sm_legacy_scan 命令
    仍然被 checkAssetsLegacy 用着，别一起删。 */
 
-// 统一弹窗：列出三类资产里需要处理的游戏，【全部清除】串行清理，【暂不处理】按版本记一次。
+// ---------------------------------------------------------------- 三类资产的旧版清理
 //
-// **两类 DLSS5 必须分开**（踩过一次）：
-//   · d5Names    —— 旧版 RenoDX 插件：deploy 会直接拒绝，必须先「彻底卸载」；
-//   · d5Outdated —— 已经是 GITC、只是内置资产版本旧了（1.6.2 → 1.7.0 这种）：
-//                    **不用卸载**，到 DLSS5 页再点一次部署就会覆盖成新版本。
-//                   而「彻底卸载」会连整个 reshade-shaders 一起删掉（用户自备的预设 /
-//                   效果包就没了），为一次二进制小升级付这个代价太大 ——
-//                    所以它们只做告知，**绝不进清除清单**。
-function showAssetsLegacyDialog(fgNames, smNames, d5Names, d5Outdated) {
+// 口径（产品已定）：任何一类资产的「已部署文件」和当前内置资产对不上，**启动后直接清干净**，
+// 不再先问用户 —— 旧插件配新运行时是对不上的（帧生成 0.4.x 尤其明显），留着只会让人以为
+// "还能凑合"。清完弹一个**只有【我知道了】**的告知窗：哪类资产更新了、清了哪些游戏、
+// 哪些没清掉。
+//
+// 每一类都用「把我们的部署收回去」的命令，而不是"能删多少删多少"：
+//   · 帧生成：restore（按记录放回原件 / 删掉我们铺的文件）+ clean_legacy（0.3.x 遗留）；
+//   · Smooth Motion：sm_set_game(on:false)（先重置驱动 profile）+ sm_asset_restore（取回组件）；
+//   · DLSS5（GITC，只是资产旧了）：dlss5_restore —— 只收我们的文件、还原原件，
+//     **不动用户自备的 ReShade 预设与效果包**（彻底卸载会把整个 reshade-shaders 删掉）；
+//   · DLSS5（旧版 RenoDX）：dlss5_uninstall —— 布局不兼容，必须彻底卸载才能装 GITC。
+// 清不掉的（游戏还开着 / 文件被占 / 没权限）不阻断其余游戏，如实列进弹窗让人手动处理。
+
+function legacyKindLabel(kind) {
+  if (kind === 'sm') return t('Smooth Motion');
+  if (kind === 'dlss5') return t('DLSS5');
+  return t('帧生成');
+}
+
+// 分组前缀（含冒号）。整条进词表，英文里才是「· Frame generation: 」而不是拼接出的全角冒号。
+function legacyKindPrefix(kind) {
+  if (kind === 'sm') return t('· Smooth Motion：');
+  if (kind === 'dlss5') return t('· DLSS5：');
+  return t('· 帧生成：');
+}
+
+// 把「命中的游戏名」映射成一条条清理任务（只做映射、不执行 —— 预览与自测都用它）。
+function legacyClearJobs(fgNames, smNames, d5Names, d5Outdated) {
+  var jobs = [];
+  var byName = function (n) {
+    return GAMES.filter(function (x) { return x.name === n; })[0];
+  };
+  var exeOf = function (g) { return g.exe ? g.exe : null; };
+  (fgNames || []).forEach(function (n) {
+    var g = byName(n);
+    if (!g) return;
+    jobs.push({
+      kind: 'fg', name: n, cmds: [
+        { cmd: 'restore', args: { dir: g.dir } },
+        { cmd: 'clean_legacy', args: { dir: g.dir } },
+      ]
+    });
+  });
+  (smNames || []).forEach(function (n) {
+    var g = byName(n);
+    if (!g) return;
+    jobs.push({
+      kind: 'sm', name: n, cmds: [
+        // 必须先「关闭」：只调 sm_asset_restore 会留一个"驱动里还开着"的假状态
+        { cmd: 'sm_set_game', args: { name: g.name, exe: exeOf(g) || '', on: false, dir: g.dir } },
+        { cmd: 'sm_asset_restore', args: { dir: g.dir, exe: exeOf(g) } },
+      ]
+    });
+  });
+  (d5Names || []).forEach(function (n) {
+    var g = byName(n);
+    if (!g) return;
+    // 旧版 RenoDX：布局和 GITC 不同源，只能彻底卸载
+    jobs.push({ kind: 'dlss5', name: n, cmds: [{ cmd: 'dlss5_uninstall', args: { dir: g.dir, exe: exeOf(g) } }] });
+  });
+  (d5Outdated || []).forEach(function (n) {
+    var g = byName(n);
+    if (!g) return;
+    // 已经是 GITC：还原即可（收走我们的文件、放回原件），别碰用户自备的东西
+    jobs.push({ kind: 'dlss5', name: n, cmds: [{ cmd: 'dlss5_restore', args: { dir: g.dir } }] });
+  });
+  return jobs;
+}
+
+// 顺序执行清理任务：单条失败不中断，逐条记下结果（弹窗要如实写清哪些没清掉）。
+function runLegacyClear(jobs) {
+  var cleared = [];
+  var failed = [];
+  var idx = 0;
+  var step = function () {
+    if (idx >= jobs.length) return Promise.resolve({ cleared: cleared, failed: failed });
+    var job = jobs[idx++];
+    var n = idx;
+    showBar(t('正在清除旧版资产…') + ' (' + n + '/' + jobs.length + ')', n / jobs.length, 'legacy');
+    var errs = [];
+    var chain = Promise.resolve();
+    job.cmds.forEach(function (c) {
+      chain = chain
+        .then(function () { return invoke(c.cmd, c.args); })
+        .catch(function (e) { errs.push(errText(e)); });
+    });
+    return chain.then(function () {
+      if (errs.length) failed.push({ kind: job.kind, name: job.name, reason: errs[0] });
+      else cleared.push({ kind: job.kind, name: job.name });
+      return step();
+    });
+  };
+  return step();
+}
+
+// 清完之后的告知窗：**只有【我知道了】**（不许点"取消"就把状态留在半路）。
+function showClearedDialog(report, kinds) {
   var NL = String.fromCharCode(10);
-  d5Outdated = d5Outdated || [];
-  var mustClear = fgNames.length > 0 || smNames.length > 0 || d5Names.length > 0;
-  if (!mustClear && d5Outdated.length === 0) return Promise.resolve();
   var fmt = function (arr) {
-    var head = arr.slice(0, 6).join('、');
-    if (arr.length <= 6) return head;
+    var head = arr.slice(0, 8).join('、');
+    if (arr.length <= 8) return head;
     return head + t('…等 ') + arr.length + t(' 个');
   };
+  var namesOf = function (list, kind) {
+    return list.filter(function (x) { return x.kind === kind; }).map(function (x) { return x.name; });
+  };
   var lines = [];
-  if (fgNames.length) lines.push(t('· 帧生成：') + fmt(fgNames));
-  if (smNames.length) lines.push(t('· Smooth Motion：') + fmt(smNames));
-  if (d5Names.length) lines.push(t('· DLSS5（旧版 RenoDX，必须先卸载）：') + fmt(d5Names));
-  if (d5Outdated.length) lines.push(t('· DLSS5（只是资产旧了，重新部署即可）：') + fmt(d5Outdated));
-
-  /* 只有「资产旧了、重部署就行」这一类：单按钮告知，不执行任何清除动作。
-     （内置资产换了版本是常事，不该每次都用"卸载"这种重手段拦用户一次。） */
-  if (!mustClear) {
-    return uiConfirm({
-      title: t('DLSS5 资产已更新'),
-      ok: t('知道了'),
-      single: true,
-      body: t('内置的 DLSS5 插件已升级到新版本。下面这些游戏部署的还是旧资产：') + NL + NL +
-        lines.join(NL) + NL + NL +
-        t('不需要卸载：到「DLSS5」页对它们各点一次「部署 DLSS5」就会换成新版本（你自备的 ReShade 预设和效果包不会被删）。'),
-    });
+  var failLines = [];
+  ['fg', 'sm', 'dlss5'].forEach(function (k) {
+    var arr = namesOf(report.cleared, k);
+    if (arr.length) lines.push(legacyKindPrefix(k) + fmt(arr));
+    var bad = namesOf(report.failed, k);
+    if (bad.length) failLines.push(legacyKindPrefix(k) + fmt(bad));
+  });
+  var body = t('检测到 {kinds} 资产有更新，已自动清除这些游戏里的旧版部署：', { kinds: kinds.join('、') });
+  body += NL + NL + (lines.length ? lines.join(NL) : t('（扫到的旧部署已经干净，没有需要删除的文件）'));
+  if (failLines.length) {
+    body += NL + NL + t('这些没能清干净（多半是游戏还开着）：请先退出游戏，再到对应页面手动处理。') +
+      NL + failLines.join(NL);
   }
-
-  // 文案里**只写命中的类别**（用户要求：只有帧生成有更新时，不要再提 SM/DLSS5）
-  var names = [];
-  if (fgNames.length) names.push(t('帧生成'));
-  if (smNames.length) names.push(t('Smooth Motion'));
-  if (d5Names.length) names.push(t('DLSS5'));
-  var body = t('检测到') + names.join('、') +
-    t('资产文件有更新，当前还是旧版本资产文件，是否全部清除后再重新部署？');
-  body = body + NL + NL + lines.join(NL);
-  if (d5Outdated.length) {
-    body = body + NL + NL +
-      t('另有 {n} 个游戏的 DLSS5 只是资产旧了，不在上面的清除清单里 —— 到「DLSS5」页点一次部署即可。', { n: d5Outdated.length });
-  }
+  body += NL + NL + t('请到对应页面重新部署新版本。');
   return uiConfirm({
-    title: t('资产文件有更新'),
-    ok: t('全部清除'),
-    cancel: t('暂不处理'),
+    title: t('已清除旧版资产'),
+    ok: t('我知道了'),
+    single: true,
     body: body,
-  }).then(function (yes) {
-    if (!yes) return;
-    var todo = [];
-    var byName = function (n) {
-      return GAMES.filter(function (x) { return x.name === n; })[0];
-    };
-    var exeOf = function (g) {
-      return g.exe ? g.exe : null;
-    };
-    fgNames.forEach(function (n) {
-      var g = byName(n);
-      if (!g) return;
-      // 帧生成：先按部署记录**还原**（放回原件/删掉我们铺的文件），再清旧版遗留文件
-      todo.push({ cmd: 'restore', args: { dir: g.dir } });
-      todo.push({ cmd: 'clean_legacy', args: { dir: g.dir } });
-    });
-    smNames.forEach(function (n) {
-      var g = byName(n);
-      if (!g) return;
-      // SM：必须走「关闭」这条命令 —— 它会先重置 NVIDIA 驱动 profile，再取回组件文件
-      // （只调 sm_asset_restore 会留一个"驱动里还开着"的假状态）
-      todo.push({ cmd: 'sm_set_game', args: { name: g.name, exe: exeOf(g) || '', on: false, dir: g.dir } });
-      // 再取回组件文件（sm_set_game 只动驱动配置；sandbox 实测文件仍在）
-      todo.push({ cmd: 'sm_asset_restore', args: { dir: g.dir, exe: exeOf(g) } });
-    });
-    d5Names.forEach(function (n) {
-      var g = byName(n);
-      if (g) todo.push({ cmd: 'dlss5_uninstall', args: { dir: g.dir, exe: exeOf(g) } });
-    });
-    var done = 0;
-    var runNext = function () {
-      if (done >= todo.length) {
-        // 清完再**复检一次**：还有残留就如实回报，不留"看起来成功其实没清掉"
-        return refreshLibrary().catch(function () { }).then(function () {
-          var fgLeft = legacyGamesNow().length;
-          return Promise.all([
-            invoke('sm_legacy_scan').catch(function () { return { games: [] }; }),
-            invoke('dlss5_legacy_scan').catch(function () { return { games: [] }; }),
-          ]).then(function (arr) {
-            var smLeft = (arr[0] && arr[0].games) ? arr[0].games.length : 0;
-            var d5Left = (arr[1] && arr[1].games) ? arr[1].games.length : 0;
-            var left = fgLeft + smLeft + d5Left;
-            if (left > 0) {
-              toast(t('仍有旧资产未清除（{n} 处），请到对应页面手动处理', { n: left }), 'warn', 15000);
-            } else {
-              toast(t('已清除旧资产，请到对应页面重新部署'), 'ok', 12000);
-            }
-          });
-        });
-      }
-      var job = todo[done++];
-      showBar(t('正在清除旧资产…') + ' (' + done + '/' + todo.length + ')', done / todo.length, 'legacy');
-      return invoke(job.cmd, job.args).catch(function () { }).then(runNext);
-    };
-    return runNext().then(function () { hideBarIfPhase('legacy', 1200); });
   });
 }
-// 启动后的统一检查：三类资产任意一类是旧版就弹同一个弹窗（按程序版本只弹一次）。
+
+// 启动后的统一检查：任何一类资产的已部署文件与内置资产不一致 → 直接清干净 → 告知。
+// 按**程序版本**只做一次（`assetsLegacyPrompted`），否则每次启动都扫一遍、删一遍。
 function checkAssetsLegacy() {
   if (!CFG) return Promise.resolve();
   var ver = CFG.version ? CFG.version : '';
-  if (ver.length > 0) {
-    if (CFG.assetsLegacyPrompted === ver) return Promise.resolve();
-  }
+  if (ver.length > 0 && CFG.assetsLegacyPrompted === ver) return Promise.resolve();
   var uniq = function (arr) {
     var out = [];
     arr.forEach(function (n) { if (!n) return; if (out.indexOf(n) < 0) out.push(n); });
     return out;
   };
-  var fg = legacyGamesNow().map(function (g) { return g.name; });
-  return Promise.all([
-    invoke('assets_update_scan').catch(function () { return { fg: [], sm: [], dlss5: [] }; }),
-    invoke('sm_legacy_scan').catch(function () { return { games: [] }; }),
-    invoke('dlss5_legacy_scan').catch(function () { return { games: [] }; }),
-  ]).then(function (arr) {
+  // 先把库刷出来：清理要靠「游戏名 → 目录」这层映射，库没加载就一个都清不了
+  return refreshLibrary().catch(function () { }).then(function () {
+    var fg = legacyGamesNow().map(function (g) { return g.name; });
+    return Promise.all([
+      invoke('assets_update_scan').catch(function () { return { fg: [], sm: [], dlss5: [] }; }),
+      invoke('sm_legacy_scan').catch(function () { return { games: [] }; }),
+      invoke('dlss5_legacy_scan').catch(function () { return { games: [] }; }),
+    ]);
+  }).then(function (arr) {
     var u = arr[0] ? arr[0] : {};
     // 指纹判定（新）+ 旧布局判定（老记录没有哈希时兜底）
     var fgAll = uniq(fg.concat(u.fg ? u.fg : []));
-    var smLegacy = [];
-    if (arr[1]) { if (arr[1].games) smLegacy = arr[1].games; }
-    var d5Legacy = [];
-    if (arr[2]) { if (arr[2].games) d5Legacy = arr[2].games; }
+    var smLegacy = (arr[1] && arr[1].games) ? arr[1].games : [];
+    var d5Legacy = (arr[2] && arr[2].games) ? arr[2].games : [];
     var smAll = uniq(smLegacy.concat(u.sm ? u.sm : []));
-    /* DLSS5 分成两类（见 showAssetsLegacyDialog 的说明）：
-         d5Legacy   = 旧版 RenoDX 插件 → 必须彻底卸载；
-         d5Outdated = 已是 GITC、只是内置资产旧了 → 重新部署即可，不清除。 */
+    /* DLSS5 分两类（见上面那段说明）：
+         d5Legacy   = 旧版 RenoDX 插件 → 彻底卸载；
+         d5Outdated = 已是 GITC、只是内置资产旧了 → 还原后重装。 */
     var d5Outdated = (u.dlss5 ? u.dlss5 : []).filter(function (n) {
       return d5Legacy.indexOf(n) < 0;
     });
     if (!fgAll.length && !smAll.length && !d5Legacy.length && !d5Outdated.length) return;
+    // 先记账再动手：中途崩了也不会每次启动重复清
     invoke('assets_legacy_prompt_done').catch(function () { });
-    return showAssetsLegacyDialog(fgAll, smAll, d5Legacy, d5Outdated);
+    var kinds = [];
+    if (fgAll.length) kinds.push(t('帧生成'));
+    if (smAll.length) kinds.push(t('Smooth Motion'));
+    if (d5Legacy.length || d5Outdated.length) kinds.push(t('DLSS5'));
+    var jobs = legacyClearJobs(fgAll, smAll, d5Legacy, d5Outdated);
+    return runLegacyClear(jobs).then(function (report) {
+      hideBarIfPhase('legacy', 1200);
+      return refreshLibrary().catch(function () { }).then(function () {
+        return showClearedDialog(report, kinds);
+      });
+    });
   }).catch(function () { });
 }
 

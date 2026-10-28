@@ -237,17 +237,30 @@ if (EV) {
     var p = (e && e.payload) || {};
     queueBar(p.msg, p.fraction);
   });
-  // 仅预览（DEV + --fgm-sim-assets）：伪造旧资产，弹统一提示
-  //   fg       = 帧生成（要清除）
-  //   sm       = Smooth Motion（要清除）
-  //   dlss5old = 旧版 RenoDX 插件（要彻底卸载）
-  //   dlss5    = GITC 资产旧了（只告知、重新部署即可）
+  // 仅预览（DEV + --fgm-sim-assets）：伪造「已自动清除」的告知窗
+  //   fg       = 帧生成；sm = Smooth Motion；dlss5 = DLSS5
+  //   dlss5old = 同时演示「有没清掉的那个分支」
   EV.listen('sim-assets-legacy', function (e) {
     var md = (e && e.payload && e.payload.mode) ? e.payload.mode : 'fg';
-    if (md === 'sm') return showAssetsLegacyDialog([], ['霍格沃茨之遗'], [], []);
-    if (md === 'dlss5old') return showAssetsLegacyDialog([], [], ['霍格沃茨之遗'], []);
-    if (md === 'dlss5') return showAssetsLegacyDialog([], [], [], ['霍格沃茨之遗']);
-    showAssetsLegacyDialog(['示例游戏 A（帧生成 0.4.1）', '示例游戏 B（帧生成 0.3.x）'], [], [], []);
+    if (md === 'sm') {
+      return showClearedDialog({ cleared: [{ kind: 'sm', name: '霍格沃茨之遗' }], failed: [] }, [t('Smooth Motion')]);
+    }
+    if (md === 'dlss5') {
+      return showClearedDialog({ cleared: [{ kind: 'dlss5', name: '霍格沃茨之遗' }], failed: [] }, [t('DLSS5')]);
+    }
+    if (md === 'dlss5old') {
+      return showClearedDialog({
+        cleared: [{ kind: 'dlss5', name: '霍格沃茨之遗' }],
+        failed: [{ kind: 'fg', name: '示例游戏 B（帧生成 0.3.x）', reason: '' }],
+      }, [t('帧生成'), t('DLSS5')]);
+    }
+    showClearedDialog({
+      cleared: [
+        { kind: 'fg', name: '示例游戏 A（帧生成 0.4.1）' },
+        { kind: 'fg', name: '示例游戏 B（帧生成 0.3.x）' },
+      ],
+      failed: [],
+    }, [t('帧生成')]);
   });
   // 仅预览（DEV + --fgm-sim-download）：把下载框摆成"下载中"的样子（数字是示例值）
   EV.listen('sim-download', function () {
