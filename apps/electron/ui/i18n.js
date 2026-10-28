@@ -576,6 +576,7 @@
   "请到「帧生成」页重新部署新版本（0.4.1）。": "Please redeploy the new version (0.4.1) on the Frame generation page.",
   "旧版帧生成已清除": "Old frame generation cleared",
   "旧版帧生成已清除（部分失败）": "Old frame generation cleared (partly failed)",
+  "无法确认 NVIDIA 驱动版本：若游戏里帧生成不生效，请先把显卡驱动更新到 580.0（R580）以上。": "NVIDIA driver version unknown: if frame generation does nothing in game, update your GPU driver to 580.0 (R580) or newer.",
   "已有": "Present",
   "缺少": "Missing",
   "缺少 ": "Missing "

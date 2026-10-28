@@ -476,10 +476,12 @@
     if (m) return Number(m[1]);
     return null; // 形如 32.0.16.2101 的 WDDM 编号或未知 → 不判断，避免误拦
   }
-  function fgDriverOk() {
+  // 三态：ok / blocked（明确低于 R580）/ unknown（读不到版本）
+  function fgDriverState() {
     var v = fgDriverMajor();
-    if (v === null) return true;
-    return v >= 580;
+    if (v === null) return 'unknown';
+    if (v >= 580) return 'ok';
+    return 'blocked';
   }
   function frmLabelOf(v) { var n = Number(v); if (n >= 5) return '6X'; if (n === 2) return '3X'; return '4X'; }
   function presetLabelOf(v) {
@@ -1320,10 +1322,12 @@
     var readiness = h('p', { class: 'hint' });
     function refreshReady() {
       var gate = GPU && GPU.gate;
-      if (!fgDriverOk()) {
+      var drv = fgDriverState();
+      if (drv === 'blocked') {
+        var drvText = t('未知');
+        if (GPU) { if (GPU.driver) drvText = GPU.driver; }
         readiness.className = 'risk strong';
-        readiness.textContent = t('帧生成需要 NVIDIA 580.0（R580）以上驱动，当前为 ') +
-          (GPU && GPU.driver ? GPU.driver : t('未知')) +
+        readiness.textContent = t('帧生成需要 NVIDIA 580.0（R580）以上驱动，当前为 ') + drvText +
           t(' —— 低于该版本时帧生成会被驱动拒绝（表现为“部署成功但游戏里没效果”）。请先更新显卡驱动。');
         deployBtn.disabled = true;
         return;
@@ -1338,7 +1342,6 @@
           t(' —— 资产目录里还没有它：换一个已就绪的入口，或检查安装是否完整（资产随安装包内置）。');
         deployBtn.disabled = true;
       } else if (manualInstall) {
-        // 用户定的规则：无法判定归属时不许部署，先【清理】再部署
         readiness.className = 'hint warn';
         readiness.textContent = t('检测到无法判定是否为本工具部署的帧生成文件 —— 部署已锁定：先点【清理】，清理完再部署。');
         deployBtn.disabled = true;
@@ -1346,6 +1349,13 @@
         readiness.className = 'hint';
         readiness.textContent = t('资产里已就绪：') + sel.value;
         deployBtn.disabled = false;
+      }
+      // 读不到驱动版本：不拦，但把风险说清楚（fail-open 但不再静默）
+      if (drv === 'unknown') {
+        if (!deployBtn.disabled) {
+          readiness.className = 'hint warn';
+          readiness.textContent = t('无法确认 NVIDIA 驱动版本：若游戏里帧生成不生效，请先把显卡驱动更新到 580.0（R580）以上。');
+        }
       }
     }
     refreshReady();

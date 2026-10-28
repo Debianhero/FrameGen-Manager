@@ -71,8 +71,14 @@ if (-not $SkipTests) {
   $out = & cargo test --quiet --manifest-path crates/core/Cargo.toml 2>&1
   $code = $LASTEXITCODE
   $ErrorActionPreference = $prevEap
-  $out | Select-String -Pattern 'test result|FAILED' | ForEach-Object { Write-Output ('  ' + $_.Line.Trim()) }
-  if ($code -ne 0) { $fail += 'cargo test' }
+  $out | Select-String -Pattern 'test result|FAILED' | ForEach-Object { Write-Output ('  core   ' + $_.Line.Trim()) }
+  if ($code -ne 0) { $fail += 'cargo test (core)' }
+
+  $out2 = & cargo test --quiet --manifest-path apps/sidecar/Cargo.toml 2>&1
+  $code2 = $LASTEXITCODE
+  $ErrorActionPreference = $prevEap
+  $out2 | Select-String -Pattern 'test result|FAILED' | ForEach-Object { Write-Output ('  sidecar ' + $_.Line.Trim()) }
+  if ($code2 -ne 0) { $fail += 'cargo test (sidecar)' }
   Pop-Location
 }
 

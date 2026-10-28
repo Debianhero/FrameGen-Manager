@@ -2293,7 +2293,12 @@ fn handle_line(raw: &str) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(id, cmd, &args)));
     match outcome {
         Ok(Ok(result)) => write_line(&ok_line(id, result)),
-        Ok(Err(e)) => write_line(&err_line(id, &e)),
+        Ok(Err(e)) => {
+            // 诊断用：日志里留下“哪个命令 + 哪个错误码”，用户复制日志即可定位
+            let code = err_code(&e);
+            framegen_core::log::line(&format!("[cmd:{cmd}] 失败 [{code}] {e}"));
+            write_line(&err_line(id, &e))
+        }
         Err(_) => write_line(&err_line(
             id,
             &format!("命令 {cmd} 内部异常（已捕获，进程继续）"),
@@ -2610,4 +2615,21 @@ fn main() {
     serve();
     // 正常退出码 0：Electron 关窗口时会先 end() stdin，不该看到非零退出的痕迹。
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod err_code_tests {
+    use super::err_code;
+
+    /// 错误码是给用户报障用的，必须稳定：这几条是真实会出现的中文消息。
+    #[test]
+    fn codes_are_stable() {
+        assert_eq!(err_code("帧生成需要 580.0 以上驱动"), "DRV-001");
+        assert_eq!(err_code("文件正被占用，无法写入"), "FILE-002");
+        assert_eq!(err_code("没有权限写入该目录"), "ACL-003");
+        assert_eq!(err_code("内置组件不存在"), "AST-004");
+        assert_eq!(err_code("没有找到本工具对该目录的部署记录"), "REC-005");
+        assert_eq!(err_code("unknown command: nope"), "IPC-009");
+        assert_eq!(err_code("其它问题"), "GEN-999");
+    }
 }

@@ -23,6 +23,41 @@ pub fn sha256_hex(data: &[u8]) -> String {
     to_hex(&h.finalize())
 }
 
+/// 带**进程内缓存**的 sha256（key = 路径 + 大小 + mtime）。
+///
+/// 部署一次要对 8 个文件算哈希（资产 ~213MB），状态检查、清理判定还会重复算同一批文件。
+/// 缓存只对"大小和 mtime 都没变"的文件生效，改过就重算，不存在脏读。
+pub fn sha256_file_cached(p: &Path) -> anyhow::Result<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, (u64, u64, String)>>> = OnceLock::new();
+
+    let meta = std::fs::metadata(p)?;
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let key = p.to_string_lossy().to_ascii_lowercase();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some((s, m, h)) = g.get(&key) {
+            if *s == size {
+                if *m == mtime {
+                    return Ok(h.clone());
+                }
+            }
+        }
+    }
+    let h = sha256_file(p)?;
+    if let Ok(mut g) = cache.lock() {
+        g.insert(key, (size, mtime, h.clone()));
+    }
+    Ok(h)
+}
+
 pub fn sha256_file(path: &Path) -> Result<String> {
     let data = std::fs::read(path).with_context(|| format!("读取文件失败: {}", path.display()))?;
     Ok(sha256_hex(&data))

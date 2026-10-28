@@ -1626,16 +1626,27 @@ impl AssetFamily {
     }
 }
 
-/// 同一套布局下区分 0.4.0 / 0.4.1：看内核大小（18.3 MB vs 11.9 MB）。
+/// 同一套布局下区分 0.4.0 / 0.4.1：**按内核文件哈希**判定。
+///
+/// 之前用文件大小（11_875_464）猜，上游哪天大小相同就会误判；哈希是唯一的。
 fn modern_family(dir: &Path) -> AssetFamily {
     let k = dir
         .join(RUNTIME_DIR)
         .join("kernels")
         .join("fg_kernels.dll");
-    match std::fs::metadata(&k) {
-        Ok(m) if m.len() == 11_875_464 => AssetFamily::V041,
-        _ => AssetFamily::V040,
+    let Ok(cur) = crate::util::sha256_file_cached(&k) else {
+        return AssetFamily::V040;
+    };
+    let want = ASSET_INVENTORY
+        .iter()
+        .find(|(name, _, _)| name.ends_with("fg_kernels.dll"))
+        .map(|(_, _, sha)| *sha);
+    if let Some(w) = want {
+        if cur.eq_ignore_ascii_case(w) {
+            return AssetFamily::V041;
+        }
     }
+    AssetFamily::V040
 }
 
 /// 一个游戏目录里"帧生成资产"的样子 —— 徽章、批量重新部署、清理入口都用它。
@@ -1887,27 +1898,47 @@ pub fn deploy_game(
     Ok((msg, prep.notes))
 }
 
-/// 部署的帧生成资产是否旧于当前内置：0.3.x 布局，或运行库版本与内置不一致。
+/// 部署的帧生成资产是否旧于当前内置。
+///
+/// 两把尺子：
+///   1) **逐文件哈希**：manifest 里记的 `deployed_sha256` != 当前内置文件哈希 → 有更新
+///      （0.4.1 → 0.4.2 即使运行库版本号不变也能认出来）；
+///   2) 兜底：0.3.x 旧布局、或 0.4.0 资产族，一律视为需要重新部署。
 pub fn is_outdated(dir: &Path) -> bool {
-    let Some(a) = deployed_assets(dir) else { return false };
+    let Some(a) = deployed_assets(dir) else {
+        return false;
+    };
     if a.family.is_legacy() {
         return true;
     }
-    // 0.4.0 → 0.4.1：布局一样但文件全换了，要求用户先清除再部署
-    if a.family == AssetFamily::V040 {
-        return true;
+    let Some(m) = load_manifest(dir) else {
+        return a.family == AssetFamily::V040;
+    };
+    for (rel, _, _) in ASSET_INVENTORY.iter().chain(SR_INVENTORY.iter()) {
+        let Some(e) = m
+            .files
+            .iter()
+            .find(|e| e.rel_path.eq_ignore_ascii_case(rel))
+        else {
+            continue;
+        };
+        if e.deployed_sha256.is_empty() {
+            continue;
+        }
+        let Ok(bundled) = crate::update::asset_path(rel) else {
+            continue;
+        };
+        if !bundled.is_file() {
+            continue;
+        }
+        let Ok(cur) = crate::util::sha256_file_cached(&bundled) else {
+            continue;
+        };
+        if !cur.eq_ignore_ascii_case(&e.deployed_sha256) {
+            return true;
+        }
     }
-    let bundled = crate::assets_version::FRAMEGEN_RUNTIME;
-    if a.runtime_version.is_empty() {
-        return false;
-    }
-    if bundled.is_empty() {
-        return false;
-    }
-    if a.runtime_version != bundled {
-        return true;
-    }
-    false
+    a.family == AssetFamily::V040
 }
 
 #[cfg(test)]
