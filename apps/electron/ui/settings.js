@@ -185,15 +185,29 @@ function refreshBackups() {
     if (el) el.textContent = t('读取失败');
   });
 }
+function renderLogEnv() {
+  if (typeof diagEnv !== 'function') return;
+  var e = diagEnv();
+  var set = function (id, v) { var el = $(id); if (el) el.textContent = v || '-'; };
+  set('log-ver', e.version);
+  set('log-os', e.os);
+  set('log-gpu', e.gpu);
+  set('log-drv', e.drv || t('未知'));
+  set('log-games', e.games + t(' 个游戏'));
+  set('log-dir', e.logs);
+}
 function loadLog() {
+  var box = $('log-box');
+  if (!box) return Promise.resolve();
+  // 用户往上翻旧日志时不要每 2.5 秒把他拽回底部；只在「原本就在底部」时自动跟随。
+  var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+  var prevTop = box.scrollTop;
   return invoke('log_tail', { lines: 300 }).then(function (text) {
-    var box = $('log-box');
-    if (!box) return;
     box.textContent = text ? text : t('（日志是空的 —— 还没有操作过，或者日志目录不可写）');
-    box.scrollTop = box.scrollHeight;
+    if (atBottom) box.scrollTop = box.scrollHeight; else box.scrollTop = prevTop;
+    renderLogEnv();
   }).catch(function (e) {
-    var box = $('log-box');
-    if (box) box.textContent = t('读取日志失败：') + errText(e);
+    box.textContent = t('读取日志失败：') + errText(e);
   });
 }
 function checkSelfUpdate() {
@@ -248,7 +262,14 @@ function checkSelfUpdate() {
    函数名不变。依赖 app.js 的 invoke / toast / busy / showBar，lib.js 的 `$` / errText / fmtSize，
    以及 UPD_NOTES / SELF 等状态。 */
 function startLogLive() {
-  var tick = function () { if (!document.hidden) loadLog().catch(function () { }); };
+  var tick = function () {
+    if (document.hidden) return;
+    // 只有日志页可见时才轮询：既省 I/O，也不会在别的页面后台改 DOM 造成滚动跳动
+    var page = $('page-logs');
+    if (page && page.classList.contains('hidden')) return;
+    renderLogEnv();
+    loadLog().catch(function () { });
+  };
   tick();
   setInterval(tick, 2500);
 }

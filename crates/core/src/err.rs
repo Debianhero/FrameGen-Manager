@@ -38,7 +38,9 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         code: "AST-004",
-        any: &["内置组件不存在", "资产", "缺少"],
+        // 不能再收「缺少」：那会把「缺少参数 version」这类请求错误也吞成「内置资产缺失」，
+        // 用户看到的 AST-004 完全是误报（1.6.7 实测）。资产类文案本身都带「资产」。
+        any: &["内置组件不存在", "资产"],
     },
     Rule {
         code: "REC-005",
@@ -59,6 +61,11 @@ pub const RULES: &[Rule] = &[
     Rule {
         code: "IPC-009",
         any: &["unknown command"],
+    },
+    Rule {
+        // 前后端 IPC 参数不匹配（界面漏传 / 传错类型）：不是资产问题，单独给一个码
+        code: "REQ-017",
+        any: &["缺少参数", "参数 version", "必须是字符串"],
     },
     // 以下为此前一律落到 GEN-999 的类别：补上编号，英文界面才有具体说法
     Rule {
@@ -175,6 +182,7 @@ mod tests {
             "REC-005"
         );
         assert_eq!(classify("unknown command: deploy_state"), "IPC-009");
+        assert_eq!(classify("缺少参数 version"), "REQ-017");
         assert_eq!(classify("备份 version.dll 自身已损坏，中止（目录一个字都没动）"), "BAK-012");
         assert_eq!(classify("今天天气不错"), FALLBACK);
     }

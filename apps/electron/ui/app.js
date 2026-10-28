@@ -308,7 +308,9 @@ if (EV) {
       body: t('安装过程会关闭本程序，装完会自动重新打开。'),
     }).then(function (yes) {
       if (!yes) return;
-      invoke('self_update_download').catch(function (err) {
+      // 必须把目标版本号传给后台：self_update_download 的 version 是必填参数，
+      // 1.6.7 这里漏了 → 「下载更新失败：缺少参数 version」。版本号就在 offer 的 latest 里。
+      invoke('self_update_download', { version: p.latest }).catch(function (err) {
         toast(t('下载失败：') + errText(err), 'err', 12000);
       });
     });
@@ -461,7 +463,7 @@ function loadDlss5Meta() {
     invoke('dlss5_assets').then(function (a) { DLSS5.assets = a || null; }).catch(function () { })
   ]);
 }
-var PAGES = { lib: 'page-lib', sm: 'page-sm', dlss5: 'page-dlss5', settings: 'page-settings', help: 'page-help' };
+var PAGES = { lib: 'page-lib', sm: 'page-sm', dlss5: 'page-dlss5', logs: 'page-logs', settings: 'page-settings', help: 'page-help' };
 function setupTabs() {
   var tabs = document.querySelectorAll('.tab');
   Array.prototype.forEach.call(tabs, function (b) {
@@ -476,8 +478,50 @@ function setupTabs() {
       if (want === 'settings') refreshBackups().catch(function () { });
       if (want === 'sm') renderSm().catch(function () { });
       if (want === 'lib') refreshLibrary().catch(function () { });
+      if (want === 'logs') { renderLogEnv(); loadLog().catch(function () { }); }
     });
   });
+}
+// 诊断信息：版本 / 系统 / 显卡 / 路径 + 最近 2000 行日志（含 shell.log）。
+// 日志页和「复制诊断信息」共用这一份，保证用户看到的和复制出去的完全一致。
+// （必须是顶层函数：settings.js 的 renderLogEnv 也要调用它。）
+function diagOs() {
+  var ua = navigator.userAgent || '';
+  var m = /Windows NT ([\d.]+)/.exec(ua);
+  if (!m) return navigator.platform || 'Unknown';
+  var bits = /Win64|x64|WOW64/.test(ua) ? '64-bit' : '32-bit';
+  return 'Windows NT ' + m[1] + ' · ' + bits;
+}
+function diagEnv() {
+  var g = GPU || {};
+  return {
+    version: (SELF && SELF.version) || (CFG && CFG.version) || t('未知'),
+    os: diagOs(),
+    gpu: g.name || g.gpu || g.model || t('未知'),
+    drv: g.driver || g.driverVersion || g.version || '',
+    games: (GAMES && GAMES.length) || 0,
+    lang: window.getLang ? window.getLang() : 'zh',
+    assets: (CFG && CFG.assetsDir) || '-',
+    backups: (CFG && CFG.backupsDir) || '-',
+    logs: (CFG && CFG.logsDir) || '-'
+  };
+}
+function diagHeader() {
+  var e = diagEnv();
+  return [
+    t('=== FrameGen Manager 诊断信息 ==='),
+    t('版本：') + e.version,
+    t('时间：') + new Date().toLocaleString(),
+    t('系统：') + e.os,
+    t('显卡：') + e.gpu + (e.drv ? t('（驱动 ') + e.drv + t('）') : ''),
+    t('游戏库：') + e.games + t(' 个游戏'),
+    t('语言：') + e.lang,
+    t('资产目录：') + e.assets,
+    t('备份目录：') + e.backups,
+    t('日志目录：') + e.logs,
+    '',
+    t('=== 日志（最近 2000 行） ==='),
+  ].join('\n');
 }
 function bind() {
   window.addEventListener('focus', function () { if (ASSETS_DIR !== null) refreshAssets().catch(function () { }); });
@@ -568,28 +612,24 @@ function bind() {
   });
   if ($('btn-log-copy')) $('btn-log-copy').addEventListener('click', function () {
     var box = $('log-box');
-    var logText = box ? box.textContent : '';
-    if (!logText) { toast(t('日志是空的。'), 'info', 5000); return; }
-    var g = (GPU && (GPU.name || GPU.gpu || GPU.model)) || '';
-    var drv = (GPU && (GPU.driver || GPU.driverVersion || GPU.version)) || '';
-    var head = [
-      t('=== FrameGen Manager 反馈信息 ==='),
-      t('版本：') + ((SELF && SELF.version) || (CFG && CFG.version) || t('未知')),
-      t('时间：') + new Date().toLocaleString(),
-      t('显卡：') + (g || t('未知')) + (drv ? t('（驱动 ') + drv + t('）') : ''),
-      t('资产目录：') + ((CFG && CFG.assetsDir) || '-'),
-      t('备份目录：') + ((CFG && CFG.backupsDir) || '-'),
-      t('日志目录：') + ((CFG && CFG.logsDir) || '-'),
-      '',
-      t('=== 日志尾部 ==='),
-    ].join('\n');
-    copyText(head + logText).then(function () { toast(t('已复制：环境信息 + 日志'), 'ok', 5000); })
-      .catch(function (e) { toast(t('复制失败：') + errText(e), 'err'); });
+    var fallback = box ? box.textContent : '';
+    invoke('log_tail', { lines: 2000 }).catch(function () { return fallback; }).then(function (text) {
+      var body = text || fallback;
+      if (!body) { toast(t('日志是空的。'), 'info', 5000); return; }
+      return copyText(diagHeader() + '\n' + body).then(function () {
+        toast(t('已复制：环境信息 + 日志'), 'ok', 5000);
+      });
+    }).catch(function (e) { toast(t('复制失败：') + errText(e), 'err'); });
+  });
+  if ($('btn-log-refresh')) $('btn-log-refresh').addEventListener('click', function () {
+    renderLogEnv();
+    loadLog().catch(function () { });
   });
   var pOpen = [
     ['btn-open-p-assets', function () { return CFG && CFG.assetsDir; }],
     ['btn-open-p-backups', function () { return CFG && CFG.backupsDir; }],
     ['btn-open-p-logs', function () { return CFG && CFG.logsDir; }],
+    ['btn-log-open', function () { return CFG && CFG.logsDir; }],
     ];
   pOpen.forEach(function (pair) {
     if (!$(pair[0])) return;

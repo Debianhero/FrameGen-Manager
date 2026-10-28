@@ -13,8 +13,9 @@
   <div class="spacer"></div>
   <nav class="tabs" id="tabs">
     <button class="tab active" data-page="lib" type="button" data-i18n="帧生成">帧生成</button>
-    <button class="tab" data-page="sm" type="button" data-i18n="Smooth Motion（实验）">Smooth Motion（实验）</button>
-    <button class="tab" data-page="dlss5" type="button" data-i18n="DLSS5（实验性）">DLSS5（实验性）</button>
+    <button class="tab" data-page="sm" type="button" data-i18n="Smooth Motion">Smooth Motion</button>
+    <button class="tab" data-page="dlss5" type="button" data-i18n="DLSS5">DLSS5</button>
+    <button class="tab" data-page="logs" type="button" data-i18n="日志">日志</button>
     <button class="tab" data-page="settings" type="button" data-i18n="关于">关于</button>
     <button class="tab" data-page="help" type="button" data-i18n="打赏赞助">打赏赞助</button>
   </nav>
@@ -59,12 +60,6 @@
         </div>
       </section>
 
-      <section class="panel">
-        <div class="ctitle"><span data-i18n="日志">日志</span><span class="spacer"></span>
-          <button class="btn small" id="btn-log-copy" type="button" data-i18n="复制">复制</button>
-        </div>
-        <pre class="log logslim" id="log-box" data-i18n="正在读取…">正在读取…</pre>
-      </section>
     </aside>
 
     <section class="content">
@@ -142,6 +137,39 @@
     <h2><span data-i18n="游戏">游戏</span><span class="count" id="c-other">0</span></h2>
     <div class="wall" id="wall-other"></div>
   </section>
+</main>
+
+<main class="page hidden" id="page-logs">
+  <div class="pagehead">
+    <h1 data-i18n="日志">日志</h1>
+    <div class="sub" data-i18n="反馈问题前先点「复制诊断信息」：版本、系统、显卡、操作步骤和错误码都在里面。">反馈问题前先点「复制诊断信息」：版本、系统、显卡、操作步骤和错误码都在里面。</div>
+  </div>
+
+  <div class="stack logstack">
+    <section class="panel">
+      <div class="ctitle" data-i18n="环境信息">环境信息</div>
+      <div class="envgrid">
+        <div class="kv2"><span data-i18n="版本">版本</span><b id="log-ver">-</b></div>
+        <div class="kv2"><span data-i18n="系统">系统</span><b id="log-os">-</b></div>
+        <div class="kv2"><span data-i18n="显卡">显卡</span><b id="log-gpu">-</b></div>
+        <div class="kv2"><span data-i18n="驱动">驱动</span><b id="log-drv">-</b></div>
+        <div class="kv2"><span data-i18n="游戏库">游戏库</span><b id="log-games">-</b></div>
+        <div class="kv2"><span data-i18n="日志目录">日志目录</span><b id="log-dir">-</b></div>
+      </div>
+      <div class="hint" data-i18n="反馈时请说明：哪个游戏、做了什么操作、看到什么报错；直接把复制的内容整段发来即可（不含存档 / 账号信息）。">反馈时请说明：哪个游戏、做了什么操作、看到什么报错；直接把复制的内容整段发来即可（不含存档 / 账号信息）。</div>
+    </section>
+
+    <section class="panel">
+      <div class="ctitle"><span data-i18n="运行日志">运行日志</span><span class="spacer"></span><span class="hint" data-i18n="最近 300 行">最近 300 行</span></div>
+      <div class="row logtools">
+        <button class="btn small" id="btn-log-refresh" type="button" data-i18n="刷新">刷新</button>
+        <button class="btn small primary" id="btn-log-copy" type="button" data-i18n="复制诊断信息">复制诊断信息</button>
+        <button class="btn small" id="btn-log-open" type="button" data-i18n="打开日志目录">打开日志目录</button>
+      </div>
+      <pre class="log logfull" id="log-box" data-i18n="正在读取…">正在读取…</pre>
+      <div class="hint" data-i18n="「复制诊断信息」会取最近 2000 行，并附上主进程的 shell.log（资产铺设失败的线索在那里）。">「复制诊断信息」会取最近 2000 行，并附上主进程的 shell.log（资产铺设失败的线索在那里）。</div>
+    </section>
+  </div>
 </main>
 
 <main class="page hidden" id="page-settings">
