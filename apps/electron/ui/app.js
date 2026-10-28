@@ -278,10 +278,8 @@ if (EV) {
     setTimeout(write, 400);
     setTimeout(write, 1200);
   });
-  // 仅预览（DEV + --fgm-sim-legacy）：伪造两条旧版游戏，弹「旧版帧生成」提示看样式
-  EV.listen('sim-legacy-fg', function () {
-    maybePromptLegacyUpgrade([{ name: '示例游戏 A（旧版资产）' }, { name: '示例游戏 B（旧版资产）' }]);
-  });
+  // （旧的 --fgm-sim-legacy 预览钩子已随那条重复提示一起删除；
+  //   要看资产更新的提示，用 --fgm-sim-assets / -sm / -dlss5 / -dlss5old）
   // 「发现新版本」：主进程不再用原生 MessageBox（风格不符、长日志被截断），改由界面自绘
   EV.listen('selfupdate-offer', function (e) {
     var p = (e && e.payload) || {};
@@ -573,29 +571,6 @@ function boot() {
   loadSpoof().catch(function () { });
   loadCovers()
     .then(function () { return refreshLibrary(); })
-    .then(function () {
-      // 升级后**自动清除**旧版帧生成部署（0.3.x 布局 / 0.4.0 资产）：只清不装，
-      // 清完由用户重新部署 0.4.1（按程序版本只做一次）。
-      return invoke('framegen_cleanup_outdated').catch(function () { return null; }).then(function (r) {
-        if (!r) return null;
-        var n = 0;
-        if (r.cleaned) n = r.cleaned.length;
-        if (!n) return null;
-        var bad = false;
-        if (r.failed) { if (r.failed.length) bad = true; }
-        var lines = r.cleaned.join(t('、'));
-        var body = t('已自动清除 {n} 个游戏的旧版帧生成部署，原件已还原：', { n: n }) + '\n' + lines +
-          '\n\n' + t('请到「帧生成」页重新部署新版本（0.4.1）。');
-        if (bad) body += '\n\n' + t('部分未清除：') + r.failed.join('；');
-        return refreshLibrary().catch(function () { }).then(function () {
-          return uiConfirm({
-            title: bad ? t('旧版帧生成已清除（部分失败）') : t('旧版帧生成已清除'),
-            ok: t('知道了'),
-            body: body,
-          });
-        });
-      });
-    })
     .then(function () {
       // 旧版扫描放到首屏之后（3.5 秒）再做，别挡窗口出现；三类资产合并成**一个**提示
       setTimeout(function () { checkAssetsLegacy(); }, 3500);

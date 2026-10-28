@@ -2000,21 +2000,28 @@ pub fn restore(dir: &Path) -> Result<String> {
 pub fn is_outdated(game_dir: &Path) -> bool {
     let Some(m) = load_manifest(game_dir) else { return false };
     let Ok(dir) = asset_dir() else { return false };
-    let pairs: [(&str, &str); 4] = [
-        (ADDON_PREFIX, ADDON_PREFIX),
-        (ADDON32_NAME, ADDON32_NAME),
-        (HELPER_NAME, HELPER_NAME),
-        ("nvngx_dlssnr.dll", MODEL_NAME),
-    ];
+    /* 24 位插件（gitc-uplift.addon64）的**文件名带版本段**，不能拿前缀 "gitc-uplift" 去拼路径：
+       1.6.0 就是这么写的（`dir.join("gitc-uplift")` 根本不存在），于是 addon64 换了版本也认不出来 ——
+       只改 addon64 的那次更新会完全漏报。这里直接问 find_addon() 要真实路径。 */
+    let addon = find_addon();
     for e in &m.files {
         let rel = e.rel_path.replace('/', "\\");
-        let Some((_, src_name)) = pairs
-            .iter()
-            .find(|(k, _)| rel.to_ascii_lowercase().ends_with(&k.to_ascii_lowercase()))
-        else {
+        let low = rel.to_ascii_lowercase();
+        let src: PathBuf = if low.ends_with(ADDON_EXT) && low.contains(ADDON_PREFIX) {
+            // 部署进去的 addon 名可能带版本段（gitc-uplift-1.7.0.addon64），统一对到当前内置的那份
+            match addon.as_ref() {
+                Some(p) => p.clone(),
+                None => continue,
+            }
+        } else if low.ends_with(&ADDON32_NAME.to_ascii_lowercase()) {
+            dir.join(ADDON32_NAME)
+        } else if low.ends_with(&HELPER_NAME.to_ascii_lowercase()) {
+            dir.join(HELPER_NAME)
+        } else if low.ends_with(&MODEL_NAME.to_ascii_lowercase()) {
+            dir.join(MODEL_NAME)
+        } else {
             continue;
         };
-        let src = dir.join(src_name);
         let dst = game_dir.join(&e.rel_path);
         if !dst.is_file() {
             continue;

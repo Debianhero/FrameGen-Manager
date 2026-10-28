@@ -153,9 +153,13 @@ function checkAssetsLegacy() {
     arr.forEach(function (n) { if (!n) return; if (out.indexOf(n) < 0) out.push(n); });
     return out;
   };
+  /* `fg` 必须在**函数作用域**里声明：它的值在第一个 then 里算出来，第二个 then 还要用。
+     （1.6.0 就是把它写进了第一个 then，第二个 then 读不到 → ReferenceError，
+      被末尾的 catch 静默吞掉，于是「自动清理」整个没跑，用户只看到另一条旧提示。） */
+  var fg = [];
   // 先把库刷出来：清理要靠「游戏名 → 目录」这层映射，库没加载就一个都清不了
   return refreshLibrary().catch(function () { }).then(function () {
-    var fg = legacyGamesNow().map(function (g) { return g.name; });
+    fg = legacyGamesNow().map(function (g) { return g.name; });
     return Promise.all([
       invoke('assets_update_scan').catch(function () { return { fg: [], sm: [], dlss5: [] }; }),
       invoke('sm_legacy_scan').catch(function () { return { games: [] }; }),

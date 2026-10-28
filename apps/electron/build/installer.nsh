@@ -24,13 +24,14 @@
   ${StrLoc}
 !endif
 
-; ---- 深色品牌外观（与软件界面一致）：完成页/欢迎页背景 + 文字色 ----
-!ifndef MUI_BGCOLOR
-  !define MUI_BGCOLOR "130E0B"
-!endif
-!ifndef MUI_TEXTCOLOR
-  !define MUI_TEXTCOLOR "F5EDE6"
-!endif
+; ---- Page colours: keep the system default (light page, black text) ----
+;
+; We used to force a dark page here (MUI_BGCOLOR 130E0B + MUI_TEXTCOLOR F5EDE6),
+; but the text-colour define does not reach every MUI control in the
+; electron-builder template: the page turned dark while the body text stayed
+; black, i.e. unreadable ("black text on black background", reported from a
+; real install). The branding lives in the sidebar/header bitmaps anyway, so
+; just leave both defines alone and let NSIS use its defaults.
 
 ; AppId of the old Inno Setup installer (packaging/installer.iss).
 !define FGM_OLD_UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C4B1E2A-9D53-4A6E-8F1C-5B2D9E4A77C1}_is1"

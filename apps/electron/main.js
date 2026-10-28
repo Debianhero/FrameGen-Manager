@@ -680,14 +680,8 @@ function createWindow() {
       }, 400);
     }, 2500);
   }
-  // 仅预览「旧版帧生成」提示弹窗：--fgm-sim-legacy
-  if (DEV && process.argv.includes('--fgm-sim-legacy')) {
-    setTimeout(function () {
-      if (mainWin && !mainWin.isDestroyed()) {
-        mainWin.webContents.send('fgm:event:sim-legacy-fg');
-      }
-    }, 2500);
-  }
+  // （旧的 --fgm-sim-legacy 预览已删除：那条「旧版帧生成」提示与统一清理重复，
+  //   要看现在的提示用 --fgm-sim-assets / -sm / -dlss5 / -dlss5old）
   if (SIMULATE_UPDATE) {
     setTimeout(function () {
       // 模拟数据带一段**长日志**：用于预览新弹窗的排版与滚动效果（仅 DEV）

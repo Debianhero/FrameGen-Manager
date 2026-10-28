@@ -1,5 +1,14 @@
 # 变更记录
 
+## v1.6.1
+
+**修复**
+
+- 启动清理其实一直没跑：`checkAssetsLegacy` 里的 `var fg` 写进了第一个 `then`，第二个 `then` 读不到 → `ReferenceError` 被末尾的 `catch` 静默吞掉。1.6.0 实测表现为「没清理、也没弹新告知窗」。现在 `fg` 提到函数作用域，并加 e2e 断言钉住（调用 `checkAssetsLegacy` 不许抛异常）
+- **删掉两条重复的旧提示**（它们比统一清理先跑，用户看到的是最旧那条）：`boot` 里的 `framegen_cleanup_outdated` 自查（帧生成专用、弹「旧版帧生成已清除」）与 `deploy.js` 的 `maybePromptLegacyUpgrade`（弹「是否重新部署新版本文件」确认框）。1.6.0 实测：升级后提示的是「帧生成」并清了霍格沃茨，而真正要更新的 DLSS5（Nomad Drive Demo）一个文件都没动，就是被这两条抢先了
+- `dlss5::is_outdated` 认不出 **64 位插件**变了：它拿前缀 `gitc-uplift` 去 `asset_dir` 里拼路径（实际文件名是 `gitc-uplift.addon64`），永远 `continue` 掉。只换 addon64 的那种更新会完全漏报；现在直接问 `find_addon()` 要真实路径
+- 安装器底色：去掉 `MUI_BGCOLOR` / `MUI_TEXTCOLOR` 的自定义（electron-builder 的模板里文字色没覆盖到所有控件，结果黑底黑字看不见），回到系统默认浅色页面；品牌靠侧栏 / 顶栏位图
+
 ## v1.6.0
 
 **新增**

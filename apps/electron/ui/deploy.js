@@ -63,39 +63,10 @@ function redeployLegacyAll() {
     return redeployLegacy(list, optimized, frames, preset);
   });
 }
-var LEGACY_PROMPT_DONE = false;
-// forceList 仅用于开发预览（--fgm-sim-legacy）：跳过配置判断，直接弹同一个提示
-function maybePromptLegacyUpgrade(forceList) {
-  if (!forceList && (!CFG || LEGACY_PROMPT_DONE)) return Promise.resolve();
-  var ver = CFG && CFG.version ? CFG.version : '';
-  if (!forceList && (!ver || CFG.legacyPrompted === ver)) return Promise.resolve();
-  var list = forceList || legacyGamesNow();
-  if (!list.length) return Promise.resolve();
-  LEGACY_PROMPT_DONE = true;
-  var optimized = CFG.optimized;
-  var frames = CFG.frames;
-  var preset = CFG.preset || CFG.defaultPreset || 'C';
-  return invoke('set_config', {
-    optimized: optimized, frames: frames, preset: preset, legacyPrompted: ver
-  }).then(function (c) { CFG = c; }).catch(function () {  })
-    .then(function () {
-      return uiConfirm({
-        title: t('检测到还在使用旧版本帧生成的游戏，是否重新部署新版本文件？'),
-        ok: t('全部清理并重新部署'),
-        cancel: t('稍后再说'),
-        rows: [
-          [t('游戏'), list.map(function (g) { return g.name; }).join(t('、'))],
-          [t('当前资产'), t('0.3.x（代理 28.6 MB，运行库铺在游戏根目录）')],
-          [t('新版资产'), t('0.4.0（运行库进 dlssg_sm86\\ 目录，附 310.9.16 运行库）')]
-        ],
-        body: t('新版把运行库和后端搬进了 dlssg_sm86\\ 目录，旧版那几份留在游戏目录里可能被游戏优先加载。\n') +
-              t('点「全部清理并重新部署」会：先按内容核对删掉旧的 0.3.x 文件，再把新版铺上去。\n\n') +
-              t('想自己逐个处理就点「稍后再说」：在游戏卡片上能看到「资产 0.3.x」徽章，进去单独部署即可。')
-      }).then(function (yes) {
-        if (yes) return redeployLegacy(list, optimized, frames, preset);
-      });
-    });
-}
+/* 这里原来还有 maybePromptLegacyUpgrade()：帧生成单独一个「要不要重新部署」确认框。
+   现在三类资产统一走 sm.js 的 checkAssetsLegacy（启动即自动清理 + 只弹【我知道了】），
+   而且 boot 里还有一条更早的 framegen_cleanup_outdated 也在做同一件事 —— 三条路并存时
+   用户会先看到最旧的那条（1.6.0 实测：提示的是「帧生成」而不是 DLSS5）。两条重复的都已删除。 */
 
 function openGameDialog(g) {
 // 游戏目录里是 Smooth Motion 的解锁组件（用户先开了 SM）时**不再拦**：按用户定的规则，
