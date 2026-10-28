@@ -369,19 +369,7 @@ function openDlss5Dialog(g) {
   });
 }
 
-// 检测游戏目录里还是**旧版 DLSS5（RenoDX）**的游戏：提醒先卸载再重装 GITC 版（按版本记一次）。
-function checkDlss5Legacy() {
-  return invoke('dlss5_legacy_scan').then(function (r) {
-    if (!r || !r.prompt || !(r.games || []).length) return;
-    var names = r.games.slice(0, 6).join('\n· ');
-    var more = r.games.length > 6 ? t('\n…还有 ') + (r.games.length - 6) + t(' 个') : '';
-    uiConfirm({
-      title: t('DLSS5 已更换为 GITC 版'),
-      ok: t('我知道了'),
-      single: true,
-      body: t('内置的DLSS5版本已更换至GITC版，插件原生支持DX9/10/11/12、Vulkan、OpenGL，32位/64位游戏。请先删除/卸载DLSS5后重新部署新版本。') +
-        '\n\n' + t('以下游戏目录里还是旧版：') + '\n· ' + names + more,
-    });
-    invoke('dlss5_legacy_prompt_done').catch(function () {  });
-  }).catch(function () {  });
-}
+/* 这里原来还有 checkDlss5Legacy()：单独弹「DLSS5 已更换为 GITC 版」。
+   现在三类资产合并成一个弹窗（见 sm.js 的 checkAssetsLegacy），它没有调用点了，
+   已随本轮代码结构审计删除（见 docs/CHANGELOG.md）—— 里面的 dlss5_legacy_scan 命令
+   仍被那个统一检查用着。 */

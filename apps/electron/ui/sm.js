@@ -4,23 +4,10 @@
    app.js 的 invoke / toast / busy / showBar / hideBarLater / uiConfirm / paintLibrary /
    refreshLibrary / paintSettings / refreshBackups / doDeploy，以及 CFG / GPU / GAMES 等状态。
    加载顺序：i18n.js -> lib.js -> settings.js -> deploy.js -> dlss5.js -> sm.js -> app.js */
-// 检测游戏目录里还是**旧版** Smooth Motion 组件的游戏，提醒一次「先还原后重新部署」。
-// 按程序版本记一次（用户忽略后不反复烦，发新版再提醒）。
-function checkSmLegacy() {
-  return invoke('sm_legacy_scan').then(function (r) {
-    if (!r || !r.prompt || !(r.games || []).length) return;
-    var names = r.games.slice(0, 6).join('\n· ');
-    var more = r.games.length > 6 ? t('\n…还有 ') + (r.games.length - 6) + t(' 个') : '';
-    uiConfirm({
-      title: t('Smooth Motion 组件有新版本'),
-      ok: t('我知道了'),
-      single: true,
-      body: t('Smooth Motion 组件有新版本，建议先还原后重新部署。\n\n以下游戏目录里还是旧版组件：\n· ') + names + more +
-        t('\n\n操作：进入「Smooth Motion」页，先对该游戏点「关闭」，再点「开启」即可换上新组件。'),
-    });
-    invoke('sm_legacy_prompt_done').catch(function () {  });
-  }).catch(function () {  });
-}
+/* 这里原来还有 checkSmLegacy()：单独弹「Smooth Motion 组件有新版本」。
+   现在三类资产（帧生成 / SM / DLSS5）合并成一个弹窗（见下面的 checkAssetsLegacy），
+   它没有任何调用点了，已随本轮代码结构审计删除（见 docs/CHANGELOG.md）—— 里面的 sm_legacy_scan 命令
+   仍然被 checkAssetsLegacy 用着，别一起删。 */
 
 // 统一弹窗：列出命中的类别与游戏，【全部清除】串行清理，【暂不处理】按版本记一次。
 function showAssetsLegacyDialog(fgNames, smNames, d5Names) {
