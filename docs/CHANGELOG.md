@@ -1,5 +1,31 @@
 # 变更记录
 
+## v1.6.11
+
+**修复**
+
+- 还原 / 启动自动清理不再误删游戏自带的 `nvngx_dlssg.dll` / `nvngx_dlss.dll`。Cyberpunk 2077 的 `bin\x64` 里这两份 NVIDIA DLL 与旧版内置资产**逐字节相同**，旧逻辑按「名字 + 大小 + 哈希」当成 0.3.x 残留删掉，结果游戏里的 DLSS 帧生成选项直接消失，只能靠 Steam「验证文件完整性」恢复。
+  - `legacy_leftover_candidates` / `clean_legacy_leftovers` 不再把这两份 NVIDIA 运行库列为清理候选；
+  - `manual_files`（无部署记录时的手动清理）不再删除它们；
+  - 还原时有备份的游戏原件会正常写回；**没有备份的保留**并提示，不再「删了却补不回来」；
+  - 部署时不再把游戏自带的这两份文件误判成「我们的文件」而不备份。
+- 新增回归测试：受保护 DLL 出现在游戏目录时，清理候选为空、清理不删除、`is_our_artifact` 不认领。
+
+## v1.6.10
+
+**改进**
+
+- 手动添加游戏时，选中的 exe 读不了会给出明确原因：微软商店 / Xbox 的 `WindowsApps` / `XboxGames` 受保护目录、普通目录的 ACL / 管理员权限、游戏或杀软占用；不再只显示 Windows 的原始「没有打开的权限」。
+- 修 `add_game` 的 rfd 兜底路径：之前选完 exe 只把目录传进入库逻辑，选中的 exe 被丢掉了；现在一并传入。
+
+## v1.6.9
+
+**改进**
+
+- 日志：每条 IPC 命令记录 `cmd / args / 耗时 / ok / 错误码` 到 `events.jsonl`；`framegen.log` 与 `events.jsonl` 超过 4 MB 自动滚到 `*.prev`。日志页新增「导出诊断包」：把当前/上一份日志、事件、脱敏后的配置和版本信息打成 zip（不含游戏库 / 存档）。
+- 新增 **IPC 参数契约检查**（`packaging/ipc-contract.json` + `ipc-contract-check.js`）：打包前静态核对界面 `invoke` 调用是否漏传必需参数，防止再出现 `self_update_download` 少 `version` 这类问题；已接进 preflight 和 build-release 的七道校验。
+- 日志页只保留 **「导出日志信息」**（原来的「刷新」「复制诊断信息」已删除）；自动刷新改为 10 秒一次、内容不变不碰 DOM；`log_tail` / `ping` 不再写命令日志，空闲时日志不会自己增长。
+
 ## v1.6.8
 
 **修复**

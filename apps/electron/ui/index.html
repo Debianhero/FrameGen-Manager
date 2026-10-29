@@ -142,7 +142,7 @@
 <main class="page hidden" id="page-logs">
   <div class="pagehead">
     <h1 data-i18n="日志">日志</h1>
-    <div class="sub" data-i18n="反馈问题前先点「复制诊断信息」：版本、系统、显卡、操作步骤和错误码都在里面。">反馈问题前先点「复制诊断信息」：版本、系统、显卡、操作步骤和错误码都在里面。</div>
+    <div class="sub" data-i18n="反馈问题前先点「导出日志信息」：版本、系统、显卡、操作步骤和错误码都在里面。">反馈问题前先点「导出日志信息」：版本、系统、显卡、操作步骤和错误码都在里面。</div>
   </div>
 
   <div class="stack logstack">
@@ -162,12 +162,10 @@
     <section class="panel">
       <div class="ctitle"><span data-i18n="运行日志">运行日志</span><span class="spacer"></span><span class="hint" data-i18n="最近 300 行">最近 300 行</span></div>
       <div class="row logtools">
-        <button class="btn small" id="btn-log-refresh" type="button" data-i18n="刷新">刷新</button>
-        <button class="btn small primary" id="btn-log-copy" type="button" data-i18n="复制诊断信息">复制诊断信息</button>
-        <button class="btn small" id="btn-log-open" type="button" data-i18n="打开日志目录">打开日志目录</button>
+        <button class="btn small primary" id="btn-log-export" type="button" data-i18n="导出日志信息">导出日志信息</button>
       </div>
       <pre class="log logfull" id="log-box" data-i18n="正在读取…">正在读取…</pre>
-      <div class="hint" data-i18n="「复制诊断信息」会取最近 2000 行，并附上主进程的 shell.log（资产铺设失败的线索在那里）。">「复制诊断信息」会取最近 2000 行，并附上主进程的 shell.log（资产铺设失败的线索在那里）。</div>
+      <div class="hint" data-i18n="「导出日志信息」把当前/上一份日志、events.jsonl、shell.log 和脱敏后的配置打成一个 zip（不含游戏库 / 存档）。">「导出日志信息」把当前/上一份日志、events.jsonl、shell.log 和脱敏后的配置打成一个 zip（不含游戏库 / 存档）。</div>
     </section>
   </div>
 </main>

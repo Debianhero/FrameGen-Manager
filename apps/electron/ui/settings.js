@@ -188,7 +188,10 @@ function refreshBackups() {
 function renderLogEnv() {
   if (typeof diagEnv !== 'function') return;
   var e = diagEnv();
-  var set = function (id, v) { var el = $(id); if (el) el.textContent = v || '-'; };
+  var set = function (id, v) {
+    var el = $(id), s = v || '-';
+    if (el && el.textContent !== s) el.textContent = s;
+  };
   set('log-ver', e.version);
   set('log-os', e.os);
   set('log-gpu', e.gpu);
@@ -199,15 +202,20 @@ function renderLogEnv() {
 function loadLog() {
   var box = $('log-box');
   if (!box) return Promise.resolve();
-  // 用户往上翻旧日志时不要每 2.5 秒把他拽回底部；只在「原本就在底部」时自动跟随。
+  // 用户往上翻旧日志时不要把他拽回底部；只在「原本就在底部」时自动跟随。
   var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
   var prevTop = box.scrollTop;
   return invoke('log_tail', { lines: 300 }).then(function (text) {
-    box.textContent = text ? text : t('（日志是空的 —— 还没有操作过，或者日志目录不可写）');
-    if (atBottom) box.scrollTop = box.scrollHeight; else box.scrollTop = prevTop;
+    var next = text ? text : t('（日志是空的 —— 还没有操作过，或者日志目录不可写）');
+    // 内容没变就不碰 DOM：空闲时不再每 10 秒重排一遍日志区
+    if (box.textContent !== next) {
+      box.textContent = next;
+      if (atBottom) box.scrollTop = box.scrollHeight; else box.scrollTop = prevTop;
+    }
     renderLogEnv();
   }).catch(function (e) {
-    box.textContent = t('读取日志失败：') + errText(e);
+    var msg = t('读取日志失败：') + errText(e);
+    if (box.textContent !== msg) box.textContent = msg;
   });
 }
 function checkSelfUpdate() {
@@ -271,7 +279,8 @@ function startLogLive() {
     loadLog().catch(function () { });
   };
   tick();
-  setInterval(tick, 2500);
+  // 日志页才刷新，而且 10 秒一次：read 300 行本身很便宜，但没必要 2.5 秒打扰一次。
+  setInterval(tick, 10000);
 }
 function bindUpdateDialog() {
   var box = $('upd'), stop = $('upd-stop');

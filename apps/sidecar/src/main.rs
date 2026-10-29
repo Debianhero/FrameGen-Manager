@@ -722,6 +722,97 @@ fn log_tail(lines: usize) -> String {
     out
 }
 
+/// 导出诊断包：日志 + 结构化事件 + 配置 + 版本，打成 zip（不含游戏库 / 存档）。
+///
+/// 为什么要做：用户往往只发一句「用不了」，日志页复制的 2000 行也可能截掉关键上下文。
+/// 这里把 logs 目录里的当前/上一份日志、events.jsonl、shell.log 和脱敏后的配置一起收走，
+/// 我们拿到 zip 就能还原「哪条命令、什么参数、多久、成功还是失败、什么错误码」。
+fn diagnostics_export() -> Result<Value, String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out = std::env::temp_dir().join(format!("fgm-diagnostics-{stamp}-{}", std::process::id()));
+    std::fs::create_dir_all(&out).map_err(|e| format!("创建诊断目录失败：{e}"))?;
+
+    let logs = framegen_core::log::dir();
+    if let Some(d) = &logs {
+        for name in [
+            framegen_core::log::CUR_NAME,
+            framegen_core::log::PREV_NAME,
+            framegen_core::log::EVENTS_NAME,
+            framegen_core::log::EVENTS_PREV_NAME,
+            "shell.log",
+            "shell.prev.log",
+        ] {
+            let src = d.join(name);
+            if src.is_file() {
+                let _ = std::fs::copy(&src, out.join(name));
+            }
+        }
+    }
+    if let Some(root) = framegen_core::util::data_root() {
+        let cfg = root.join("framegen-manager.json");
+        if cfg.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&cfg) {
+                let _ = std::fs::write(
+                    out.join("framegen-manager.json"),
+                    framegen_core::util::redact(&text),
+                );
+            }
+        }
+    }
+
+    let mut info = String::new();
+    info.push_str(&format!(
+        "FrameGen Manager sidecar v{}\n",
+        framegen_core::update::SELF_VERSION
+    ));
+    info.push_str(&format!(
+        "Windows build: {:?}\n",
+        framegen_core::gpu::windows_build()
+    ));
+    if let Some(d) = &logs {
+        info.push_str(&format!("Logs dir: {}\n", d.display()));
+    }
+    if let Some(root) = framegen_core::util::data_root() {
+        info.push_str(&format!("Data root: {}\n", root.display()));
+    }
+    let _ = std::fs::write(out.join("version.txt"), framegen_core::util::redact(&info));
+    let _ = std::fs::write(
+        out.join("README.txt"),
+        "FrameGen Manager 诊断包\n\n         内容：framegen.log / framegen.prev.log / events.jsonl / shell.log / 脱敏后的配置 / 版本信息。\n         不含：游戏存档、账号信息、游戏库列表。\n         日志里可能有 Windows 用户名与游戏安装路径；转发前请自行确认。\n",
+    );
+
+    // 用 Windows 自带的 tar.exe 打 zip（不引入新依赖）；失败就返回文件夹，界面仍可打开。
+    let zip = std::env::temp_dir().join(format!("FrameGen-Manager-diagnostics-{stamp}.zip"));
+    let _ = std::fs::remove_file(&zip);
+    let mut cmd = std::process::Command::new("tar");
+    cmd.args(["-a", "-c", "-f"])
+        .arg(&zip)
+        .arg("-C")
+        .arg(&out)
+        .arg(".");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW：不闪黑框
+    }
+    let zipped = cmd.status().map(|s| s.success()).unwrap_or(false) && zip.is_file();
+    let path = if zipped { zip } else { out.clone() };
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    framegen_core::log::line(&format!(
+        "[diagnostics] 导出诊断包：{}（zip={zipped}）",
+        path.display()
+    ));
+    Ok(json!({
+        "path": path.display().to_string(),
+        "dir": out.display().to_string(),
+        "zip": zipped,
+        "bytes": bytes,
+    }))
+}
+
 /// 用资源管理器打开一个目录（不存在就打开它的父目录）。
 ///
 /// Tauri 版起进程一律 spawn_blocking（同步命令跑主线程时 WebView 会白屏）；
@@ -1112,10 +1203,10 @@ fn add_game() -> Result<Value, String> {
     let Some(exe) = picked else {
         return Ok(json!({ "canceled": true }));
     };
-    let Some(dir) = exe.parent() else {
+    let Some(dir) = exe.parent().map(|p| p.to_path_buf()) else {
         return Ok(json!({ "canceled": true }));
     };
-    add_library_dir(dir, None)
+    add_library_dir(&dir, Some(exe))
 }
 
 /// 「手动选择游戏根目录 exe 启动文件」（DLSS5 页与部署对话框的按钮）。
@@ -1146,6 +1237,9 @@ fn pick_game_exe() -> Result<Value, String> {
 /// 目录已经在库里时**不报「已经有了」了事**：用户点「手动选择」本来就是要换/指定
 /// 启动文件的，所以那一行会被就地更新（render_exe 与技术检测一起重算）。
 fn add_library_dir(dir: &Path, exe: Option<PathBuf>) -> Result<Value, String> {
+    if let Some(e) = exe.as_deref() {
+        check_exe_readable(e)?;
+    }
     let mut cache = framegen_core::scan::load_library();
     // 用户又把它加回来了：从忽略清单里去掉，免得下次扫描/显示又被藏起来
     let key = framegen_core::scan::path_key(dir);
@@ -1579,6 +1673,31 @@ fn checked_dir(dir: &str) -> Result<std::path::PathBuf, String> {
         return Err(format!("拒绝在系统目录操作：{}", canon.display()));
     }
     Ok(canon)
+}
+
+/// 选中的 exe 必须能被当前进程读取。WindowsApps / XboxGames 受保护目录会直接拒绝，
+/// 提前给用户一句能看懂的话，而不是让他添加成功后在部署时再撞墙。
+fn check_exe_readable(p: &Path) -> Result<(), String> {
+    match std::fs::File::open(p) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let s = p.to_string_lossy().to_lowercase();
+            let protected = s.contains("\\windowsapps\\") || s.contains("\\xboxgames\\");
+            if protected {
+                Err(format!(
+                    "这个 exe 在微软商店 / Xbox 的受保护目录里：{}\n\nWindows 拒绝访问，不允许普通程序读取它（提示「没有打开的权限」）。\n请不要修改 WindowsApps / XboxGames 的权限 —— 会破坏商店更新，也可能触发游戏反作弊。\n\n请改用 Steam / Epic / GOG 版，或把游戏装到普通文件夹后再添加。",
+                    p.display()
+                ))
+            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                Err(format!(
+                    "这个 exe 现在读不了（Windows 拒绝访问）：{}\n\n如果是普通文件夹：右键文件 → 属性 → 安全，给当前用户「读取和执行」权限；\n或右键本程序「以管理员身份运行」再试。\n若游戏正在运行 / 被反作弊或杀毒软件占用，先完全退出游戏。",
+                    p.display()
+                ))
+            } else {
+                Err(format!("读取 exe 失败：{}（{e}）", p.display()))
+            }
+        }
+    }
 }
 
 /// 校验 exe 路径（SM 命令按 exe 定位游戏）。
@@ -2138,6 +2257,7 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
         "backups_info" => Ok(backups_info()),
         "clean_backups" => clean_backups(),
         "log_tail" => Ok(Value::String(log_tail(arg_usize(args, "lines")?))),
+        "diagnostics_export" => diagnostics_export(),
         "open_path" => {
             open_path(arg_str(args, "path")?)?;
             Ok(Value::Null)
@@ -2232,6 +2352,29 @@ fn dispatch(id: u64, cmd: &str, args: &Value) -> Result<Value, String> {
 /// 处理一行请求。**任何情况都不许把进程带走**：
 /// 不是合法 JSON、缺 cmd、参数不对、命令内部 panic —— 全都变成一行 error 回过去，
 /// 然后接着读下一行。用户界面上点错东西顶多弹个提示，不该整个后台进程消失。
+/// 命令参数的摘要：只记 key 和短值，数组/对象只记规模，避免把几百个 pids 写进日志。
+fn args_summary(args: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(m) = args.as_object() {
+        for (k, v) in m {
+            let text = match v {
+                Value::String(s) => {
+                    let mut t: String = s.chars().take(160).collect();
+                    if s.chars().count() > 160 {
+                        t.push('…');
+                    }
+                    t
+                }
+                Value::Array(a) => format!("[{} 项]", a.len()),
+                Value::Object(_) => "{…}".to_owned(),
+                other => other.to_string(),
+            };
+            out.insert(k.clone(), Value::String(text));
+        }
+    }
+    Value::Object(out)
+}
+
 fn handle_line(raw: &str) {
     // 行尾换行、以及从某些管道（PowerShell 的 echo）混进来的 BOM 都要剥掉，
     // 否则 serde 会把它当非法 JSON —— 表现出来就是「明明是对的请求却说解析失败」。
@@ -2257,22 +2400,57 @@ fn handle_line(raw: &str) {
         Some(a) if a.is_object() => a.clone(),
         _ => json!({}),
     };
+    // 高频只读轮询（日志页每 10 秒一次）不写命令日志：否则 log_tail 自己会不停生成新行，
+    // 日志永远在“变”，既费 I/O 又让界面看起来一直在刷新。失败仍然记。
+    let quiet = matches!(cmd, "log_tail" | "ping");
 
     // 单条命令 panic 不许带走整个进程：Electron 那边还挂着一堆 pending 调用，
     // 进程一死它们全部失败。catch_unwind 之后回一条错误行，继续服务。
+    let started = std::time::Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(id, cmd, &args)));
+    let ms = started.elapsed().as_millis() as u64;
     match outcome {
-        Ok(Ok(result)) => write_line(&ok_line(id, result)),
+        Ok(Ok(result)) => {
+            if !quiet {
+                framegen_core::log::line(&format!("[cmd:{cmd}] ok {ms}ms"));
+                framegen_core::log::event(&json!({
+                    "cmd": cmd,
+                    "args": args_summary(&args),
+                    "ok": true,
+                    "ms": ms,
+                    "code": "",
+                }));
+            }
+            write_line(&ok_line(id, result))
+        }
         Ok(Err(e)) => {
             // 诊断用：日志里留下“哪个命令 + 哪个错误码”，用户复制日志即可定位
             let code = err_code(&e);
             framegen_core::log::line(&format!("[cmd:{cmd}] 失败 [{code}] {e}"));
+            framegen_core::log::event(&json!({
+                "cmd": cmd,
+                "args": args_summary(&args),
+                "ok": false,
+                "ms": ms,
+                "code": code,
+                "error": e,
+            }));
             write_line(&err_line(id, &e))
         }
-        Err(_) => write_line(&err_line(
-            id,
-            &format!("命令 {cmd} 内部异常（已捕获，进程继续）"),
-        )),
+        Err(_) => {
+            framegen_core::log::line(&format!("[cmd:{cmd}] panic（已捕获）"));
+            framegen_core::log::event(&json!({
+                "cmd": cmd,
+                "args": args_summary(&args),
+                "ok": false,
+                "ms": ms,
+                "code": "PANIC",
+            }));
+            write_line(&err_line(
+                id,
+                &format!("命令 {cmd} 内部异常（已捕获，进程继续）"),
+            ))
+        }
     }
 }
 

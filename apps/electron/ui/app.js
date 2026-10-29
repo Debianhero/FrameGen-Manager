@@ -482,8 +482,7 @@ function setupTabs() {
     });
   });
 }
-// 诊断信息：版本 / 系统 / 显卡 / 路径 + 最近 2000 行日志（含 shell.log）。
-// 日志页和「复制诊断信息」共用这一份，保证用户看到的和复制出去的完全一致。
+// 诊断信息：版本 / 系统 / 显卡 / 路径。只给日志页的环境信息卡用。
 // （必须是顶层函数：settings.js 的 renderLogEnv 也要调用它。）
 function diagOs() {
   var ua = navigator.userAgent || '';
@@ -505,23 +504,6 @@ function diagEnv() {
     backups: (CFG && CFG.backupsDir) || '-',
     logs: (CFG && CFG.logsDir) || '-'
   };
-}
-function diagHeader() {
-  var e = diagEnv();
-  return [
-    t('=== FrameGen Manager 诊断信息 ==='),
-    t('版本：') + e.version,
-    t('时间：') + new Date().toLocaleString(),
-    t('系统：') + e.os,
-    t('显卡：') + e.gpu + (e.drv ? t('（驱动 ') + e.drv + t('）') : ''),
-    t('游戏库：') + e.games + t(' 个游戏'),
-    t('语言：') + e.lang,
-    t('资产目录：') + e.assets,
-    t('备份目录：') + e.backups,
-    t('日志目录：') + e.logs,
-    '',
-    t('=== 日志（最近 2000 行） ==='),
-  ].join('\n');
 }
 function bind() {
   window.addEventListener('focus', function () { if (ASSETS_DIR !== null) refreshAssets().catch(function () { }); });
@@ -610,26 +592,20 @@ function bind() {
       });
     }).catch(function (e) { toast(t('读取备份情况失败：') + errText(e), 'err', 8000); });
   });
-  if ($('btn-log-copy')) $('btn-log-copy').addEventListener('click', function () {
-    var box = $('log-box');
-    var fallback = box ? box.textContent : '';
-    invoke('log_tail', { lines: 2000 }).catch(function () { return fallback; }).then(function (text) {
-      var body = text || fallback;
-      if (!body) { toast(t('日志是空的。'), 'info', 5000); return; }
-      return copyText(diagHeader() + '\n' + body).then(function () {
-        toast(t('已复制：环境信息 + 日志'), 'ok', 5000);
+  if ($('btn-log-export')) $('btn-log-export').addEventListener('click', function () {
+    busy(this, t('导出中…'), function () {
+      return invoke('diagnostics_export').then(function (r) {
+        toast(t('日志信息已导出：') + (r.path || r.dir || '-'), 'ok', 12000);
+        if (r.path && /\.zip$/i.test(r.path)) openPath(r.path.replace(/[\\/][^\\/]+$/, ''));
+        else if (r.dir) openPath(r.dir);
+        return r;
       });
-    }).catch(function (e) { toast(t('复制失败：') + errText(e), 'err'); });
-  });
-  if ($('btn-log-refresh')) $('btn-log-refresh').addEventListener('click', function () {
-    renderLogEnv();
-    loadLog().catch(function () { });
+    });
   });
   var pOpen = [
     ['btn-open-p-assets', function () { return CFG && CFG.assetsDir; }],
     ['btn-open-p-backups', function () { return CFG && CFG.backupsDir; }],
     ['btn-open-p-logs', function () { return CFG && CFG.logsDir; }],
-    ['btn-log-open', function () { return CFG && CFG.logsDir; }],
     ];
   pOpen.forEach(function (pair) {
     if (!$(pair[0])) return;

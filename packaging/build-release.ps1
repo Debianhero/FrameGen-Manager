@@ -118,6 +118,7 @@ if (Test-Path (Join-Path $dev 'i18n-gen.py')) {
   & $py (Join-Path $dev 'i18n-html-audit.py'); if ($LASTEXITCODE) { $fail++ }
   & $Node (Join-Path $dev 'ui-e2e\check-t-shadow.js'); if ($LASTEXITCODE) { $fail++ }
   & $Node (Join-Path $dev 'ui-e2e\run.js'); if ($LASTEXITCODE) { $fail++ }
+  & $Node (Join-Path $root 'packaging\ipc-contract-check.js'); if ($LASTEXITCODE) { $fail++ }
   & $py (Join-Path $dev 'i18n-sync.py'); if ($LASTEXITCODE) { $fail++ }
   if ($fail) { throw "七道校验有 $fail 项不通过，中止打包" }
   Write-Output '  七道校验全部通过'

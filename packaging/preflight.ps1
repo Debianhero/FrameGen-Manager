@@ -70,6 +70,19 @@ if (-not (Test-Path $cov)) {
   }
 }
 
+Write-Output '== 3b. IPC contract =='
+$ipc = Join-Path $root 'packaging\ipc-contract-check.js'
+if (Test-Path $ipc) {
+  if ($node) {
+    & node $ipc 2>&1 | ForEach-Object { Write-Output ('  ' + $_) }
+    if ($LASTEXITCODE -ne 0) { $fail += 'IPC contract'; Write-Output '  [BAD] IPC contract failed' }
+  } else {
+    Write-Output '  skipped (node not found)'
+  }
+} else {
+  Write-Output '  skipped (dev-only not found)'
+}
+
 if (-not $SkipTests) {
   Write-Output '== 4. cargo test =='
   Push-Location $root

@@ -1,0 +1,73 @@
+{
+  "self_update_download": [
+    "version"
+  ],
+  "deploy_game": [
+    "dir",
+    "proxy",
+    "optimized",
+    "frames"
+  ],
+  "restore": [
+    "dir"
+  ],
+  "open_path": [
+    "path"
+  ],
+  "log_tail": [
+    "lines"
+  ],
+  "clean_legacy": [
+    "dir"
+  ],
+  "proxy_advice": [
+    "dir"
+  ],
+  "gpu_spoof_apply": [
+    "name"
+  ],
+  "list_exes": [
+    "dir"
+  ],
+  "add_game_at": [
+    "dir"
+  ],
+  "pick_game_exe_at": [
+    "exe"
+  ],
+  "remove_game": [
+    "dir"
+  ],
+  "restore_removed": [
+    "key"
+  ],
+  "dlss5_deploy": [
+    "dir"
+  ],
+  "dlss5_uninstall": [
+    "dir"
+  ],
+  "dlss5_detect": [
+    "dir"
+  ],
+  "dlss5_restore": [
+    "dir"
+  ],
+  "set_config": [
+    "optimized",
+    "frames"
+  ],
+  "sm_set_game": [
+    "name",
+    "exe"
+  ],
+  "sm_turn_off_game": [
+    "name"
+  ],
+  "sm_asset_deploy": [
+    "dir"
+  ],
+  "sm_asset_restore": [
+    "dir"
+  ]
+}

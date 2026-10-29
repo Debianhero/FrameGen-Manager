@@ -116,23 +116,6 @@
     return n + ' B';
   }
 
-  function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
-    return new Promise(function (resolve, reject) {
-      try {
-        var ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        var ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        if (ok) resolve(); else reject(new Error(t('浏览器拒绝了复制')));
-      } catch (e) { reject(e); }
-    });
-  }
-
   function deployLsGet(k, d) {
     try { var v = localStorage.getItem('fgm.deploy.' + k); return v === null ? d : v; } catch (e) { return d; }
   }

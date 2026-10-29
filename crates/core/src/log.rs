@@ -27,6 +27,11 @@ pub const CUR_NAME: &str = "framegen.log";
 /// 为什么不只留一份：用户常常是先关掉程序、过一会儿才来反馈，只留一份的话
 /// 出问题那趟的记录已经被这次启动覆盖了；留两份刚好既能查、又不堆积。
 pub const PREV_NAME: &str = "framegen.prev.log";
+/// 单文件超过 4 MB 就滚到 prev，避免一次长时间运行写出一个几百 MB 的日志。
+pub const MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// 结构化事件日志（一行一个 JSON）：命令 / 参数 / 耗时 / 结果 / 错误码。
+pub const EVENTS_NAME: &str = "events.jsonl";
+pub const EVENTS_PREV_NAME: &str = "events.prev.jsonl";
 
 static FILE: OnceLock<Mutex<File>> = OnceLock::new();
 static PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -108,10 +113,65 @@ pub fn rotate(d: &Path) -> PathBuf {
 pub fn line(msg: &str) {
     let Some(m) = FILE.get() else { return };
     let Ok(mut f) = m.lock() else { return };
+    // 单次运行太久时按大小滚一次；文件名仍是 cur/prev 两个，不堆文件。
+    if let Some(p) = PATH.get() {
+        let prev = p.with_file_name(PREV_NAME);
+        if rotate_if_too_big(p, &prev, MAX_BYTES) {
+            if let Ok(nf) = OpenOptions::new().create(true).append(true).open(p) {
+                *f = nf;
+            }
+        }
+    }
     // 日志是用户要发给别人的东西：写盘前把用户名换掉（见 util::redact）。
     let _ = writeln!(f, "[{}] {}", clock(), util::redact(msg));
     let _ = f.flush();
 }
+
+/// 结构化事件：一行一个 JSON。给「导出诊断包」和后续自动分析用。
+///
+/// 写失败静默（日志绝不能影响命令本身）；参数由调用方先做摘要，这里只补时间。
+pub fn event(v: &serde_json::Value) {
+    let Some(d) = dir() else { return };
+    let p = d.join(EVENTS_NAME);
+    let prev = d.join(EVENTS_PREV_NAME);
+    let _ = rotate_if_too_big(&p, &prev, MAX_BYTES);
+    let mut obj = match v {
+        serde_json::Value::Object(o) => o.clone(),
+        other => {
+            let mut o = serde_json::Map::new();
+            o.insert("event".to_owned(), other.clone());
+            o
+        }
+    };
+    obj.insert("ts".to_owned(), serde_json::json!(clock()));
+    obj.insert(
+        "epoch".to_owned(),
+        serde_json::json!(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)),
+    );
+    let Ok(text) = serde_json::to_string(&serde_json::Value::Object(obj)) else { return };
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = writeln!(f, "{}", util::redact(&text));
+        let _ = f.flush();
+    }
+}
+
+/// 超过 max 就把 cur 改名成 prev（旧的 prev 删掉）；返回是否滚过。
+/// 抽出来是为了能用临时目录测，不依赖 init 的全局句柄。
+fn rotate_if_too_big(cur: &Path, prev: &Path, max: u64) -> bool {
+    let too_big = std::fs::metadata(cur).map(|m| m.len() > max).unwrap_or(false);
+    if !too_big {
+        return false;
+    }
+    let _ = std::fs::remove_file(prev);
+    if std::fs::rename(cur, prev).is_err() {
+        let _ = std::fs::remove_file(cur);
+    }
+    true
+}
+
 
 /// 一段操作的开始标记
 pub fn section(title: &str) {
@@ -124,3 +184,31 @@ fn clock() -> String {
     util::now_local_hms()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_rotation_moves_current_to_prev() {
+        let d = std::env::temp_dir().join(format!(
+            "fgm-log-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|x| x.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let cur = d.join(CUR_NAME);
+        let prev = d.join(PREV_NAME);
+        std::fs::write(&cur, vec![b'x'; 64]).unwrap();
+        assert!(rotate_if_too_big(&cur, &prev, 32));
+        assert!(!cur.exists());
+        assert_eq!(std::fs::metadata(&prev).unwrap().len(), 64);
+        // 没超限不滚
+        std::fs::write(&cur, b"short").unwrap();
+        assert!(!rotate_if_too_big(&cur, &prev, 32));
+        assert!(cur.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

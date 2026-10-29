@@ -1026,6 +1026,8 @@ fn restore_with(manifest: &BackupManifest) -> Result<RestoreOutcome> {
     let mut unreadable: Vec<(String, String)> = Vec::new();
     // 记录说"这个位置原本就有文件"，但那份"原件"其实是我们自己放进去的 —— 不能写回
     let mut healed: Vec<String> = Vec::new();
+    // 游戏自带的 NVIDIA DLSS 运行库：没有原件备份时**不删**（删了游戏会丢帧生成选项）
+    let mut kept_game_libs: Vec<String> = Vec::new();
     let mut plan = BackupPlan::new();
     for ((rel, _existed, bytes), r) in loaded.entries.into_iter().zip(refs.iter()) {
         // 清单里的路径非法（被篡改/损坏）：跳过，绝不按原始字符串拼路径去删/写
@@ -1088,7 +1090,13 @@ fn restore_with(manifest: &BackupManifest) -> Result<RestoreOutcome> {
         if still_ours {
             // 有原件的那几条由回滚写回原件（等于覆盖掉它），这里只登记「这次新建的」
             if plan.existed_before(&e.rel_path) != Some(true) {
-                plan.push(e.rel_path.clone(), false, Vec::new());
+                if is_protected_game_lib(&e.rel_path) {
+                    // 没有备份能证明这个位置原本是什么：保留它。删掉游戏自带的
+                    // nvngx_dlssg.dll 会让 DLSS 帧生成选项直接消失（Cyberpunk 实测）。
+                    kept_game_libs.push(e.rel_path.clone());
+                } else {
+                    plan.push(e.rel_path.clone(), false, Vec::new());
+                }
             }
         } else {
             skipped.push(e.rel_path.clone());
@@ -1157,6 +1165,12 @@ fn restore_with(manifest: &BackupManifest) -> Result<RestoreOutcome> {
             "；{} 个文件读不出来、没法确认归属，已跳过（{}）",
             unreadable.len(),
             shown.join("、")
+        ));
+    }
+    if !kept_game_libs.is_empty() {
+        msg.push_str(&format!(
+            "\n\n· 保留了 {}（游戏自带的 DLSS 文件；删掉会让游戏里的 DLSS 帧生成选项消失，需要时用 Steam「验证文件完整性」恢复）。",
+            kept_game_libs.join("、")
         ));
     }
     if !rb.failed.is_empty() {
@@ -1240,15 +1254,9 @@ pub fn manual_files(dir: &Path) -> Vec<String> {
     if out.is_empty() {
         return out;
     }
-    for n in ["nvngx_dlssg.dll", "nvngx_dlss.dll"] {
-        let p = dir.join(n);
-        // **归属校验**：这两份运行库是 NVIDIA 官方签名的，游戏自带的也是同一份签名 ——
-        // 光看签名分不出是谁放的，只能按内容认（我们发布过的版本有精确指纹）。
-        // 对不上就**不动它**：这里没有备份，宁可留下一个文件，也不能把游戏原件永久删掉。
-        if p.is_file() && std::fs::read(&p).map(|b| is_known_ours(n, &b)).unwrap_or(false) {
-            out.push(n.to_owned());
-        }
-    }
+    // nvngx_dlssg.dll / nvngx_dlss.dll 不列入：它们和游戏自带的是同一份 NVIDIA DLL，
+    // 没有备份就删除会直接破坏游戏的 DLSS 帧生成（Cyberpunk 2077 实测）。
+    // 有部署记录时由 restore 按备份处理；没有记录时一律不动。
     let p = dir.join(INI_NAME);
     if p.is_file() && std::fs::read(&p).map(|b| is_known_ours(INI_NAME, &b)).unwrap_or(false) {
         out.push(INI_NAME.to_owned());
@@ -1616,6 +1624,26 @@ pub fn verify_asset_inventory(runtime_src: &Path) -> Vec<String> {
     bad
 }
 
+/// 游戏自带的 NVIDIA DLSS 运行库。它们和本工具内置/旧版发布的 DLL 可能是**同一份文件**
+/// （NVIDIA 官方签名、逐字节相同），按名字/大小/哈希都无法区分归属。
+///
+/// 因此：**任何清理/还原路径都不许在没有逐字节备份的情况下删除它们** ——
+/// 删掉 Cyberpunk 这类游戏的 nvngx_dlssg.dll，游戏里的 DLSS 帧生成选项会直接消失，
+/// 只能靠 Steam「验证文件完整性」重新下载（2026-10 用户实测）。
+pub const PROTECTED_GAME_LIBS: [&str; 2] = ["nvngx_dlssg.dll", "nvngx_dlss.dll"];
+
+/// 这个路径（可以是子目录里的）是不是游戏自带的 DLSS 运行库。
+pub fn is_protected_game_lib(name: &str) -> bool {
+    let norm = name.replace('/', "\\").to_ascii_lowercase();
+    // dlssg_sm86\runtime\ 下的是我们随包部署的现代运行库，不是游戏自带文件；
+    // 它必须能被正常备份/还原，否则重复部署会被当成游戏原件。
+    if norm.starts_with("dlssg_sm86\\") || norm.contains("\\dlssg_sm86\\") {
+        return false;
+    }
+    let short = norm.rsplit('\\').next().unwrap_or(&norm);
+    PROTECTED_GAME_LIBS.iter().any(|n| short.eq_ignore_ascii_case(n))
+}
+
 /// 0.3.x 那一套（我们 1.0.x 版本发布时内置的资产）的精确内容指纹：(文件名, 字节数, sha256)。
 ///
 /// 为什么需要它：**那两份 NVIDIA 运行库没法按签名认** —— 它们是 NVIDIA 官方签名的，
@@ -1864,6 +1892,11 @@ pub fn deployed_assets(dir: &Path) -> Option<DeployedAssets> {
 pub fn legacy_leftover_candidates(dir: &Path) -> Vec<(String, u64)> {
     let mut out = Vec::new();
     for (name, size, _sha) in LEGACY_ARTIFACTS {
+        // 游戏自带的 NVIDIA DLSS 运行库：名字/大小/哈希都可能和我们旧资产一致，
+        // 但不能据此认定是我们的文件。永远不列入清理候选。
+        if is_protected_game_lib(name) {
+            continue;
+        }
         let p = dir.join(name);
         if let Ok(m) = std::fs::metadata(&p) {
             if m.is_file() && m.len() == *size {
@@ -1885,6 +1918,9 @@ pub fn clean_legacy_leftovers(dir: &Path) -> (Vec<String>, Vec<String>) {
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
     for (name, size) in legacy_leftover_candidates(dir) {
+        if is_protected_game_lib(&name) {
+            continue;
+        }
         let p = dir.join(&name);
         let Ok(bytes) = std::fs::read(&p) else {
             failed.push(format!("{name}（读不出来）"));
@@ -1918,6 +1954,11 @@ pub fn clean_legacy_leftovers(dir: &Path) -> (Vec<String>, Vec<String>) {
 ///
 /// 不要用备份文件的文件名去比指纹：备份名带 .bak 后缀，比不出东西。
 pub fn is_our_artifact(path: &Path, name: &str, bytes: &[u8]) -> bool {
+    // NVIDIA 那两份运行库和游戏自带的是同一份文件：永远不要声称是我们的。
+    // 否则部署时不会备份游戏原件，还原时会把游戏文件当我们的删掉。
+    if is_protected_game_lib(name) {
+        return false;
+    }
     if crate::scan::identify_dll(path).is_ours() {
         return true;
     }
@@ -2073,6 +2114,38 @@ mod proxy_inventory_tests {
             let got = crate::util::sha256_file(&f).expect("sha256");
             assert!(got.eq_ignore_ascii_case(sha), "{name} 哈希与表不符");
         }
+    }
+
+    /// 游戏自带的 NVIDIA DLSS 运行库不能被当成 0.3.x 残留删掉。
+    /// 回归：Cyberpunk 2077 的 bin\x64\nvngx_dlssg.dll 与旧资产逐字节相同，
+    /// 旧逻辑在还原/自动清理时把它删了，游戏里的 DLSS 帧生成选项直接消失。
+    #[test]
+    fn protected_game_libs_are_never_legacy_leftovers() {
+        let d = std::env::temp_dir().join(format!(
+            "fgm-protected-lib-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|x| x.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("nvngx_dlssg.dll");
+        let file = std::fs::File::create(&f).unwrap();
+        file.set_len(7_460_976).unwrap();
+        drop(file);
+
+        assert!(legacy_leftover_candidates(&d).is_empty());
+        let (deleted, failed) = clean_legacy_leftovers(&d);
+        assert!(deleted.is_empty(), "protected lib must not be deleted: {deleted:?}");
+        assert!(failed.is_empty());
+        assert!(f.is_file());
+
+        assert!(is_protected_game_lib("C:\\Game\\bin\\x64\\NVNGX_DLSSG.DLL"));
+        assert!(is_protected_game_lib("nvngx_dlss.dll"));
+        assert!(!is_protected_game_lib("version.dll"));
+        assert!(!is_our_artifact(&f, "nvngx_dlssg.dll", b"whatever"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// T5：ReShade 兜底表的形状（大小写无关比较依赖 64 位十六进制）。
