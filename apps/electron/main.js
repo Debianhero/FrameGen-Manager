@@ -90,6 +90,8 @@ let sidecarStarting = null;
 let nextId = 1;
 const pending = new Map();
 let selfUpdateBusy = false;
+// 最近一次「发现新版本」的版本号：界面若漏传 version，主进程兜底补上。
+let lastUpdateOffer = null;
 let mainWin = null;
 let quitting = false;
 
@@ -502,6 +504,7 @@ function runInstaller(installer) {
 
 async function offerSelfUpdate(info) {
   const version = info.latest;
+  lastUpdateOffer = { latest: version, current: info.current };
   let proceed = UPDATE_YES || SIMULATE_UPDATE || !!(info && info.simulate);
   if (!proceed && !UPDATE_FROM) {
     // 用**应用内自绘弹窗**（原生 MessageBox 与本软件风格不符，长日志还会被截断）：
@@ -763,6 +766,14 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(function () {
     ipcMain.handle('fgm:invoke', function (_e, cmd, args) {
+      // 自更新下载：界面没带 version 时用最近一次检查到的版本兜底。
+      // 再漏就由 sidecar 自己取最新版本 —— 尽量不让用户看到「缺少参数 version」。
+      if (cmd === 'self_update_download') {
+        args = Object.assign({}, args || {});
+        if (!args.version && lastUpdateOffer && lastUpdateOffer.latest) {
+          args.version = lastUpdateOffer.latest;
+        }
+      }
       if (PICKERS[cmd]) return pickFileThenCall(PICKERS[cmd]);
       if (cmd === 'cancel_self_update') {
         // 用户要求「点了停止就**立刻**停」：置位取消标志要等一次阻塞读取返回（最长 20 秒），

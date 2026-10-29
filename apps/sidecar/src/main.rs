@@ -2112,8 +2112,15 @@ fn check_self_update() -> Result<Value, String> {
 /// 启动安装程序、然后退出自己。这里只负责「下载 + 校验」，校验不过绝不返回路径
 /// （哈希取自发布时的 SHA256SUMS.txt，且清单只走官方源，不走镜像）。
 fn self_update_download(id: u64, args: &Value) -> Result<Value, String> {
-    let version = arg_str(args, "version")?;
     let client = framegen_core::update::client().map_err(|e| format!("{e:#}"))?;
+    // version 现在**不再是必填**：万一界面/旧调用方漏传，后台自己取最新版本。
+    // 这样即便前端再出现「少传参数」，用户也不会看到「缺少参数 version」。
+    let version = match arg_opt_str(args, "version")? {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => framegen_core::update::fetch_latest_self_version(&client).ok_or_else(|| {
+            "无法确定最新版本（网络不可用或还没有发布版本）。请先点「检查更新」，或到发布页手动下载安装包。".to_owned()
+        })?,
+    };
     // 用**共享**的取消标志（cancel_self_update 命令置位的就是它），每次开始前复位。
     let cancel = selfupdate_cancel();
     cancel.store(false, std::sync::atomic::Ordering::SeqCst);
